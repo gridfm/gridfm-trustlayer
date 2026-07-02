@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gridfm-trustlayer"
+version = "0.0.1"
+description = "Conformal trustworthiness layer for GridFM foundation models"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "Antonio Alcantara", email = "anmata@dtu.dk" }]
+dependencies = [
+  "numpy>=2.2",
+  "pandas>=2.3",
+  "pyarrow>=15",
+  "numba>=0.60",
+  "scipy>=1.13",
+  "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+graphkit = ["gridfm-graphkit>=0.0.6", "gridfm-datakit>=1.0.2"]
+dev = ["ruff", "mypy", "pre-commit", "build"]
+test = ["pytest", "pytest-cov"]
+
+[tool.setuptools.packages.find]
+include = ["gridfm_trustlayer*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+files = ["gridfm_trustlayer", "tests"]
+warn_unused_configs = true
