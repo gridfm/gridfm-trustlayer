@@ -1,6 +1,10 @@
-site_name = "gridfm-trustlayer"
-site_description = "Conformal trustworthiness layer for GridFM foundation models"
-repo_name = "gridfm/gridfm-trustlayer"
+site_name: gridfm-trustlayer
+site_description: Conformal trustworthiness layer for GridFM foundation models
+repo_name: gridfm/gridfm-trustlayer
 
 nav:
   - Home: index.md
+  - Methodology: methodology.md
+  - CLI Reference: cli.md
+  - Configuration: configuration.md
+  - Schemas: schemas.md

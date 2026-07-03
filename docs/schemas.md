@@ -1,0 +1,345 @@
+# Schemas
+
+This page documents the current artifact families consumed and produced by `gridfm-trustlayer`.
+
+The examples below are grounded in the active `case24_ieee_rts` workflow, but the intent of this page is broader than one fixture: it explains the schema patterns and task semantics trustlayer currently expects.
+
+## Scope
+
+This page covers:
+
+- graphkit prediction artifacts used as trustlayer inputs
+- datakit raw ground-truth parquets used as trustlayer inputs
+- the derived `line_loading` computation path
+- the calibrated parquet and CSV artifacts produced by trustlayer
+
+This page does not define a long-term compatibility guarantee for every future task export. It describes the currently implemented boundary.
+
+## Artifact families
+
+Trustlayer currently works with four main artifact families.
+
+### Prediction artifacts
+
+Produced by graphkit.
+
+Examples:
+
+- PF-style bus parquet: `<grid>_predictions.parquet`
+- OPF bus parquet: `<grid>_predictions.parquet`
+- OPF generator parquet: `<grid>_gen_predictions.parquet`
+
+### Ground-truth artifacts
+
+Produced by datakit.
+
+Examples:
+
+- `raw/bus_data.parquet`
+- `raw/branch_data.parquet`
+
+### Trustlayer calibration artifacts
+
+Produced by `gridfm_trustlayer compute`.
+
+Example:
+
+- `*.trustlayer`
+
+### Trustlayer calibrated and screening outputs
+
+Produced by `gridfm_trustlayer calibrate` and `gridfm_trustlayer screen`.
+
+Examples:
+
+- calibrated voltage parquet
+- calibrated line-loading parquet
+- trust-analysis CSVs
+- trust-summary CSVs
+- trust-screen CSVs
+
+## Prediction artifacts
+
+### Common row layout
+
+The current bus prediction parquet layout is long-form:
+
+- one row per `(scenario, bus)`
+
+The active case24 PF example has shape `(72000, 22)`, which corresponds to `3000` scenarios and `24` buses.
+
+### Common bus-level fields
+
+Typical fields used by trustlayer include:
+
+- `scenario`
+- `bus`
+- `Vm_target`
+- `Va_target`
+- `Pg_target`
+- `Qg_target`
+- `Vm_pred`
+- `Va_pred`
+- `Pg_pred`
+- `Qg_pred`
+- `PQ`
+- `PV`
+- `REF`
+
+Additional task-specific or evaluation columns may also be present, such as:
+
+- `Pd`
+- `Qd`
+- `Vm_min`
+- `Vm_max`
+- `Qg_min`
+- `Qg_max`
+- `active res. (MW)`
+- `reactive res. (MVar)`
+- `PBE`
+
+### PowerFlow semantics
+
+Current PF interpretation:
+
+- `Vm_target`, `Va_target`, `Pg_target`, and `Qg_target` are direct targets exposed in the prediction parquet
+- `Vm_pred`, `Va_pred`, `Pg_pred`, and `Qg_pred` are raw graphkit prediction outputs
+- `PQ`, `PV`, and `REF` encode bus-type masks
+
+Important note:
+
+- graphkit computes PF residual metrics from a clamped evaluation tensor
+- the exported `*_pred` columns remain the raw model outputs
+- trustlayer applies PF-specific correction rules behind the task adapter rather than assuming the exported predictions are already clamped
+
+In the current loader behavior:
+
+- `Vm` is clamped on `PV` and `REF` buses
+- `Va` is clamped on `REF` buses
+- `Pg_pred` and `Qg_pred` remain available as raw direct-output channels in `PredictionSet.channels`
+
+### OptimalPowerFlow semantics
+
+Current OPF behavior differs from PF and should not be interpreted with PF clamping rules.
+
+Current OPF artifacts:
+
+- one bus parquet: `<grid>_predictions.parquet`
+- one generator parquet: `<grid>_gen_predictions.parquet`
+
+Current OPF semantics documented in trustlayer:
+
+- bus `Pg_pred` is generator-derived, not an independent raw bus target
+- bus `Qg_pred` is not a free PF-style direct head
+- OPF generator prediction rows are currently long-form per scenario
+- generator `idx` is not assumed to be a stable cross-scenario physical generator identifier
+
+Trustlayer therefore preserves the OPF generator artifact as a first-class input instead of forcing it into a rectangular bus-only schema.
+
+## Ground-truth artifacts
+
+Trustlayer currently builds its ground-truth view from datakit raw parquets.
+
+Examples:
+
+- `data_out_pf/<grid>/raw/bus_data.parquet`
+- `data_out_pf/<grid>/raw/branch_data.parquet`
+- `data_out_opf/<grid>/raw/bus_data.parquet`
+- `data_out_opf/<grid>/raw/branch_data.parquet`
+
+### Bus data
+
+Current row layout:
+
+- one row per `(scenario, bus)`
+
+Fields currently used by trustlayer include:
+
+- `scenario`
+- `bus`
+- `Pg`
+- `Qg`
+- `Vm`
+- `Va`
+- `PQ`
+- `PV`
+- `REF`
+- `vn_kv`
+
+Current interpretation:
+
+- `Vm` and `Va` are loaded as rectangular `(n_scenarios, n_buses)` arrays
+- `Pg` and `Qg` are preserved as direct ground-truth channels where relevant
+- bus-type masks are preserved as rectangular arrays
+- `vn_kv` is used to derive base voltage for loading computation
+
+Angle convention:
+
+- datakit raw `Va` may be stored in degrees
+- graphkit prediction artifacts use radians
+- trustlayer normalizes degree-scale raw `Va` to radians inside `load_ground_truth()`
+
+### Branch data
+
+Current row layout:
+
+- one row per `(scenario, branch_idx)`
+
+Fields currently used by trustlayer include:
+
+- `scenario`
+- `idx`
+- `from_bus`
+- `to_bus`
+- `rate_a`
+- `br_status`
+- `Yff_r`
+- `Yff_i`
+- `Yft_r`
+- `Yft_i`
+- `Ytf_r`
+- `Ytf_i`
+- `Ytt_r`
+- `Ytt_i`
+
+Current interpretation:
+
+- `idx` defines the rectangular branch axis
+- `br_status != 1` marks inactive branches
+- `n_outages` is derived from inactive-branch counts per scenario
+- `from_bus`, `to_bus`, and `rate_a` are taken from the first scenario as topology and rating reference columns
+- the complex admittance coefficients are kept as aligned rectangular arrays
+
+## Derived `line_loading`
+
+Current implementation location:
+
+- `gridfm_trustlayer/io/loading.py`
+
+Current datakit-backed helper path:
+
+- `gridfm_datakit.utils.power_balance.compute_branch_powers_vectorized`
+
+Current flow:
+
+1. build a bus dataframe from aligned `Vm` and `Va`
+2. build a branch dataframe from topology, status, ratings, and admittances
+3. delegate AC branch-flow computation to datakit
+4. compute loading as `max(|S_from|, |S_to|) / rate_a`
+5. set inactive or unrated branches to `-1`
+
+Scale convention:
+
+- `0.5` means 50% of the branch rating
+- `1.0` means 100% of the branch rating
+- `> 1.0` means overload relative to `rate_a`
+
+Behavioral reference:
+
+- `gridfm_datakit.validation` remains the semantic reference for loading rules
+- trustlayer reuses the datakit branch-power helper rather than copying the loading math locally
+
+## Trustlayer runtime objects
+
+`load_predictions()` currently returns a `PredictionSet` containing:
+
+- `task_name`
+- `channel_names`
+- `scenario_ids`
+- `bus_ids`
+- `Vm`
+- `Va`
+- `channels`
+- `bus_type_masks`
+
+`load_ground_truth()` currently returns a `GroundTruthSet` containing:
+
+- `scenario_ids`
+- `bus_ids`
+- `branch_ids`
+- `n_outages`
+- `removed_mask`
+- `Vm`
+- `Va`
+- `channels`
+- `admittances`
+- `f_bus`
+- `t_bus`
+- `rate_a`
+- `base_kv`
+- `sn_mva`
+- `bus_type_masks`
+
+## Trustlayer produced artifacts
+
+### `.trustlayer` artifact
+
+Produced by `compute`.
+
+Contains:
+
+- one calibrator for voltage targets, or
+- one calibrator for line-loading targets, or
+- a bundle containing separate calibrators for each target family in a mixed run
+
+### Calibrated voltage parquet
+
+Produced by `calibrate` when bus-level targets are present.
+
+Typical columns include:
+
+- original prediction parquet columns
+- `Vm_pi_lower`, `Vm_pi_upper` when `Vm` is calibrated
+- `Va_pi_lower`, `Va_pi_upper` when `Va` is calibrated
+
+### Calibrated line-loading parquet
+
+Produced by `calibrate` when `line_loading` is requested.
+
+Typical columns include:
+
+- `scenario`
+- `branch`
+- `from_bus`
+- `to_bus`
+- `rate_a`
+- `line_loading_pred`
+- `line_loading_target`
+- `line_loading_pi_lower`
+- `line_loading_pi_upper`
+
+### Analysis CSVs
+
+Produced by `calibrate`.
+
+Voltage side:
+
+- `trust_analysis_volt.csv`
+- `trust_summary_volt.csv`
+
+Line side:
+
+- `trust_analysis_line.csv`
+- `trust_summary_line.csv`
+
+### Screening CSVs
+
+Produced by `screen`.
+
+Voltage side:
+
+- `trust_screen_detail_volt.csv`
+- `trust_screen_entity_volt.csv`
+- `trust_screen_summary_volt.csv`
+
+Line side:
+
+- `trust_screen_detail_line.csv`
+- `trust_screen_entity_line.csv`
+- `trust_screen_summary_line.csv`
+
+## Known limits
+
+- SE export documentation remains incomplete until a concrete graphkit artifact is available
+- OPF generator identity is still scenario-local in the active real export
+- this page documents the currently implemented boundary, not every future schema variant

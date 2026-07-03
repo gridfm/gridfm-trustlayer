@@ -1,0 +1,49 @@
+# Example trustlayer config for a mixed PowerFlow run covering voltage and line loading.
+version: 1
+
+task_name: PowerFlow
+cp_type: base
+alpha: 0.1
+calibration_fraction: null
+random_seed: 7
+# A single run can request voltage intervals and derived line-loading intervals
+# together. The CLI will store one combined artifact and then write separate
+# calibrated parquet outputs for voltages and line loadings.
+variables:
+  - Vm
+  - Va
+  - line_loading
+
+screen_bounds:
+  Vm:
+    lower: 0.95
+    upper: 1.05
+  line_loading:
+    lower: 0.0
+    upper: 1.0
+
+inputs:
+  predictions: path/to/grid_predictions.parquet
+  generator_predictions: null
+  pf_node: path/to/pf_node.parquet
+  pf_edge: path/to/pf_edge.parquet
+  # Optional fallback analysis truth for `calibrate` when the predictions parquet
+  # does not carry *_target columns. When omitted, `calibrate` reuses pf_node/pf_edge.
+  analysis_pf_node: null
+  analysis_pf_edge: null
+
+outputs:
+  # `compute` writes one combined artifact when multiple target families are requested.
+  artifact: trustlayer_outputs/powerflow/base/grid_predictions_vm_va_line_loading.trustlayer
+  # `calibrate` writes separate parquet outputs because bus-level and branch-level
+  # predictions have different shapes.
+  calibrated_predictions_volt: trustlayer_outputs/powerflow/base/grid_predictions_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/powerflow/base/grid_predictions_line_loading_with_intervals.parquet
+  # `screen` writes detailed CSVs, aggregate confusion summaries, and figures here.
+  screen_dir: trustlayer_outputs/powerflow/base/screen
+
+commands:
+  screen:
+    variables:
+      - Vm
+      - line_loading

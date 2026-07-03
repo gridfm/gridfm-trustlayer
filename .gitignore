@@ -1,8 +1,9 @@
-data_out
-logs
-site
-.julia
-/data/
+data_out_pf/
+data_out_opf/
+logs/
+site/
+.julia/
+data/case*
 __pycache__/
 *.egg-info/
 *.log
@@ -14,13 +15,23 @@ __pycache__/
 .ruff_cache/
 .venv/
 .vscode/
-IMPLEMENTATION_PLAN.md
-checklist.md
-conformal_layer_int*
 build/
 dist/
 htmlcov/
 mlruns/
+models/
 run_*
-site/
+predictions_test*
+trustlayer_outputs/
 venv/
+
+# Internal planning and local notes
+IMPLEMENTATION_PLAN.md
+checklist.md
+conformal_layer_int*
+notes*
+
+# Keep one generic example config under version control, but ignore local run configs.
+config_files/*
+!config_files/
+!config_files/trust_config.yaml
