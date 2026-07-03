@@ -66,7 +66,9 @@ class NaiveIntervalCalibrator:
         """Fit naive residual-quantile intervals from aligned predictions and targets."""
 
         _validate_alpha(alpha)
-        _validate_entity_alignment(_get_entity_ids(predictions), _get_entity_ids(ground_truth))
+        _validate_entity_alignment(
+            _get_entity_ids(predictions), _get_entity_ids(ground_truth)
+        )
         if not np.array_equal(predictions.scenario_ids, ground_truth.scenario_ids):
             raise ValueError(
                 "Prediction and ground-truth scenario_ids must be aligned before fitting.",
@@ -78,7 +80,9 @@ class NaiveIntervalCalibrator:
         for channel_name in selected_channels:
             prediction_values = _get_prediction_channel(predictions, channel_name)
             target_values = _get_ground_truth_channel(ground_truth, channel_name)
-            residuals = (target_values - prediction_values).astype(FLOAT32_DTYPE, copy=False)
+            residuals = (target_values - prediction_values).astype(
+                FLOAT32_DTYPE, copy=False
+            )
             valid_mask = _combine_valid_masks(
                 _get_valid_mask(predictions, channel_name),
                 _get_valid_mask(ground_truth, channel_name),
@@ -113,8 +117,12 @@ class NaiveIntervalCalibrator:
         intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for channel_name in self.channel_names:
             prediction_values = _get_prediction_channel(predictions, channel_name)
-            lower = prediction_values + self.lower_residual_quantiles[channel_name][None, :]
-            upper = prediction_values + self.upper_residual_quantiles[channel_name][None, :]
+            lower = (
+                prediction_values + self.lower_residual_quantiles[channel_name][None, :]
+            )
+            upper = (
+                prediction_values + self.upper_residual_quantiles[channel_name][None, :]
+            )
             valid_mask = _get_valid_mask(predictions, channel_name)
             if valid_mask is not None:
                 lower = np.where(valid_mask, lower, prediction_values)
@@ -138,9 +146,15 @@ class NaiveIntervalCalibrator:
             "channel_names": list(self.channel_names),
             "calibration_fraction": self.calibration_fraction,
             "random_seed": self.random_seed,
-            "split_pool_scenario_ids": None if self.split_pool_scenario_ids is None else self.split_pool_scenario_ids.tolist(),
-            "calibration_scenario_ids": None if self.calibration_scenario_ids is None else self.calibration_scenario_ids.tolist(),
-            "application_scenario_ids": None if self.application_scenario_ids is None else self.application_scenario_ids.tolist(),
+            "split_pool_scenario_ids": None
+            if self.split_pool_scenario_ids is None
+            else self.split_pool_scenario_ids.tolist(),
+            "calibration_scenario_ids": None
+            if self.calibration_scenario_ids is None
+            else self.calibration_scenario_ids.tolist(),
+            "application_scenario_ids": None
+            if self.application_scenario_ids is None
+            else self.application_scenario_ids.tolist(),
             "lower_residual_quantiles": {
                 key: values.tolist()
                 for key, values in self.lower_residual_quantiles.items()
@@ -164,10 +178,14 @@ class NaiveIntervalCalibrator:
             raise ValueError("Interval artifact field 'channel_names' must be a list.")
         raw_lower_residual_quantiles = data.get("lower_residual_quantiles")
         if not isinstance(raw_lower_residual_quantiles, dict):
-            raise ValueError("Interval artifact field 'lower_residual_quantiles' must be a mapping.")
+            raise ValueError(
+                "Interval artifact field 'lower_residual_quantiles' must be a mapping."
+            )
         raw_upper_residual_quantiles = data.get("upper_residual_quantiles")
         if not isinstance(raw_upper_residual_quantiles, dict):
-            raise ValueError("Interval artifact field 'upper_residual_quantiles' must be a mapping.")
+            raise ValueError(
+                "Interval artifact field 'upper_residual_quantiles' must be a mapping."
+            )
 
         channel_names = tuple(str(name) for name in raw_channel_names)
         lower_residual_quantiles = {
@@ -180,16 +198,24 @@ class NaiveIntervalCalibrator:
         }
         return cls(
             alpha=float(cast(Any, data["alpha"])),
-            entity_ids=np.asarray(data.get("entity_ids", data.get("bus_ids")), dtype=np.int64),
+            entity_ids=np.asarray(
+                data.get("entity_ids", data.get("bus_ids")), dtype=np.int64
+            ),
             entity_name=str(data.get("entity_name", "bus")),
             channel_names=channel_names,
             lower_residual_quantiles=lower_residual_quantiles,
             upper_residual_quantiles=upper_residual_quantiles,
             calibration_fraction=_optional_float(data.get("calibration_fraction")),
             random_seed=_optional_int(data.get("random_seed")),
-            split_pool_scenario_ids=_optional_int_array(data.get("split_pool_scenario_ids")),
-            calibration_scenario_ids=_optional_int_array(data.get("calibration_scenario_ids")),
-            application_scenario_ids=_optional_int_array(data.get("application_scenario_ids")),
+            split_pool_scenario_ids=_optional_int_array(
+                data.get("split_pool_scenario_ids")
+            ),
+            calibration_scenario_ids=_optional_int_array(
+                data.get("calibration_scenario_ids")
+            ),
+            application_scenario_ids=_optional_int_array(
+                data.get("application_scenario_ids")
+            ),
         )
 
     @property
@@ -238,9 +264,13 @@ def _validate_alpha(alpha: float) -> None:
         raise ValueError(f"alpha must be strictly between 0 and 1; got {alpha!r}")
 
 
-def _validate_entity_alignment(left_entity_ids: np.ndarray, right_entity_ids: np.ndarray) -> None:
+def _validate_entity_alignment(
+    left_entity_ids: np.ndarray, right_entity_ids: np.ndarray
+) -> None:
     if not np.array_equal(left_entity_ids, right_entity_ids):
-        raise ValueError("Prediction and calibration artifacts must share the same entity ordering.")
+        raise ValueError(
+            "Prediction and calibration artifacts must share the same entity ordering."
+        )
 
 
 def _get_entity_ids(values: PredictionSet | GroundTruthSet | ChannelSet) -> np.ndarray:
@@ -264,7 +294,9 @@ def _get_valid_mask(
     return None
 
 
-def _combine_valid_masks(left: np.ndarray | None, right: np.ndarray | None) -> np.ndarray | None:
+def _combine_valid_masks(
+    left: np.ndarray | None, right: np.ndarray | None
+) -> np.ndarray | None:
     if left is None:
         return None if right is None else right
     if right is None:
@@ -278,7 +310,9 @@ def _masked_column_quantile(
     quantile: float,
 ) -> np.ndarray:
     if valid_mask is None:
-        return np.quantile(residuals, quantile, axis=0).astype(FLOAT32_DTYPE, copy=False)
+        return np.quantile(residuals, quantile, axis=0).astype(
+            FLOAT32_DTYPE, copy=False
+        )
 
     output = np.zeros(residuals.shape[1], dtype=FLOAT32_DTYPE)
     for index in range(residuals.shape[1]):

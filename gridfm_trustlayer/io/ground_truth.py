@@ -85,18 +85,28 @@ def load_ground_truth(
 
     selected_scenarios = _resolve_scenario_ids(bus_frame, scenario_ids)
     bus_frame = bus_frame[bus_frame["scenario"].isin(selected_scenarios)].copy()
-    branch_frame = branch_frame[branch_frame["scenario"].isin(selected_scenarios)].copy()
+    branch_frame = branch_frame[
+        branch_frame["scenario"].isin(selected_scenarios)
+    ].copy()
 
     bus_ids = np.sort(bus_frame["bus"].unique().astype(np.int64, copy=False))
     branch_ids = np.sort(branch_frame["idx"].unique().astype(np.int64, copy=False))
     sorted_bus = _sort_rectangular_frame(bus_frame, selected_scenarios, bus_ids, "bus")
-    sorted_branch = _sort_rectangular_frame(branch_frame, selected_scenarios, branch_ids, "idx")
+    sorted_branch = _sort_rectangular_frame(
+        branch_frame, selected_scenarios, branch_ids, "idx"
+    )
 
-    vm = _reshape_column(sorted_bus, "Vm", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE)
-    va = _reshape_column(sorted_bus, "Va", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE)
+    vm = _reshape_column(
+        sorted_bus, "Vm", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
+    )
+    va = _reshape_column(
+        sorted_bus, "Va", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
+    )
     va = _normalize_angle_units(va)
 
-    direct_channel_names = _resolve_direct_channel_names(sorted_bus.columns, channel_names)
+    direct_channel_names = _resolve_direct_channel_names(
+        sorted_bus.columns, channel_names
+    )
     channels = {
         channel_name: _reshape_column(
             sorted_bus,
@@ -130,7 +140,16 @@ def load_ground_truth(
             "idx",
             FLOAT32_DTYPE,
         )
-        for key in ("Yff_r", "Yff_i", "Yft_r", "Yft_i", "Ytf_r", "Ytf_i", "Ytt_r", "Ytt_i")
+        for key in (
+            "Yff_r",
+            "Yff_i",
+            "Yft_r",
+            "Yft_i",
+            "Ytf_r",
+            "Ytf_i",
+            "Ytt_r",
+            "Ytt_i",
+        )
     }
     br_status = _reshape_column(
         sorted_branch,
@@ -193,13 +212,19 @@ def _resolve_base_kv(
     if bus_params_csv is not None:
         bus_params = pd.read_csv(bus_params_csv)
         base_column = "vn_kv" if "vn_kv" in bus_params.columns else "base_kv"
-        ordered = bus_params.sort_values("bus", kind="stable") if "bus" in bus_params.columns else bus_params
+        ordered = (
+            bus_params.sort_values("bus", kind="stable")
+            if "bus" in bus_params.columns
+            else bus_params
+        )
         values = ordered[base_column].to_numpy(dtype=np.float32, copy=True)
         if len(values) != len(bus_ids):
             raise ValueError("bus_params_csv does not match the number of buses.")
         return values
 
-    raise ValueError("Unable to resolve bus base voltage from parquet or bus_params_csv.")
+    raise ValueError(
+        "Unable to resolve bus base voltage from parquet or bus_params_csv."
+    )
 
 
 def _resolve_direct_channel_names(
@@ -207,7 +232,9 @@ def _resolve_direct_channel_names(
     requested_channel_names: Iterable[str] | None,
 ) -> list[str]:
     if requested_channel_names is not None:
-        selected = [name for name in requested_channel_names if name not in {"Vm", "Va"}]
+        selected = [
+            name for name in requested_channel_names if name not in {"Vm", "Va"}
+        ]
         return [name for name in selected if name in columns]
 
     defaults = [name for name in ("Pg", "Qg") if name in columns]
@@ -242,8 +269,12 @@ def _resolve_scenario_ids(
     if requested_scenario_ids is None:
         return np.sort(np.array(list(available), dtype=np.int64))
 
-    ordered = np.array([int(scenario_id) for scenario_id in requested_scenario_ids], dtype=np.int64)
-    missing = [scenario_id for scenario_id in ordered.tolist() if scenario_id not in available]
+    ordered = np.array(
+        [int(scenario_id) for scenario_id in requested_scenario_ids], dtype=np.int64
+    )
+    missing = [
+        scenario_id for scenario_id in ordered.tolist() if scenario_id not in available
+    ]
     if missing:
         raise ValueError(f"Requested scenarios not present in bus parquet: {missing}")
     return ordered
@@ -280,12 +311,16 @@ def _sort_rectangular_frame(
         ordered=True,
     )
     ordered = ordered.sort_values(["_scenario_order", "_entity_order"], kind="stable")
-    ordered = ordered.drop(columns=["_scenario_order", "_entity_order"]).reset_index(drop=True)
+    ordered = ordered.drop(columns=["_scenario_order", "_entity_order"]).reset_index(
+        drop=True
+    )
 
     expected_scenarios = np.repeat(scenario_ids, len(entity_ids))
     expected_entities = np.tile(entity_ids, len(scenario_ids))
     if not np.array_equal(ordered["scenario"].to_numpy(), expected_scenarios):
-        raise ValueError("Ground-truth parquet is missing or duplicating scenario rows.")
+        raise ValueError(
+            "Ground-truth parquet is missing or duplicating scenario rows."
+        )
     if not np.array_equal(ordered[entity_column].to_numpy(), expected_entities):
         raise ValueError(
             f"Ground-truth parquet is missing or duplicating {entity_column} rows.",
@@ -301,6 +336,11 @@ def _reshape_column(
     entity_column: str,
     dtype: np.dtype[Any],
 ) -> np.ndarray:
-    ordered = _sort_rectangular_frame(frame[["scenario", entity_column, column]], scenario_ids, entity_ids, entity_column)
+    ordered = _sort_rectangular_frame(
+        frame[["scenario", entity_column, column]],
+        scenario_ids,
+        entity_ids,
+        entity_column,
+    )
     values = ordered[column].to_numpy(dtype=dtype, copy=True)
     return values.reshape(len(scenario_ids), len(entity_ids))

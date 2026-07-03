@@ -32,7 +32,9 @@ class TaskAdapter:
         if generator_parquet_path is not None:
             candidate_path = Path(generator_parquet_path)
             if not candidate_path.exists():
-                raise ValueError(f"Missing generator predictions parquet: {candidate_path}")
+                raise ValueError(
+                    f"Missing generator predictions parquet: {candidate_path}"
+                )
             return str(candidate_path)
 
         if not self.requires_generator_artifact:
@@ -111,8 +113,12 @@ class OptimalPowerFlowTaskAdapter(TaskAdapter):
     ) -> BusPredictionBundle:
         return BusPredictionBundle(
             Vm=predictions.Vm.copy(),
-            Va=_replace_where(predictions.Va, target_channels.get("Va"), bus_type_masks.get("REF")),
-            channels={name: values.copy() for name, values in predictions.channels.items()},
+            Va=_replace_where(
+                predictions.Va, target_channels.get("Va"), bus_type_masks.get("REF")
+            ),
+            channels={
+                name: values.copy() for name, values in predictions.channels.items()
+            },
         )
 
 
@@ -138,7 +144,10 @@ def resolve_task_adapter(
         return OptimalPowerFlowTaskAdapter()
     if task_name is not None:
         return PassthroughTaskAdapter(task_name)
-    if generator_parquet_path is not None or default_generator_artifact_path(bus_parquet_path) is not None:
+    if (
+        generator_parquet_path is not None
+        or default_generator_artifact_path(bus_parquet_path) is not None
+    ):
         return OptimalPowerFlowTaskAdapter()
     if infer_power_flow:
         return PowerFlowTaskAdapter()

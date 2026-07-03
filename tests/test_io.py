@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from gridfm_trustlayer.io import compute_line_loading, load_ground_truth, load_predictions
+from gridfm_trustlayer.io import (
+    compute_line_loading,
+    load_ground_truth,
+    load_predictions,
+)
 
 
 def test_predictions_roundtrip(tmp_path) -> None:
@@ -81,7 +85,9 @@ def test_task_adapter_selection(tmp_path) -> None:
     _write_opf_predictions_fixture(opf_bus_path, opf_gen_path)
 
     pf_prediction_set = load_predictions(str(pf_path), apply_task_correction=False)
-    opf_prediction_set = load_predictions(str(opf_bus_path), apply_task_correction=False)
+    opf_prediction_set = load_predictions(
+        str(opf_bus_path), apply_task_correction=False
+    )
 
     assert pf_prediction_set.task_name == "PowerFlow"
     assert pf_prediction_set.generator_predictions is None
@@ -117,7 +123,9 @@ def test_ground_truth_roundtrip_and_outages(tmp_path) -> None:
     assert ground_truth.Va.shape == (2, 2)
     assert ground_truth.channels["Pg"].shape == (2, 2)
     assert ground_truth.channels["Qg"].shape == (2, 2)
-    np.testing.assert_array_equal(ground_truth.n_outages, np.array([0, 1], dtype=np.int32))
+    np.testing.assert_array_equal(
+        ground_truth.n_outages, np.array([0, 1], dtype=np.int32)
+    )
     assert not bool(ground_truth.removed_mask[0, 0])
     assert bool(ground_truth.removed_mask[1, 0])
 
@@ -179,8 +187,12 @@ def test_task_specific_channels_are_preserved(tmp_path) -> None:
 
     assert prediction_set.task_name == "StateEstimation"
     assert prediction_set.channel_names == ("Vm", "Va", "P_inj", "Q_inj")
-    np.testing.assert_allclose(prediction_set.channels["P_inj"], np.array([[1.5, -1.5]], dtype=np.float32))
-    np.testing.assert_allclose(prediction_set.channels["Q_inj"], np.array([[0.8, -0.8]], dtype=np.float32))
+    np.testing.assert_allclose(
+        prediction_set.channels["P_inj"], np.array([[1.5, -1.5]], dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        prediction_set.channels["Q_inj"], np.array([[0.8, -0.8]], dtype=np.float32)
+    )
 
 
 def test_io_imports_without_graphkit_runtime_dependency() -> None:

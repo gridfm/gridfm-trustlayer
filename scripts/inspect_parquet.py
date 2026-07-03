@@ -10,9 +10,13 @@ import pandas as pd  # type: ignore[import-untyped]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect a parquet file produced by trustlayer workflows.")
+    parser = argparse.ArgumentParser(
+        description="Inspect a parquet file produced by trustlayer workflows."
+    )
     parser.add_argument("path", help="Path to the parquet file to inspect.")
-    parser.add_argument("--head", type=int, default=8, help="Number of rows to print from the head.")
+    parser.add_argument(
+        "--head", type=int, default=8, help="Number of rows to print from the head."
+    )
     parser.add_argument(
         "--columns",
         nargs="+",

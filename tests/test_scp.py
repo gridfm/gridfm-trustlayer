@@ -39,8 +39,12 @@ def test_naive_interval_fit_and_predict() -> None:
     )
 
     intervals = calibrator.predict_intervals(predictions)
-    expected_vm_lower = predictions.Vm + calibrator.lower_residual_quantiles["Vm"][None, :]
-    expected_vm_upper = predictions.Vm + calibrator.upper_residual_quantiles["Vm"][None, :]
+    expected_vm_lower = (
+        predictions.Vm + calibrator.lower_residual_quantiles["Vm"][None, :]
+    )
+    expected_vm_upper = (
+        predictions.Vm + calibrator.upper_residual_quantiles["Vm"][None, :]
+    )
     np.testing.assert_allclose(intervals["Vm"][0], expected_vm_lower)
     np.testing.assert_allclose(intervals["Vm"][1], expected_vm_upper)
 
@@ -105,16 +109,19 @@ def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:
         Vm=vm_target,
         Va=va_target,
         channels={},
-        admittances={key: np.zeros((len(scenario_ids), 1), dtype=np.float32) for key in (
-            "Yff_r",
-            "Yff_i",
-            "Yft_r",
-            "Yft_i",
-            "Ytf_r",
-            "Ytf_i",
-            "Ytt_r",
-            "Ytt_i",
-        )},
+        admittances={
+            key: np.zeros((len(scenario_ids), 1), dtype=np.float32)
+            for key in (
+                "Yff_r",
+                "Yff_i",
+                "Yft_r",
+                "Yft_i",
+                "Ytf_r",
+                "Ytf_i",
+                "Ytt_r",
+                "Ytt_i",
+            )
+        },
         f_bus=np.array([0], dtype=np.int32),
         t_bus=np.array([1], dtype=np.int32),
         rate_a=np.array([1.0], dtype=np.float32),

@@ -42,7 +42,9 @@ def compute_line_loading(
             f"({len(gt.scenario_ids)}, {len(gt.bus_ids)}).",
         )
     if Va_rad.shape != Vm.shape:
-        raise ValueError(f"Va_rad shape {Va_rad.shape} does not match Vm shape {Vm.shape}.")
+        raise ValueError(
+            f"Va_rad shape {Va_rad.shape} does not match Vm shape {Vm.shape}."
+        )
 
     bus_df = _build_bus_voltage_frame(gt, Vm, Va_rad)
     branch_df = _build_branch_parameter_frame(gt)
@@ -69,7 +71,9 @@ def _build_bus_voltage_frame(
     Vm: np.ndarray,
     Va_rad: np.ndarray,
 ) -> pd.DataFrame:
-    scenario_ids = np.repeat(gt.scenario_ids.astype(np.int64, copy=False), len(gt.bus_ids))
+    scenario_ids = np.repeat(
+        gt.scenario_ids.astype(np.int64, copy=False), len(gt.bus_ids)
+    )
     bus_ids = np.tile(gt.bus_ids.astype(np.int64, copy=False), len(gt.scenario_ids))
     return pd.DataFrame(
         {

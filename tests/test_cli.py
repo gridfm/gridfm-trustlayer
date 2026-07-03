@@ -10,7 +10,11 @@ import pytest
 
 from gridfm_trustlayer.cli import main
 from gridfm_trustlayer.cli.config import normalize_variables
-from gridfm_trustlayer.io import compute_line_loading, load_ground_truth, load_predictions
+from gridfm_trustlayer.io import (
+    compute_line_loading,
+    load_ground_truth,
+    load_predictions,
+)
 
 
 def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
@@ -25,45 +29,51 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
 
-    assert main(
-        [
-            "compute",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--pf-node",
-            str(pf_node_path),
-            "--pf-edge",
-            str(pf_edge_path),
-            "--alpha",
-            "0.2",
-            "--output",
-            str(artifact_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "compute",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--pf-node",
+                str(pf_node_path),
+                "--pf-edge",
+                str(pf_edge_path),
+                "--alpha",
+                "0.2",
+                "--output",
+                str(artifact_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["method"] == "naive_residual_quantiles"
     assert artifact["channel_names"] == ["Vm", "Va"]
 
-    assert main(
-        [
-            "calibrate",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--artifact",
-            str(artifact_path),
-            "--output",
-            str(output_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
     assert {
@@ -155,41 +165,47 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
     _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
     monkeypatch.chdir(tmp_path)
 
-    assert main(
-        [
-            "compute",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--pf-node",
-            str(pf_node_path),
-            "--pf-edge",
-            str(pf_edge_path),
-            "--alpha",
-            "0.2",
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "compute",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--pf-node",
+                str(pf_node_path),
+                "--pf-edge",
+                str(pf_edge_path),
+                "--alpha",
+                "0.2",
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     output_dir = tmp_path / "trustlayer_outputs" / "stateestimation" / "base"
     artifact_path = output_dir / "predictions_vm_va.trustlayer"
     assert artifact_path.exists()
 
-    assert main(
-        [
-            "calibrate",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--artifact",
-            str(artifact_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--artifact",
+                str(artifact_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     output_path = output_dir / "predictions_vm_va_with_intervals.parquet"
     assert output_path.exists()
@@ -261,47 +277,53 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
 
-    assert main(
-        [
-            "compute",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--pf-node",
-            str(pf_node_path),
-            "--pf-edge",
-            str(pf_edge_path),
-            "--alpha",
-            "0.2",
-            "--variables",
-            "line_loading",
-            "--output",
-            str(artifact_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "compute",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--pf-node",
+                str(pf_node_path),
+                "--pf-edge",
+                str(pf_edge_path),
+                "--alpha",
+                "0.2",
+                "--variables",
+                "line_loading",
+                "--output",
+                str(artifact_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
-    assert main(
-        [
-            "calibrate",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--artifact",
-            str(artifact_path),
-            "--output",
-            str(output_path),
-            "--pf-node",
-            str(pf_node_path),
-            "--pf-edge",
-            str(pf_edge_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--pf-node",
+                str(pf_node_path),
+                "--pf-edge",
+                str(pf_edge_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     output_frame = pd.read_parquet(output_path).sort_values(["scenario", "branch"])
     assert {
@@ -318,8 +340,12 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
 
     predictions = load_predictions(str(predictions_path), task_name="StateEstimation")
     ground_truth = load_ground_truth(str(pf_node_path), str(pf_edge_path), sn_mva=100.0)
-    predicted_loading = compute_line_loading(predictions.Vm, predictions.Va, ground_truth)
-    target_loading = compute_line_loading(ground_truth.Vm, ground_truth.Va, ground_truth)
+    predicted_loading = compute_line_loading(
+        predictions.Vm, predictions.Va, ground_truth
+    )
+    target_loading = compute_line_loading(
+        ground_truth.Vm, ground_truth.Va, ground_truth
+    )
     residuals = target_loading - predicted_loading
     expected_lower = np.quantile(residuals[:, 0], 0.1).astype(np.float32)
     expected_upper = np.quantile(residuals[:, 0], 0.9).astype(np.float32)
@@ -334,8 +360,24 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
 
     analysis_frame = pd.read_csv(tmp_path / "trust_analysis_line.csv")
     summary_frame = pd.read_csv(tmp_path / "trust_summary_line.csv")
-    assert {"variable", "branch", "from_bus", "to_bus", "rate_a", "width_mean", "empirical_coverage", "n_samples"}.issubset(analysis_frame.columns)
-    assert {"scope", "variable", "rate_a", "n_lines", "width_mean_across_lines", "empirical_coverage_mean_across_lines"}.issubset(summary_frame.columns)
+    assert {
+        "variable",
+        "branch",
+        "from_bus",
+        "to_bus",
+        "rate_a",
+        "width_mean",
+        "empirical_coverage",
+        "n_samples",
+    }.issubset(analysis_frame.columns)
+    assert {
+        "scope",
+        "variable",
+        "rate_a",
+        "n_lines",
+        "width_mean_across_lines",
+        "empirical_coverage_mean_across_lines",
+    }.issubset(summary_frame.columns)
     assert set(summary_frame["scope"].unique().tolist()) == {"system", "rate_a"}
     rate_rows = summary_frame[summary_frame["scope"].eq("rate_a")].copy()
     assert len(rate_rows) == 1
@@ -349,7 +391,9 @@ def test_config_driven_line_loading_compute_and_calibrate(tmp_path) -> None:
     pf_node_path = tmp_path / "pf_node.parquet"
     pf_edge_path = tmp_path / "pf_edge.parquet"
     artifact_path = tmp_path / "nested" / "artifacts" / "line_intervals.trustlayer"
-    output_path = tmp_path / "nested" / "outputs" / "line_predictions_with_intervals.parquet"
+    output_path = (
+        tmp_path / "nested" / "outputs" / "line_predictions_with_intervals.parquet"
+    )
     config_path = tmp_path / "trust_config_line.yaml"
 
     _write_prediction_fixture(predictions_path)
@@ -512,31 +556,66 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
 
     assert set(volt_detail["variable"].unique().tolist()) == {"Vm"}
     assert set(line_detail["variable"].unique().tolist()) == {"line_loading"}
-    assert {"pred_any_violation", "true_any_violation", "any_tp", "any_fp", "any_fn", "any_tn"}.issubset(volt_detail.columns)
-    assert {"lower_precision", "upper_recall", "any_precision", "any_recall"}.issubset(volt_entity.columns)
-    assert {"scope", "variable", "bus_type", "lower_tp", "upper_fp", "any_recall"}.issubset(volt_summary.columns)
-    assert {"scope", "variable", "rate_a", "lower_tp", "upper_fp", "any_precision"}.issubset(line_summary.columns)
+    assert {
+        "pred_any_violation",
+        "true_any_violation",
+        "any_tp",
+        "any_fp",
+        "any_fn",
+        "any_tn",
+    }.issubset(volt_detail.columns)
+    assert {"lower_precision", "upper_recall", "any_precision", "any_recall"}.issubset(
+        volt_entity.columns
+    )
+    assert {
+        "scope",
+        "variable",
+        "bus_type",
+        "lower_tp",
+        "upper_fp",
+        "any_recall",
+    }.issubset(volt_summary.columns)
+    assert {
+        "scope",
+        "variable",
+        "rate_a",
+        "lower_tp",
+        "upper_fp",
+        "any_precision",
+    }.issubset(line_summary.columns)
 
     np.testing.assert_array_equal(
         volt_detail["pred_any_violation"].to_numpy(dtype=bool),
-        volt_detail["pred_lower_violation"].to_numpy(dtype=bool) | volt_detail["pred_upper_violation"].to_numpy(dtype=bool),
+        volt_detail["pred_lower_violation"].to_numpy(dtype=bool)
+        | volt_detail["pred_upper_violation"].to_numpy(dtype=bool),
     )
     system_volt = volt_summary[volt_summary["scope"].eq("system")].iloc[0]
     assert int(system_volt["n_samples"]) == len(volt_detail)
-    assert int(system_volt["any_tp"] + system_volt["any_fp"] + system_volt["any_fn"] + system_volt["any_tn"]) == len(volt_detail)
+    assert int(
+        system_volt["any_tp"]
+        + system_volt["any_fp"]
+        + system_volt["any_fn"]
+        + system_volt["any_tn"]
+    ) == len(volt_detail)
     system_line = line_summary[line_summary["scope"].eq("system")].iloc[0]
     assert int(system_line["n_samples"]) == len(line_detail)
     assert set(line_summary["scope"].unique().tolist()) == {"system", "rate_a"}
 
     assert (screen_dir / "screen_figures" / "vm_precision_bus_summary.png").exists()
     assert (screen_dir / "screen_figures" / "vm_any_confusion.png").exists()
-    assert (screen_dir / "screen_figures" / "line_loading_recall_branch_summary.png").exists()
+    assert (
+        screen_dir / "screen_figures" / "line_loading_recall_branch_summary.png"
+    ).exists()
 
 
 def test_normalize_variables_accepts_mixed_line_and_voltage_selection() -> None:
     assert normalize_variables("vm,va") == ("Vm", "Va")
     assert normalize_variables(["line-loading"]) == ("line_loading",)
-    assert normalize_variables(["Vm", "line_loading", "va"]) == ("Vm", "line_loading", "Va")
+    assert normalize_variables(["Vm", "line_loading", "va"]) == (
+        "Vm",
+        "line_loading",
+        "Va",
+    )
 
 
 def test_cli_flags_override_config(tmp_path) -> None:
@@ -567,18 +646,21 @@ def test_cli_flags_override_config(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    assert main(
-        [
-            "compute",
-            "--config",
-            str(config_path),
-            "--output",
-            str(override_artifact_path),
-            "--variables",
-            "Vm",
-            "Va",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "compute",
+                "--config",
+                str(config_path),
+                "--output",
+                str(override_artifact_path),
+                "--variables",
+                "Vm",
+                "Va",
+            ],
+        )
+        == 0
+    )
 
     assert override_artifact_path.exists()
     assert not config_artifact_path.exists()
@@ -586,7 +668,9 @@ def test_cli_flags_override_config(tmp_path) -> None:
     assert artifact["channel_names"] == ["Vm", "Va"]
 
 
-def test_compute_with_calibration_fraction_then_calibrate_same_pool_uses_holdout_only(tmp_path) -> None:
+def test_compute_with_calibration_fraction_then_calibrate_same_pool_uses_holdout_only(
+    tmp_path,
+) -> None:
     predictions_path = tmp_path / "predictions.parquet"
     pf_node_path = tmp_path / "pf_node.parquet"
     pf_edge_path = tmp_path / "pf_edge.parquet"
@@ -598,29 +682,32 @@ def test_compute_with_calibration_fraction_then_calibrate_same_pool_uses_holdout
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
 
-    assert main(
-        [
-            "compute",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--pf-node",
-            str(pf_node_path),
-            "--pf-edge",
-            str(pf_edge_path),
-            "--alpha",
-            "0.2",
-            "--calibration-fraction",
-            "0.5",
-            "--random-seed",
-            "7",
-            "--output",
-            str(artifact_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "compute",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--pf-node",
+                str(pf_node_path),
+                "--pf-edge",
+                str(pf_edge_path),
+                "--alpha",
+                "0.2",
+                "--calibration-fraction",
+                "0.5",
+                "--random-seed",
+                "7",
+                "--output",
+                str(artifact_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     calibration_scenarios = set(artifact["calibration_scenario_ids"])
@@ -629,25 +716,28 @@ def test_compute_with_calibration_fraction_then_calibrate_same_pool_uses_holdout
     assert application_scenarios
     assert calibration_scenarios.isdisjoint(application_scenarios)
 
-    assert main(
-        [
-            "calibrate",
-            "--config",
-            str(config_path),
-            "--predictions",
-            str(predictions_path),
-            "--artifact",
-            str(artifact_path),
-            "--output",
-            str(output_path),
-            "--pf-node",
-            str(pf_node_path),
-            "--pf-edge",
-            str(pf_edge_path),
-            "--task-name",
-            "StateEstimation",
-        ],
-    ) == 0
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--predictions",
+                str(predictions_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--pf-node",
+                str(pf_node_path),
+                "--pf-edge",
+                str(pf_edge_path),
+                "--task-name",
+                "StateEstimation",
+            ],
+        )
+        == 0
+    )
 
     output_frame = pd.read_parquet(output_path)
     output_scenarios = set(output_frame["scenario"].unique().tolist())

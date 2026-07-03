@@ -42,24 +42,32 @@ def resolve_command_config(
         if key in config:
             resolved[key] = config[key]
 
-    _merge_mapping(resolved, config.get("inputs"), allowed_keys={
-        "predictions",
-        "generator_predictions",
-        "pf_node",
-        "pf_edge",
-        "artifact",
-        "analysis_pf_node",
-        "analysis_pf_edge",
-    })
-    _merge_mapping(resolved, config.get("outputs"), allowed_keys={
-        "output",
-        "artifact",
-        "calibrated_predictions",
-        "calibrated_predictions_volt",
-        "calibrated_predictions_line",
-        "screen_dir",
-        "screened_predictions",
-    })
+    _merge_mapping(
+        resolved,
+        config.get("inputs"),
+        allowed_keys={
+            "predictions",
+            "generator_predictions",
+            "pf_node",
+            "pf_edge",
+            "artifact",
+            "analysis_pf_node",
+            "analysis_pf_edge",
+        },
+    )
+    _merge_mapping(
+        resolved,
+        config.get("outputs"),
+        allowed_keys={
+            "output",
+            "artifact",
+            "calibrated_predictions",
+            "calibrated_predictions_volt",
+            "calibrated_predictions_line",
+            "screen_dir",
+            "screened_predictions",
+        },
+    )
 
     command_overrides = {}
     commands = config.get("commands")
@@ -83,24 +91,32 @@ def resolve_command_config(
     ):
         if key in command_overrides:
             resolved[key] = command_overrides[key]
-    _merge_mapping(resolved, command_overrides.get("inputs"), allowed_keys={
-        "predictions",
-        "generator_predictions",
-        "pf_node",
-        "pf_edge",
-        "artifact",
-        "analysis_pf_node",
-        "analysis_pf_edge",
-    })
-    _merge_mapping(resolved, command_overrides.get("outputs"), allowed_keys={
-        "output",
-        "artifact",
-        "calibrated_predictions",
-        "calibrated_predictions_volt",
-        "calibrated_predictions_line",
-        "screen_dir",
-        "screened_predictions",
-    })
+    _merge_mapping(
+        resolved,
+        command_overrides.get("inputs"),
+        allowed_keys={
+            "predictions",
+            "generator_predictions",
+            "pf_node",
+            "pf_edge",
+            "artifact",
+            "analysis_pf_node",
+            "analysis_pf_edge",
+        },
+    )
+    _merge_mapping(
+        resolved,
+        command_overrides.get("outputs"),
+        allowed_keys={
+            "output",
+            "artifact",
+            "calibrated_predictions",
+            "calibrated_predictions_volt",
+            "calibrated_predictions_line",
+            "screen_dir",
+            "screened_predictions",
+        },
+    )
     return resolved
 
 
@@ -118,7 +134,9 @@ def coalesce_option(
     if key in config:
         return config[key]
     if required:
-        raise ValueError(f"Missing required option '{key}'. Provide it via CLI or config.")
+        raise ValueError(
+            f"Missing required option '{key}'. Provide it via CLI or config."
+        )
     return None
 
 

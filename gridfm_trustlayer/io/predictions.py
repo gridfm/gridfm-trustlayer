@@ -145,7 +145,9 @@ def load_predictions(
             "bus",
             FLOAT32_DTYPE,
         )
-        target_col = _resolve_column(lookup, f"{channel_name.lower()}_target", required=False)
+        target_col = _resolve_column(
+            lookup, f"{channel_name.lower()}_target", required=False
+        )
         if target_col is not None:
             target_channels[channel_name] = _reshape_column(
                 sorted_frame,
@@ -166,9 +168,13 @@ def load_predictions(
         )
 
     generator_predictions = None
-    generator_path = adapter.resolve_generator_artifact_path(parquet_path, generator_parquet_path)
+    generator_path = adapter.resolve_generator_artifact_path(
+        parquet_path, generator_parquet_path
+    )
     if generator_path is not None:
-        generator_predictions = _load_generator_predictions(generator_path, scenario_ids)
+        generator_predictions = _load_generator_predictions(
+            generator_path, scenario_ids
+        )
 
     channel_names = ("Vm", "Va", *extra_channel_names)
     return PredictionSet(
@@ -277,7 +283,9 @@ def _sort_rectangular_frame(
         ordered=True,
     )
     ordered = ordered.sort_values(["_scenario_order", "_entity_order"], kind="stable")
-    ordered = ordered.drop(columns=["_scenario_order", "_entity_order"]).reset_index(drop=True)
+    ordered = ordered.drop(columns=["_scenario_order", "_entity_order"]).reset_index(
+        drop=True
+    )
 
     expected_scenarios = np.repeat(scenario_ids, len(entity_ids))
     expected_entities = np.tile(entity_ids, len(scenario_ids))
@@ -298,7 +306,12 @@ def _reshape_column(
     entity_column: str,
     dtype: np.dtype[Any],
 ) -> np.ndarray:
-    ordered = _sort_rectangular_frame(frame[["scenario", entity_column, column]], scenario_ids, entity_ids, entity_column)
+    ordered = _sort_rectangular_frame(
+        frame[["scenario", entity_column, column]],
+        scenario_ids,
+        entity_ids,
+        entity_column,
+    )
     values = ordered[column].to_numpy(dtype=dtype, copy=True)
     return values.reshape(len(scenario_ids), len(entity_ids))
 
@@ -323,7 +336,9 @@ def _load_generator_predictions(
             "Generator predictions parquet scenarios do not match the bus predictions parquet.",
         )
 
-    sorted_frame = frame.sort_values(["scenario", "idx", "bus"], kind="stable").reset_index(drop=True)
+    sorted_frame = frame.sort_values(
+        ["scenario", "idx", "bus"], kind="stable"
+    ).reset_index(drop=True)
     lookup = {column.lower(): column for column in sorted_frame.columns}
 
     channel_names = _discover_prediction_channel_names(sorted_frame.columns, lookup)
@@ -333,10 +348,14 @@ def _load_generator_predictions(
     for channel_name in channel_names:
         pred_col = _resolve_column(lookup, f"{channel_name.lower()}_pred")
         assert pred_col is not None
-        channels[channel_name] = sorted_frame[pred_col].to_numpy(dtype=FLOAT32_DTYPE, copy=True)
+        channels[channel_name] = sorted_frame[pred_col].to_numpy(
+            dtype=FLOAT32_DTYPE, copy=True
+        )
         dynamic_columns.add(pred_col)
 
-        target_col = _resolve_column(lookup, f"{channel_name.lower()}_target", required=False)
+        target_col = _resolve_column(
+            lookup, f"{channel_name.lower()}_target", required=False
+        )
         if target_col is not None:
             target_channels[channel_name] = sorted_frame[target_col].to_numpy(
                 dtype=FLOAT32_DTYPE,

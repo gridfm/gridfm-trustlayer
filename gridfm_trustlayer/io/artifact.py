@@ -29,15 +29,16 @@ def save_interval_artifacts(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not calibrators:
-        raise ValueError("At least one calibrator must be provided when saving an artifact.")
+        raise ValueError(
+            "At least one calibrator must be provided when saving an artifact."
+        )
     if len(calibrators) == 1:
         payload: dict[str, object] = next(iter(calibrators.values())).to_dict()
     else:
         payload = {
             "version": BUNDLE_VERSION,
             "artifacts": {
-                name: calibrator.to_dict()
-                for name, calibrator in calibrators.items()
+                name: calibrator.to_dict() for name, calibrator in calibrators.items()
             },
         }
     path.write_text(
@@ -67,7 +68,9 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, NaiveIntervalCalibr
     if data.get("version") == BUNDLE_VERSION:
         artifacts = data.get("artifacts")
         if not isinstance(artifacts, dict) or not artifacts:
-            raise ValueError("Interval artifact bundle must contain a non-empty 'artifacts' mapping.")
+            raise ValueError(
+                "Interval artifact bundle must contain a non-empty 'artifacts' mapping."
+            )
         return {
             str(name): NaiveIntervalCalibrator.from_dict(dict(calibrator_data))
             for name, calibrator_data in artifacts.items()
@@ -77,6 +80,8 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, NaiveIntervalCalibr
 
 
 def _artifact_key(calibrator: NaiveIntervalCalibrator) -> str:
-    if calibrator.entity_name == "branch" or calibrator.channel_names == ("line_loading",):
+    if calibrator.entity_name == "branch" or calibrator.channel_names == (
+        "line_loading",
+    ):
         return "line"
     return "volt"

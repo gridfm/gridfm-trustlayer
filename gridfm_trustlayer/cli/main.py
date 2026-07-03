@@ -17,8 +17,15 @@ from gridfm_trustlayer.cli.config import (
     validate_cp_type,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
-from gridfm_trustlayer.io import compute_line_loading, load_ground_truth, load_predictions
-from gridfm_trustlayer.io.artifact import load_interval_artifacts, save_interval_artifacts
+from gridfm_trustlayer.io import (
+    compute_line_loading,
+    load_ground_truth,
+    load_predictions,
+)
+from gridfm_trustlayer.io.artifact import (
+    load_interval_artifacts,
+    save_interval_artifacts,
+)
 
 
 SCREEN_BOUND_TOLERANCE = 1e-6
@@ -51,52 +58,138 @@ def build_parser() -> argparse.ArgumentParser:
         "compute",
         help="Compute naive intervals for Vm/Va or derived line_loading and save an artifact.",
     )
-    compute_parser.add_argument("--config", required=True, help="Required trustlayer YAML config file. CLI flags override config values.")
-    compute_parser.add_argument("--predictions", help="Predictions parquet with *_pred columns.")
-    compute_parser.add_argument("--pf-node", help="Ground-truth bus parquet used to fit residual quantiles.")
-    compute_parser.add_argument("--pf-edge", help="Ground-truth branch parquet used to fit residual quantiles.")
-    compute_parser.add_argument("--output", help="Destination .trustlayer artifact path.")
-    compute_parser.add_argument("--alpha", type=float, help="Miscoverage level for conformal intervals.")
-    compute_parser.add_argument("--cp-type", help="Currently only 'base' is supported. Legacy alias: 'naive'.")
+    compute_parser.add_argument(
+        "--config",
+        required=True,
+        help="Required trustlayer YAML config file. CLI flags override config values.",
+    )
+    compute_parser.add_argument(
+        "--predictions", help="Predictions parquet with *_pred columns."
+    )
+    compute_parser.add_argument(
+        "--pf-node", help="Ground-truth bus parquet used to fit residual quantiles."
+    )
+    compute_parser.add_argument(
+        "--pf-edge", help="Ground-truth branch parquet used to fit residual quantiles."
+    )
+    compute_parser.add_argument(
+        "--output", help="Destination .trustlayer artifact path."
+    )
+    compute_parser.add_argument(
+        "--alpha", type=float, help="Miscoverage level for conformal intervals."
+    )
+    compute_parser.add_argument(
+        "--cp-type", help="Currently only 'base' is supported. Legacy alias: 'naive'."
+    )
     compute_parser.add_argument(
         "--variables",
         nargs="+",
         help="Variables to calibrate: any subset of Vm, Va, and line_loading.",
     )
-    compute_parser.add_argument("--calibration-fraction", type=float, help="Optional scenario fraction reserved for calibration when fitting on a pool and applying on holdout scenarios.")
-    compute_parser.add_argument("--random-seed", type=int, help="Random seed used with --calibration-fraction.")
-    compute_parser.add_argument("--task-name", help="Task name used to interpret prediction schema.")
-    compute_parser.add_argument("--generator-predictions", help="Optional generator predictions parquet for OPF artifacts.")
+    compute_parser.add_argument(
+        "--calibration-fraction",
+        type=float,
+        help="Optional scenario fraction reserved for calibration when fitting on a pool and applying on holdout scenarios.",
+    )
+    compute_parser.add_argument(
+        "--random-seed", type=int, help="Random seed used with --calibration-fraction."
+    )
+    compute_parser.add_argument(
+        "--task-name", help="Task name used to interpret prediction schema."
+    )
+    compute_parser.add_argument(
+        "--generator-predictions",
+        help="Optional generator predictions parquet for OPF artifacts.",
+    )
 
     calibrate_parser = subparsers.add_parser(
         "calibrate",
         help="Append fitted intervals to predictions and write voltage and/or line-loading analysis outputs.",
     )
-    calibrate_parser.add_argument("--config", required=True, help="Required trustlayer YAML config file. CLI flags override config values.")
-    calibrate_parser.add_argument("--predictions", help="Predictions parquet to augment or transform into branch outputs.")
-    calibrate_parser.add_argument("--artifact", help="Previously computed .trustlayer artifact.")
-    calibrate_parser.add_argument("--output", help="Destination parquet for calibrated predictions.")
-    calibrate_parser.add_argument("--cp-type", help="Currently only 'base' is supported. Legacy alias: 'naive'.")
-    calibrate_parser.add_argument("--pf-node", help="Ground-truth bus parquet; required for line_loading analysis when targets are not stored in predictions.")
-    calibrate_parser.add_argument("--pf-edge", help="Ground-truth branch parquet; required for line_loading analysis when targets are not stored in predictions.")
-    calibrate_parser.add_argument("--task-name", help="Task name used to interpret prediction schema.")
-    calibrate_parser.add_argument("--generator-predictions", help="Optional generator predictions parquet for OPF artifacts.")
+    calibrate_parser.add_argument(
+        "--config",
+        required=True,
+        help="Required trustlayer YAML config file. CLI flags override config values.",
+    )
+    calibrate_parser.add_argument(
+        "--predictions",
+        help="Predictions parquet to augment or transform into branch outputs.",
+    )
+    calibrate_parser.add_argument(
+        "--artifact", help="Previously computed .trustlayer artifact."
+    )
+    calibrate_parser.add_argument(
+        "--output", help="Destination parquet for calibrated predictions."
+    )
+    calibrate_parser.add_argument(
+        "--cp-type", help="Currently only 'base' is supported. Legacy alias: 'naive'."
+    )
+    calibrate_parser.add_argument(
+        "--pf-node",
+        help="Ground-truth bus parquet; required for line_loading analysis when targets are not stored in predictions.",
+    )
+    calibrate_parser.add_argument(
+        "--pf-edge",
+        help="Ground-truth branch parquet; required for line_loading analysis when targets are not stored in predictions.",
+    )
+    calibrate_parser.add_argument(
+        "--task-name", help="Task name used to interpret prediction schema."
+    )
+    calibrate_parser.add_argument(
+        "--generator-predictions",
+        help="Optional generator predictions parquet for OPF artifacts.",
+    )
 
     screen_parser = subparsers.add_parser(
         "screen",
         help="Evaluate screened lower/upper bounds against ground truth using calibrated prediction intervals.",
     )
-    screen_parser.add_argument("--config", required=True, help="Required trustlayer YAML config file. CLI flags override config values.")
-    screen_parser.add_argument("--variables", nargs="+", help="Variables to screen. Defaults to config values for the screen command.")
-    screen_parser.add_argument("--lower-bound", type=float, help="Override lower screening bound for a single selected variable.")
-    screen_parser.add_argument("--upper-bound", type=float, help="Override upper screening bound for a single selected variable.")
-    screen_parser.add_argument("--output", help="Destination directory for screening CSVs and figures.")
-    screen_parser.add_argument("--calibrated-predictions", help="Single calibrated parquet input for one target family.")
-    screen_parser.add_argument("--calibrated-predictions-volt", help="Calibrated voltage parquet input override.")
-    screen_parser.add_argument("--calibrated-predictions-line", help="Calibrated line-loading parquet input override.")
-    screen_parser.add_argument("--pf-node", help="Ground-truth bus parquet used when target columns are not stored in the calibrated voltage parquet.")
-    screen_parser.add_argument("--pf-edge", help="Ground-truth branch parquet used when target columns are not stored in the calibrated outputs.")
-    screen_parser.add_argument("--task-name", help="Task name used for default output-path resolution.")
+    screen_parser.add_argument(
+        "--config",
+        required=True,
+        help="Required trustlayer YAML config file. CLI flags override config values.",
+    )
+    screen_parser.add_argument(
+        "--variables",
+        nargs="+",
+        help="Variables to screen. Defaults to config values for the screen command.",
+    )
+    screen_parser.add_argument(
+        "--lower-bound",
+        type=float,
+        help="Override lower screening bound for a single selected variable.",
+    )
+    screen_parser.add_argument(
+        "--upper-bound",
+        type=float,
+        help="Override upper screening bound for a single selected variable.",
+    )
+    screen_parser.add_argument(
+        "--output", help="Destination directory for screening CSVs and figures."
+    )
+    screen_parser.add_argument(
+        "--calibrated-predictions",
+        help="Single calibrated parquet input for one target family.",
+    )
+    screen_parser.add_argument(
+        "--calibrated-predictions-volt",
+        help="Calibrated voltage parquet input override.",
+    )
+    screen_parser.add_argument(
+        "--calibrated-predictions-line",
+        help="Calibrated line-loading parquet input override.",
+    )
+    screen_parser.add_argument(
+        "--pf-node",
+        help="Ground-truth bus parquet used when target columns are not stored in the calibrated voltage parquet.",
+    )
+    screen_parser.add_argument(
+        "--pf-edge",
+        help="Ground-truth branch parquet used when target columns are not stored in the calibrated outputs.",
+    )
+    screen_parser.add_argument(
+        "--task-name", help="Task name used for default output-path resolution."
+    )
 
     return parser
 
@@ -104,7 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_compute(args: argparse.Namespace) -> None:
     config = resolve_command_config(load_cli_config(args.config), "compute")
     cp_type = validate_cp_type(coalesce_option(args.cp_type, config, "cp_type"))
-    variables = normalize_variables(coalesce_option(args.variables, config, "variables"))
+    variables = normalize_variables(
+        coalesce_option(args.variables, config, "variables")
+    )
     variable_groups = _partition_variables(variables)
     calibration_fraction = coalesce_option(
         args.calibration_fraction,
@@ -112,7 +207,9 @@ def _run_compute(args: argparse.Namespace) -> None:
         "calibration_fraction",
     )
     random_seed = coalesce_option(args.random_seed, config, "random_seed")
-    predictions_path = coalesce_option(args.predictions, config, "predictions", required=True)
+    predictions_path = coalesce_option(
+        args.predictions, config, "predictions", required=True
+    )
     predictions = load_predictions(
         predictions_path,
         task_name=coalesce_option(args.task_name, config, "task_name"),
@@ -157,7 +254,9 @@ def _run_compute(args: argparse.Namespace) -> None:
             channel_names=target_variables,
         )
         if split is not None and calibration_fraction is not None:
-            _apply_split_metadata(calibrator, float(calibration_fraction), random_seed, split)
+            _apply_split_metadata(
+                calibrator, float(calibration_fraction), random_seed, split
+            )
         calibrators[target_kind] = calibrator
     artifact_path = coalesce_option(args.output, config, "artifact")
     if artifact_path is None:
@@ -172,7 +271,9 @@ def _run_compute(args: argparse.Namespace) -> None:
 def _run_calibrate(args: argparse.Namespace) -> None:
     config = resolve_command_config(load_cli_config(args.config), "calibrate")
     cp_type = validate_cp_type(coalesce_option(args.cp_type, config, "cp_type"))
-    predictions_path = coalesce_option(args.predictions, config, "predictions", required=True)
+    predictions_path = coalesce_option(
+        args.predictions, config, "predictions", required=True
+    )
     artifact_path = coalesce_option(args.artifact, config, "artifact", required=True)
     calibrators = load_interval_artifacts(artifact_path)
     predictions = load_predictions(
@@ -184,8 +285,16 @@ def _run_calibrate(args: argparse.Namespace) -> None:
             "generator_predictions",
         ),
     )
-    original_frame = None if not any(calibrator.entity_name == "bus" for calibrator in calibrators.values()) else pd.read_parquet(predictions_path)
-    application_scenario_ids = _resolve_application_scenario_ids(calibrators, predictions.scenario_ids)
+    original_frame = (
+        None
+        if not any(
+            calibrator.entity_name == "bus" for calibrator in calibrators.values()
+        )
+        else pd.read_parquet(predictions_path)
+    )
+    application_scenario_ids = _resolve_application_scenario_ids(
+        calibrators, predictions.scenario_ids
+    )
     if application_scenario_ids is not None:
         predictions = _subset_prediction_set(predictions, application_scenario_ids)
         if original_frame is not None:
@@ -198,7 +307,9 @@ def _run_calibrate(args: argparse.Namespace) -> None:
     for target_kind, calibrator in calibrators.items():
         if calibrator.entity_name == "branch":
             if analysis_ground_truth is None:
-                analysis_ground_truth = _load_analysis_ground_truth(args, config, predictions.scenario_ids)
+                analysis_ground_truth = _load_analysis_ground_truth(
+                    args, config, predictions.scenario_ids
+                )
             application_predictions, application_ground_truth = _build_calibration_sets(
                 predictions,
                 analysis_ground_truth,
@@ -211,7 +322,9 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                 intervals,
             )
         else:
-            application_predictions = _build_bus_channel_set(predictions, calibrator.channel_names)
+            application_predictions = _build_bus_channel_set(
+                predictions, calibrator.channel_names
+            )
             intervals = calibrator.predict_intervals(application_predictions)
             interval_frame = _build_interval_frame(application_predictions, intervals)
             assert original_frame is not None
@@ -247,25 +360,35 @@ def _run_calibrate(args: argparse.Namespace) -> None:
             )
             _save_line_analysis_figures(line_analysis, figures_dir)
         else:
-            analysis_frame = _build_analysis_frame_from_targets(output_frame, tuple(intervals))
+            analysis_frame = _build_analysis_frame_from_targets(
+                output_frame, tuple(intervals)
+            )
             if analysis_frame is None:
                 if analysis_ground_truth is None:
-                    analysis_ground_truth = _load_analysis_ground_truth(args, config, predictions.scenario_ids)
+                    analysis_ground_truth = _load_analysis_ground_truth(
+                        args, config, predictions.scenario_ids
+                    )
                 _, application_ground_truth = _build_calibration_sets(
                     predictions,
                     analysis_ground_truth,
                     calibrator.channel_names,
                 )
-                analysis_frame = _build_analysis_frame(application_predictions, intervals, application_ground_truth)
+                analysis_frame = _build_analysis_frame(
+                    application_predictions, intervals, application_ground_truth
+                )
             analysis_frame.to_csv(analysis_dir / "trust_analysis_volt.csv", index=False)
-            _build_summary_frame(analysis_frame).to_csv(analysis_dir / "trust_summary_volt.csv", index=False)
+            _build_summary_frame(analysis_frame).to_csv(
+                analysis_dir / "trust_summary_volt.csv", index=False
+            )
             _save_analysis_figures(analysis_frame, figures_dir)
 
 
 def _run_screen(args: argparse.Namespace) -> None:
     config = resolve_command_config(load_cli_config(args.config), "screen")
     cp_type = validate_cp_type(coalesce_option(None, config, "cp_type"))
-    variables = normalize_variables(coalesce_option(args.variables, config, "variables"))
+    variables = normalize_variables(
+        coalesce_option(args.variables, config, "variables")
+    )
     bounds_by_variable = _resolve_screen_bounds(args, config, variables)
     target_groups = _partition_variables(variables)
 
@@ -276,7 +399,9 @@ def _run_screen(args: argparse.Namespace) -> None:
             target_kind=target_kind,
             channel_names=channel_names,
             cp_type=cp_type,
-            task_name=str(coalesce_option(args.task_name, config, "task_name") or "unknown"),
+            task_name=str(
+                coalesce_option(args.task_name, config, "task_name") or "unknown"
+            ),
         )
         for target_kind, channel_names in target_groups.items()
     }
@@ -284,7 +409,9 @@ def _run_screen(args: argparse.Namespace) -> None:
         args,
         config,
         input_paths=input_paths,
-        task_name=str(coalesce_option(args.task_name, config, "task_name") or "unknown"),
+        task_name=str(
+            coalesce_option(args.task_name, config, "task_name") or "unknown"
+        ),
         cp_type=cp_type,
     )
     screen_dir.mkdir(parents=True, exist_ok=True)
@@ -295,22 +422,42 @@ def _run_screen(args: argparse.Namespace) -> None:
         frame = pd.read_parquet(input_paths[target_kind])
         if target_kind == "volt":
             frame = _ensure_voltage_screen_targets(frame, channel_names, args, config)
-            detail_frame = _build_voltage_screen_detail_frame(frame, channel_names, bounds_by_variable)
+            detail_frame = _build_voltage_screen_detail_frame(
+                frame, channel_names, bounds_by_variable
+            )
             entity_summary = _build_voltage_screen_entity_summary(detail_frame)
             summary_frame = _build_voltage_screen_summary(detail_frame)
-            detail_frame.to_csv(screen_dir / "trust_screen_detail_volt.csv", index=False)
-            entity_summary.to_csv(screen_dir / "trust_screen_entity_volt.csv", index=False)
-            summary_frame.to_csv(screen_dir / "trust_screen_summary_volt.csv", index=False)
-            _save_screen_figures(entity_summary, summary_frame, figures_dir, target_kind="volt")
+            detail_frame.to_csv(
+                screen_dir / "trust_screen_detail_volt.csv", index=False
+            )
+            entity_summary.to_csv(
+                screen_dir / "trust_screen_entity_volt.csv", index=False
+            )
+            summary_frame.to_csv(
+                screen_dir / "trust_screen_summary_volt.csv", index=False
+            )
+            _save_screen_figures(
+                entity_summary, summary_frame, figures_dir, target_kind="volt"
+            )
         else:
             frame = _ensure_line_screen_targets(frame, channel_names, args, config)
-            detail_frame = _build_line_screen_detail_frame(frame, channel_names, bounds_by_variable)
+            detail_frame = _build_line_screen_detail_frame(
+                frame, channel_names, bounds_by_variable
+            )
             entity_summary = _build_line_screen_entity_summary(detail_frame)
             summary_frame = _build_line_screen_summary(detail_frame)
-            detail_frame.to_csv(screen_dir / "trust_screen_detail_line.csv", index=False)
-            entity_summary.to_csv(screen_dir / "trust_screen_entity_line.csv", index=False)
-            summary_frame.to_csv(screen_dir / "trust_screen_summary_line.csv", index=False)
-            _save_screen_figures(entity_summary, summary_frame, figures_dir, target_kind="line")
+            detail_frame.to_csv(
+                screen_dir / "trust_screen_detail_line.csv", index=False
+            )
+            entity_summary.to_csv(
+                screen_dir / "trust_screen_entity_line.csv", index=False
+            )
+            summary_frame.to_csv(
+                screen_dir / "trust_screen_summary_line.csv", index=False
+            )
+            _save_screen_figures(
+                entity_summary, summary_frame, figures_dir, target_kind="line"
+            )
 
 
 def _partition_variables(
@@ -345,7 +492,9 @@ def _resolve_application_scenario_ids(
         should_subset = _should_use_application_subset(calibrator, scenario_ids)
         if not should_subset:
             if application_ids is not None:
-                raise ValueError("All calibrators in a mixed artifact must agree on the application-scenario subset.")
+                raise ValueError(
+                    "All calibrators in a mixed artifact must agree on the application-scenario subset."
+                )
             continue
         assert calibrator.application_scenario_ids is not None
         candidate = calibrator.application_scenario_ids.astype(np.int64, copy=False)
@@ -356,7 +505,9 @@ def _resolve_application_scenario_ids(
             np.sort(application_ids.astype(np.int64, copy=False)),
             np.sort(candidate.astype(np.int64, copy=False)),
         ):
-            raise ValueError("All calibrators in a mixed artifact must share the same application-scenario subset.")
+            raise ValueError(
+                "All calibrators in a mixed artifact must share the same application-scenario subset."
+            )
     return None if application_ids is None else application_ids.copy()
 
 
@@ -377,7 +528,9 @@ def _resolve_output_path(
         if output_path is None:
             output_path = coalesce_option(args.output, config, "calibrated_predictions")
         if output_path is None:
-            output_path = str(_default_output_dir(task_name, cp_type).joinpath(default_name))
+            output_path = str(
+                _default_output_dir(task_name, cp_type).joinpath(default_name)
+            )
         return str(output_path)
 
     if args.output is not None:
@@ -417,13 +570,19 @@ def _resolve_screen_bounds(
     raw_bounds = config.get("screen_bounds")
     if raw_bounds is not None:
         if not isinstance(raw_bounds, dict):
-            raise ValueError("screen_bounds must be a mapping from variable name to lower/upper bounds.")
+            raise ValueError(
+                "screen_bounds must be a mapping from variable name to lower/upper bounds."
+            )
         for raw_name, raw_value in raw_bounds.items():
             variable = normalize_variables([str(raw_name)])[0]
             if not isinstance(raw_value, dict):
-                raise ValueError(f"screen_bounds.{raw_name} must be a mapping with 'lower' and 'upper'.")
+                raise ValueError(
+                    f"screen_bounds.{raw_name} must be a mapping with 'lower' and 'upper'."
+                )
             if "lower" not in raw_value or "upper" not in raw_value:
-                raise ValueError(f"screen_bounds.{raw_name} must define both 'lower' and 'upper'.")
+                raise ValueError(
+                    f"screen_bounds.{raw_name} must define both 'lower' and 'upper'."
+                )
             bounds_by_variable[variable] = {
                 "lower": float(raw_value["lower"]),
                 "upper": float(raw_value["upper"]),
@@ -431,9 +590,13 @@ def _resolve_screen_bounds(
 
     if args.lower_bound is not None or args.upper_bound is not None:
         if len(variables) != 1:
-            raise ValueError("--lower-bound and --upper-bound can override bounds only when screening a single variable.")
+            raise ValueError(
+                "--lower-bound and --upper-bound can override bounds only when screening a single variable."
+            )
         if args.lower_bound is None or args.upper_bound is None:
-            raise ValueError("Provide both --lower-bound and --upper-bound when overriding screening bounds from the CLI.")
+            raise ValueError(
+                "Provide both --lower-bound and --upper-bound when overriding screening bounds from the CLI."
+            )
         bounds_by_variable[variables[0]] = {
             "lower": float(args.lower_bound),
             "upper": float(args.upper_bound),
@@ -506,7 +669,9 @@ def _ensure_voltage_screen_targets(
     args: argparse.Namespace,
     config: dict[str, object],
 ) -> pd.DataFrame:
-    missing_targets = [variable for variable in variables if f"{variable}_target" not in frame.columns]
+    missing_targets = [
+        variable for variable in variables if f"{variable}_target" not in frame.columns
+    ]
     if not missing_targets:
         return frame
 
@@ -522,8 +687,12 @@ def _ensure_voltage_screen_targets(
         },
     )
     for variable in missing_targets:
-        target_frame[f"{variable}_target"] = _ground_truth_channel(ground_truth, variable).reshape(-1)
-    return frame.merge(target_frame, on=["scenario", "bus"], how="left", validate="one_to_one")
+        target_frame[f"{variable}_target"] = _ground_truth_channel(
+            ground_truth, variable
+        ).reshape(-1)
+    return frame.merge(
+        target_frame, on=["scenario", "bus"], how="left", validate="one_to_one"
+    )
 
 
 def _ensure_line_screen_targets(
@@ -532,7 +701,9 @@ def _ensure_line_screen_targets(
     args: argparse.Namespace,
     config: dict[str, object],
 ) -> pd.DataFrame:
-    missing_target = any(f"{variable}_target" not in frame.columns for variable in variables)
+    missing_target = any(
+        f"{variable}_target" not in frame.columns for variable in variables
+    )
     missing_metadata = not {"from_bus", "to_bus", "rate_a"}.issubset(frame.columns)
     if not missing_target and not missing_metadata:
         return frame
@@ -542,10 +713,14 @@ def _ensure_line_screen_targets(
         config,
         frame["scenario"].drop_duplicates().to_numpy(dtype=np.int64, copy=True),
     )
-    target_loading = compute_line_loading(ground_truth.Vm, ground_truth.Va, ground_truth)
+    target_loading = compute_line_loading(
+        ground_truth.Vm, ground_truth.Va, ground_truth
+    )
     target_frame = pd.DataFrame(
         {
-            "scenario": np.repeat(ground_truth.scenario_ids, len(ground_truth.branch_ids)),
+            "scenario": np.repeat(
+                ground_truth.scenario_ids, len(ground_truth.branch_ids)
+            ),
             "branch": np.tile(ground_truth.branch_ids, len(ground_truth.scenario_ids)),
             "from_bus": np.tile(ground_truth.f_bus, len(ground_truth.scenario_ids)),
             "to_bus": np.tile(ground_truth.t_bus, len(ground_truth.scenario_ids)),
@@ -554,8 +729,17 @@ def _ensure_line_screen_targets(
         },
     )
     merge_columns = ["scenario", "branch"]
-    extra_columns = [column for column in ["from_bus", "to_bus", "rate_a", "line_loading_target"] if column not in frame.columns]
-    return frame.merge(target_frame.loc[:, merge_columns + extra_columns], on=merge_columns, how="left", validate="one_to_one")
+    extra_columns = [
+        column
+        for column in ["from_bus", "to_bus", "rate_a", "line_loading_target"]
+        if column not in frame.columns
+    ]
+    return frame.merge(
+        target_frame.loc[:, merge_columns + extra_columns],
+        on=merge_columns,
+        how="left",
+        validate="one_to_one",
+    )
 
 
 def _build_voltage_screen_detail_frame(
@@ -569,15 +753,33 @@ def _build_voltage_screen_detail_frame(
         target_column = f"{variable}_target"
         lower_column = f"{variable}_pi_lower"
         upper_column = f"{variable}_pi_upper"
-        required_columns = {"scenario", "bus", target_column, lower_column, upper_column}
+        required_columns = {
+            "scenario",
+            "bus",
+            target_column,
+            lower_column,
+            upper_column,
+        }
         if not required_columns.issubset(frame.columns):
-            raise ValueError(f"Missing required voltage-screen columns for {variable}: {sorted(required_columns - set(frame.columns))}")
-        variable_frame = frame.loc[:, ["scenario", "bus", target_column, lower_column, upper_column]].copy()
+            raise ValueError(
+                f"Missing required voltage-screen columns for {variable}: {sorted(required_columns - set(frame.columns))}"
+            )
+        variable_frame = frame.loc[
+            :, ["scenario", "bus", target_column, lower_column, upper_column]
+        ].copy()
         variable_frame["variable"] = variable
-        variable_frame["bus_type"] = variable_frame["bus"].map(lambda bus: bus_type_by_bus.get(int(bus), "Unknown"))
-        variable_frame = _append_screen_flag_columns(variable_frame, variable, bounds_by_variable[variable])
+        variable_frame["bus_type"] = variable_frame["bus"].map(
+            lambda bus: bus_type_by_bus.get(int(bus), "Unknown")
+        )
+        variable_frame = _append_screen_flag_columns(
+            variable_frame, variable, bounds_by_variable[variable]
+        )
         records.append(variable_frame)
-    return pd.concat(records, ignore_index=True).sort_values(["variable", "scenario", "bus"]).reset_index(drop=True)
+    return (
+        pd.concat(records, ignore_index=True)
+        .sort_values(["variable", "scenario", "bus"])
+        .reset_index(drop=True)
+    )
 
 
 def _build_line_screen_detail_frame(
@@ -590,16 +792,45 @@ def _build_line_screen_detail_frame(
         target_column = f"{variable}_target"
         lower_column = f"{variable}_pi_lower"
         upper_column = f"{variable}_pi_upper"
-        required_columns = {"scenario", "branch", "from_bus", "to_bus", "rate_a", target_column, lower_column, upper_column}
+        required_columns = {
+            "scenario",
+            "branch",
+            "from_bus",
+            "to_bus",
+            "rate_a",
+            target_column,
+            lower_column,
+            upper_column,
+        }
         if not required_columns.issubset(frame.columns):
-            raise ValueError(f"Missing required line-screen columns for {variable}: {sorted(required_columns - set(frame.columns))}")
-        variable_frame = frame.loc[:, ["scenario", "branch", "from_bus", "to_bus", "rate_a", target_column, lower_column, upper_column]].copy()
+            raise ValueError(
+                f"Missing required line-screen columns for {variable}: {sorted(required_columns - set(frame.columns))}"
+            )
+        variable_frame = frame.loc[
+            :,
+            [
+                "scenario",
+                "branch",
+                "from_bus",
+                "to_bus",
+                "rate_a",
+                target_column,
+                lower_column,
+                upper_column,
+            ],
+        ].copy()
         valid_mask = variable_frame[target_column] >= 0.0
         variable_frame = variable_frame[valid_mask].copy()
         variable_frame["variable"] = variable
-        variable_frame = _append_screen_flag_columns(variable_frame, variable, bounds_by_variable[variable])
+        variable_frame = _append_screen_flag_columns(
+            variable_frame, variable, bounds_by_variable[variable]
+        )
         records.append(variable_frame)
-    return pd.concat(records, ignore_index=True).sort_values(["variable", "scenario", "branch"]).reset_index(drop=True)
+    return (
+        pd.concat(records, ignore_index=True)
+        .sort_values(["variable", "scenario", "branch"])
+        .reset_index(drop=True)
+    )
 
 
 def _append_screen_flag_columns(
@@ -617,12 +848,24 @@ def _append_screen_flag_columns(
     frame["pi_upper"] = frame[upper_column].astype(float)
     frame["lower_bound"] = lower_bound
     frame["upper_bound"] = upper_bound
-    frame["pred_lower_violation"] = frame["pi_lower"] < (lower_bound - SCREEN_BOUND_TOLERANCE)
-    frame["true_lower_violation"] = frame["target"] < (lower_bound - SCREEN_BOUND_TOLERANCE)
-    frame["pred_upper_violation"] = frame["pi_upper"] > (upper_bound + SCREEN_BOUND_TOLERANCE)
-    frame["true_upper_violation"] = frame["target"] > (upper_bound + SCREEN_BOUND_TOLERANCE)
-    frame["pred_any_violation"] = frame["pred_lower_violation"] | frame["pred_upper_violation"]
-    frame["true_any_violation"] = frame["true_lower_violation"] | frame["true_upper_violation"]
+    frame["pred_lower_violation"] = frame["pi_lower"] < (
+        lower_bound - SCREEN_BOUND_TOLERANCE
+    )
+    frame["true_lower_violation"] = frame["target"] < (
+        lower_bound - SCREEN_BOUND_TOLERANCE
+    )
+    frame["pred_upper_violation"] = frame["pi_upper"] > (
+        upper_bound + SCREEN_BOUND_TOLERANCE
+    )
+    frame["true_upper_violation"] = frame["target"] > (
+        upper_bound + SCREEN_BOUND_TOLERANCE
+    )
+    frame["pred_any_violation"] = (
+        frame["pred_lower_violation"] | frame["pred_upper_violation"]
+    )
+    frame["true_any_violation"] = (
+        frame["true_lower_violation"] | frame["true_upper_violation"]
+    )
     for side in ("lower", "upper", "any"):
         pred = frame[f"pred_{side}_violation"]
         true = frame[f"true_{side}_violation"]
@@ -656,23 +899,49 @@ def _build_screen_entity_summary(
     sort_columns: list[str],
 ) -> pd.DataFrame:
     aggregate_map = {column: (column, "sum") for column in _screen_count_columns()}
-    summary = detail_frame.groupby(group_columns, sort=True, dropna=False).agg(
-        n_samples=("scenario", "size"),
-        **aggregate_map,
-    ).reset_index()
+    summary = (
+        detail_frame.groupby(group_columns, sort=True, dropna=False)
+        .agg(
+            n_samples=("scenario", "size"),
+            **aggregate_map,
+        )
+        .reset_index()
+    )
     summary = _add_screen_metric_columns(summary)
     return summary.sort_values(sort_columns).reset_index(drop=True)
 
 
 def _build_voltage_screen_summary(detail_frame: pd.DataFrame) -> pd.DataFrame:
-    system = _build_grouped_screen_summary(detail_frame, group_columns=["variable"], scope="system", group_value_column="bus_type", group_value=float("nan"))
-    bus_type = _build_grouped_screen_summary(detail_frame, group_columns=["variable", "bus_type"], scope="bus_type", group_value_column="bus_type")
+    system = _build_grouped_screen_summary(
+        detail_frame,
+        group_columns=["variable"],
+        scope="system",
+        group_value_column="bus_type",
+        group_value=float("nan"),
+    )
+    bus_type = _build_grouped_screen_summary(
+        detail_frame,
+        group_columns=["variable", "bus_type"],
+        scope="bus_type",
+        group_value_column="bus_type",
+    )
     return pd.concat([system, bus_type], ignore_index=True)
 
 
 def _build_line_screen_summary(detail_frame: pd.DataFrame) -> pd.DataFrame:
-    system = _build_grouped_screen_summary(detail_frame, group_columns=["variable"], scope="system", group_value_column="rate_a", group_value=float("nan"))
-    rate_a = _build_grouped_screen_summary(detail_frame, group_columns=["variable", "rate_a"], scope="rate_a", group_value_column="rate_a")
+    system = _build_grouped_screen_summary(
+        detail_frame,
+        group_columns=["variable"],
+        scope="system",
+        group_value_column="rate_a",
+        group_value=float("nan"),
+    )
+    rate_a = _build_grouped_screen_summary(
+        detail_frame,
+        group_columns=["variable", "rate_a"],
+        scope="rate_a",
+        group_value_column="rate_a",
+    )
     if not system.empty:
         system["rate_a"] = system["rate_a"].astype(float)
     if not rate_a.empty:
@@ -696,7 +965,9 @@ def _build_grouped_screen_summary(
         record: dict[str, object] = {
             "scope": scope,
             "variable": str(group_key[0]),
-            "n_entities": int(group["bus"].nunique()) if "bus" in group.columns else int(group["branch"].nunique()),
+            "n_entities": int(group["bus"].nunique())
+            if "bus" in group.columns
+            else int(group["branch"].nunique()),
             "n_samples": int(len(group)),
         }
         if len(group_columns) > 1:
@@ -762,10 +1033,16 @@ def _save_screen_figures(
             ax.set_ylabel(metric)
             ax.legend()
             fig.tight_layout()
-            fig.savefig(figures_dir / f"{variable.lower()}_{metric}_{entity_column}_summary.png", dpi=150)
+            fig.savefig(
+                figures_dir
+                / f"{variable.lower()}_{metric}_{entity_column}_summary.png",
+                dpi=150,
+            )
             plt.close(fig)
 
-            finite_values = group[f"any_{metric}"].dropna().to_numpy(dtype=float, copy=True)
+            finite_values = (
+                group[f"any_{metric}"].dropna().to_numpy(dtype=float, copy=True)
+            )
             if finite_values.size > 0:
                 fig, ax = plt.subplots(figsize=(8, 4))
                 bins = min(max(len(finite_values) // 2, 5), 20)
@@ -774,7 +1051,10 @@ def _save_screen_figures(
                 ax.set_xlabel(metric)
                 ax.set_ylabel("density")
                 fig.tight_layout()
-                fig.savefig(figures_dir / f"{variable.lower()}_any_{metric}_density.png", dpi=150)
+                fig.savefig(
+                    figures_dir / f"{variable.lower()}_any_{metric}_density.png",
+                    dpi=150,
+                )
                 plt.close(fig)
 
         system_row = summary_frame[
@@ -798,10 +1078,18 @@ def _save_screen_figures(
             ax.set_title(f"{variable} {side} confusion")
             for row_index in range(2):
                 for column_index in range(2):
-                    ax.text(column_index, row_index, str(int(matrix[row_index, column_index])), ha="center", va="center")
+                    ax.text(
+                        column_index,
+                        row_index,
+                        str(int(matrix[row_index, column_index])),
+                        ha="center",
+                        va="center",
+                    )
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
             fig.tight_layout()
-            fig.savefig(figures_dir / f"{variable.lower()}_{side}_confusion.png", dpi=150)
+            fig.savefig(
+                figures_dir / f"{variable.lower()}_{side}_confusion.png", dpi=150
+            )
             plt.close(fig)
 
 
@@ -842,7 +1130,9 @@ def _build_entity_output_frame(
         frame[column_name] = np.tile(values, len(scenario_ids))
     for channel_name, prediction_values in predictions.channels.items():
         frame[f"{channel_name}_pred"] = prediction_values.reshape(-1)
-        frame[f"{channel_name}_target"] = ground_truth.channels[channel_name].reshape(-1)
+        frame[f"{channel_name}_target"] = ground_truth.channels[channel_name].reshape(
+            -1
+        )
         lower, upper = intervals[channel_name]
         frame[f"{channel_name}_pi_lower"] = lower.reshape(-1)
         frame[f"{channel_name}_pi_upper"] = upper.reshape(-1)
@@ -876,9 +1166,14 @@ def _build_bus_channel_set(
         scenario_ids=predictions.scenario_ids.copy(),
         entity_ids=predictions.bus_ids.copy(),
         entity_name="bus",
-        channels={channel_name: _prediction_channel(predictions, channel_name).copy() for channel_name in channel_names},
+        channels={
+            channel_name: _prediction_channel(predictions, channel_name).copy()
+            for channel_name in channel_names
+        },
         entity_columns={
-            "bus_type": _bus_type_labels_array(predictions.bus_ids, predictions.bus_type_masks),
+            "bus_type": _bus_type_labels_array(
+                predictions.bus_ids, predictions.bus_type_masks
+            ),
         },
     )
 
@@ -891,9 +1186,14 @@ def _build_ground_truth_bus_channel_set(
         scenario_ids=ground_truth.scenario_ids.copy(),
         entity_ids=ground_truth.bus_ids.copy(),
         entity_name="bus",
-        channels={channel_name: _ground_truth_channel(ground_truth, channel_name).copy() for channel_name in channel_names},
+        channels={
+            channel_name: _ground_truth_channel(ground_truth, channel_name).copy()
+            for channel_name in channel_names
+        },
         entity_columns={
-            "bus_type": _bus_type_labels_array(ground_truth.bus_ids, ground_truth.bus_type_masks),
+            "bus_type": _bus_type_labels_array(
+                ground_truth.bus_ids, ground_truth.bus_type_masks
+            ),
         },
     )
 
@@ -902,8 +1202,12 @@ def _build_line_loading_sets(
     predictions,
     ground_truth,
 ) -> tuple[ChannelSet, ChannelSet]:
-    predicted_loading = compute_line_loading(predictions.Vm, predictions.Va, ground_truth)
-    target_loading = compute_line_loading(ground_truth.Vm, ground_truth.Va, ground_truth)
+    predicted_loading = compute_line_loading(
+        predictions.Vm, predictions.Va, ground_truth
+    )
+    target_loading = compute_line_loading(
+        ground_truth.Vm, ground_truth.Va, ground_truth
+    )
     valid_mask = (predicted_loading >= 0.0) & (target_loading >= 0.0)
     entity_columns = {
         "from_bus": ground_truth.f_bus.astype(np.int64, copy=True),
@@ -939,9 +1243,17 @@ def _subset_channel_set(
         scenario_ids=channel_set.scenario_ids[scenario_mask].copy(),
         entity_ids=channel_set.entity_ids.copy(),
         entity_name=channel_set.entity_name,
-        channels={name: values[scenario_mask].copy() for name, values in channel_set.channels.items()},
-        valid_masks={name: values[scenario_mask].copy() for name, values in channel_set.valid_masks.items()},
-        entity_columns={name: values.copy() for name, values in channel_set.entity_columns.items()},
+        channels={
+            name: values[scenario_mask].copy()
+            for name, values in channel_set.channels.items()
+        },
+        valid_masks={
+            name: values[scenario_mask].copy()
+            for name, values in channel_set.valid_masks.items()
+        },
+        entity_columns={
+            name: values.copy() for name, values in channel_set.entity_columns.items()
+        },
     )
 
 
@@ -962,10 +1274,16 @@ def _split_calibration_scenarios(
     n_calibration = min(max(n_calibration, 1), len(scenario_ids) - 1)
     rng = np.random.default_rng(None if random_seed is None else int(random_seed))
     calibration_ids = np.sort(
-        rng.choice(scenario_ids, size=n_calibration, replace=False).astype(np.int64, copy=False),
+        rng.choice(scenario_ids, size=n_calibration, replace=False).astype(
+            np.int64, copy=False
+        ),
     )
     application_ids = np.array(
-        [scenario_id for scenario_id in scenario_ids if scenario_id not in set(calibration_ids.tolist())],
+        [
+            scenario_id
+            for scenario_id in scenario_ids
+            if scenario_id not in set(calibration_ids.tolist())
+        ],
         dtype=np.int64,
     )
     return {
@@ -979,7 +1297,10 @@ def _should_use_application_subset(
     calibrator: NaiveIntervalCalibrator,
     scenario_ids: np.ndarray,
 ) -> bool:
-    if calibrator.split_pool_scenario_ids is None or calibrator.application_scenario_ids is None:
+    if (
+        calibrator.split_pool_scenario_ids is None
+        or calibrator.application_scenario_ids is None
+    ):
         return False
     return np.array_equal(
         np.sort(scenario_ids.astype(np.int64, copy=False)),
@@ -1020,8 +1341,14 @@ def _subset_prediction_set(
         bus_ids=predictions.bus_ids.copy(),
         Vm=predictions.Vm[scenario_mask].copy(),
         Va=predictions.Va[scenario_mask].copy(),
-        channels={name: values[scenario_mask].copy() for name, values in predictions.channels.items()},
-        bus_type_masks={name: values[scenario_mask].copy() for name, values in predictions.bus_type_masks.items()},
+        channels={
+            name: values[scenario_mask].copy()
+            for name, values in predictions.channels.items()
+        },
+        bus_type_masks={
+            name: values[scenario_mask].copy()
+            for name, values in predictions.bus_type_masks.items()
+        },
         generator_predictions=generator_predictions,
     )
 
@@ -1039,25 +1366,41 @@ def _subset_ground_truth_set(
         removed_mask=ground_truth.removed_mask[scenario_mask].copy(),
         Vm=ground_truth.Vm[scenario_mask].copy(),
         Va=ground_truth.Va[scenario_mask].copy(),
-        channels={name: values[scenario_mask].copy() for name, values in ground_truth.channels.items()},
-        admittances={name: values[scenario_mask].copy() for name, values in ground_truth.admittances.items()},
+        channels={
+            name: values[scenario_mask].copy()
+            for name, values in ground_truth.channels.items()
+        },
+        admittances={
+            name: values[scenario_mask].copy()
+            for name, values in ground_truth.admittances.items()
+        },
         f_bus=ground_truth.f_bus.copy(),
         t_bus=ground_truth.t_bus.copy(),
         rate_a=ground_truth.rate_a.copy(),
         base_kv=ground_truth.base_kv.copy(),
         sn_mva=ground_truth.sn_mva,
-        bus_type_masks={name: values[scenario_mask].copy() for name, values in ground_truth.bus_type_masks.items()},
+        bus_type_masks={
+            name: values[scenario_mask].copy()
+            for name, values in ground_truth.bus_type_masks.items()
+        },
     )
 
 
 def _default_output_dir(task_name: str, cp_type: str) -> Path:
-    output_dir = Path.cwd() / "trustlayer_outputs" / _normalize_output_segment(task_name) / _normalize_output_segment(cp_type)
+    output_dir = (
+        Path.cwd()
+        / "trustlayer_outputs"
+        / _normalize_output_segment(task_name)
+        / _normalize_output_segment(cp_type)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 
 
 def _normalize_output_segment(value: str) -> str:
-    normalized = "".join(character.lower() if character.isalnum() else "-" for character in value.strip())
+    normalized = "".join(
+        character.lower() if character.isalnum() else "-" for character in value.strip()
+    )
     normalized = "-".join(part for part in normalized.split("-") if part)
     return normalized or "unknown"
 
@@ -1108,14 +1451,24 @@ def _build_analysis_frame(
                     "width_mean": float(width_mean_per_bus[index]),
                     "width_min": float(width_min_per_bus[index]),
                     "width_max": float(width_max_per_bus[index]),
-                    "width_mean_degrees": _maybe_width_degrees(channel_name, width_mean_per_bus[index]),
-                    "width_min_degrees": _maybe_width_degrees(channel_name, width_min_per_bus[index]),
-                    "width_max_degrees": _maybe_width_degrees(channel_name, width_max_per_bus[index]),
+                    "width_mean_degrees": _maybe_width_degrees(
+                        channel_name, width_mean_per_bus[index]
+                    ),
+                    "width_min_degrees": _maybe_width_degrees(
+                        channel_name, width_min_per_bus[index]
+                    ),
+                    "width_max_degrees": _maybe_width_degrees(
+                        channel_name, width_max_per_bus[index]
+                    ),
                     "empirical_coverage": float(coverage_mean_per_bus[index]),
                     "n_samples": n_samples,
                 },
             )
-    return pd.DataFrame.from_records(records).sort_values(["variable", "bus"]).reset_index(drop=True)
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(["variable", "bus"])
+        .reset_index(drop=True)
+    )
 
 
 def _build_line_analysis_frame(
@@ -1128,14 +1481,41 @@ def _build_line_analysis_frame(
         lower_column = f"{variable}_pi_lower"
         upper_column = f"{variable}_pi_upper"
         pred_column = f"{variable}_pred"
-        required_columns = {"branch", "from_bus", "to_bus", "rate_a", pred_column, target_column, lower_column, upper_column}
+        required_columns = {
+            "branch",
+            "from_bus",
+            "to_bus",
+            "rate_a",
+            pred_column,
+            target_column,
+            lower_column,
+            upper_column,
+        }
         if not required_columns.issubset(frame.columns):
-            raise ValueError(f"Missing required line-analysis columns for {variable}: {sorted(required_columns - set(frame.columns))}")
+            raise ValueError(
+                f"Missing required line-analysis columns for {variable}: {sorted(required_columns - set(frame.columns))}"
+            )
 
-        variable_frame = frame.loc[:, ["branch", "from_bus", "to_bus", "rate_a", pred_column, target_column, lower_column, upper_column]].copy()
-        valid_mask = (variable_frame[pred_column] >= 0.0) & (variable_frame[target_column] >= 0.0)
+        variable_frame = frame.loc[
+            :,
+            [
+                "branch",
+                "from_bus",
+                "to_bus",
+                "rate_a",
+                pred_column,
+                target_column,
+                lower_column,
+                upper_column,
+            ],
+        ].copy()
+        valid_mask = (variable_frame[pred_column] >= 0.0) & (
+            variable_frame[target_column] >= 0.0
+        )
         variable_frame = variable_frame[valid_mask].copy()
-        variable_frame["interval_width"] = variable_frame[upper_column] - variable_frame[lower_column]
+        variable_frame["interval_width"] = (
+            variable_frame[upper_column] - variable_frame[lower_column]
+        )
         variable_frame["covered"] = (
             (variable_frame[target_column] >= variable_frame[lower_column])
             & (variable_frame[target_column] <= variable_frame[upper_column])
@@ -1166,7 +1546,11 @@ def _build_line_analysis_frame(
                     "n_samples": int(row["n_samples"]),
                 },
             )
-    return pd.DataFrame.from_records(records).sort_values(["variable", "branch"]).reset_index(drop=True)
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(["variable", "branch"])
+        .reset_index(drop=True)
+    )
 
 
 def _build_analysis_frame_from_targets(
@@ -1183,8 +1567,12 @@ def _build_analysis_frame_from_targets(
         if not required_columns.issubset(frame.columns):
             return None
 
-        variable_frame = frame.loc[:, ["bus", target_column, lower_column, upper_column]].copy()
-        variable_frame["interval_width"] = variable_frame[upper_column] - variable_frame[lower_column]
+        variable_frame = frame.loc[
+            :, ["bus", target_column, lower_column, upper_column]
+        ].copy()
+        variable_frame["interval_width"] = (
+            variable_frame[upper_column] - variable_frame[lower_column]
+        )
         variable_frame["covered"] = (
             (variable_frame[target_column] >= variable_frame[lower_column])
             & (variable_frame[target_column] <= variable_frame[upper_column])
@@ -1206,14 +1594,24 @@ def _build_analysis_frame_from_targets(
                     "width_mean": float(row["width_mean"]),
                     "width_min": float(row["width_min"]),
                     "width_max": float(row["width_max"]),
-                    "width_mean_degrees": _maybe_width_degrees(variable, row["width_mean"]),
-                    "width_min_degrees": _maybe_width_degrees(variable, row["width_min"]),
-                    "width_max_degrees": _maybe_width_degrees(variable, row["width_max"]),
+                    "width_mean_degrees": _maybe_width_degrees(
+                        variable, row["width_mean"]
+                    ),
+                    "width_min_degrees": _maybe_width_degrees(
+                        variable, row["width_min"]
+                    ),
+                    "width_max_degrees": _maybe_width_degrees(
+                        variable, row["width_max"]
+                    ),
                     "empirical_coverage": float(row["empirical_coverage"]),
                     "n_samples": int(row["n_samples"]),
                 },
             )
-    return pd.DataFrame.from_records(records).sort_values(["variable", "bus"]).reset_index(drop=True)
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(["variable", "bus"])
+        .reset_index(drop=True)
+    )
 
 
 def _resolve_bus_type_labels_from_masks(
@@ -1236,7 +1634,10 @@ def _bus_type_labels_array(
     bus_type_masks: dict[str, np.ndarray],
 ) -> np.ndarray:
     labels = _resolve_bus_type_labels_from_masks(bus_ids, bus_type_masks)
-    return np.asarray([labels.get(int(bus_id), "Unknown") for bus_id in bus_ids.tolist()], dtype=object)
+    return np.asarray(
+        [labels.get(int(bus_id), "Unknown") for bus_id in bus_ids.tolist()],
+        dtype=object,
+    )
 
 
 def _entity_column_map(channel_set: ChannelSet, column_name: str) -> dict[int, object]:
@@ -1252,10 +1653,14 @@ def _entity_column_map(channel_set: ChannelSet, column_name: str) -> dict[int, o
 def _resolve_bus_type_labels_from_frame(frame: pd.DataFrame) -> dict[int, str]:
     if "bus" not in frame.columns:
         return {}
-    bus_type_frame = frame.loc[:, [column for column in ["bus", "REF", "PV", "PQ"] if column in frame.columns]]
+    bus_type_frame = frame.loc[
+        :, [column for column in ["bus", "REF", "PV", "PQ"] if column in frame.columns]
+    ]
     if len(bus_type_frame.columns) == 1:
         return {}
-    grouped = bus_type_frame.groupby("bus", sort=True).max(numeric_only=True).reset_index()
+    grouped = (
+        bus_type_frame.groupby("bus", sort=True).max(numeric_only=True).reset_index()
+    )
     labels: dict[int, str] = {}
     for _, row in grouped.iterrows():
         labels[int(row["bus"])] = _bus_type_label_from_flags(
@@ -1305,7 +1710,9 @@ def _save_analysis_figures(
         width_mean = group["width_mean"].to_numpy(dtype=float, copy=True)
         width_min = group["width_min"].to_numpy(dtype=float, copy=True)
         width_max = group["width_max"].to_numpy(dtype=float, copy=True)
-        empirical_coverage = group["empirical_coverage"].to_numpy(dtype=float, copy=True)
+        empirical_coverage = group["empirical_coverage"].to_numpy(
+            dtype=float, copy=True
+        )
 
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(bus_values, width_mean, label="mean")
@@ -1342,7 +1749,9 @@ def _save_analysis_figures(
 
         fig, ax = plt.subplots(figsize=(8, 4))
         coverage_bins = np.linspace(0.0, 1.0, num=11)
-        ax.hist(empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75)
+        ax.hist(
+            empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75
+        )
         ax.set_title(f"{variable} empirical coverage density")
         ax.set_xlabel("empirical coverage")
         ax.set_ylabel("density")
@@ -1360,7 +1769,9 @@ def _save_line_analysis_figures(
         width_mean = group["width_mean"].to_numpy(dtype=float, copy=True)
         width_min = group["width_min"].to_numpy(dtype=float, copy=True)
         width_max = group["width_max"].to_numpy(dtype=float, copy=True)
-        empirical_coverage = group["empirical_coverage"].to_numpy(dtype=float, copy=True)
+        empirical_coverage = group["empirical_coverage"].to_numpy(
+            dtype=float, copy=True
+        )
 
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(branch_values, width_mean, label="mean")
@@ -1397,7 +1808,9 @@ def _save_line_analysis_figures(
 
         fig, ax = plt.subplots(figsize=(8, 4))
         coverage_bins = np.linspace(0.0, 1.0, num=11)
-        ax.hist(empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75)
+        ax.hist(
+            empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75
+        )
         ax.set_title(f"{variable} empirical coverage density")
         ax.set_xlabel("empirical coverage")
         ax.set_ylabel("density")
@@ -1437,9 +1850,15 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
                 "width_mean_across_lines": float(group["width_mean"].mean()),
                 "width_min_across_lines": float(group["width_mean"].min()),
                 "width_max_across_lines": float(group["width_mean"].max()),
-                "empirical_coverage_mean_across_lines": float(group["empirical_coverage"].mean()),
-                "empirical_coverage_min_across_lines": float(group["empirical_coverage"].min()),
-                "empirical_coverage_max_across_lines": float(group["empirical_coverage"].max()),
+                "empirical_coverage_mean_across_lines": float(
+                    group["empirical_coverage"].mean()
+                ),
+                "empirical_coverage_min_across_lines": float(
+                    group["empirical_coverage"].min()
+                ),
+                "empirical_coverage_max_across_lines": float(
+                    group["empirical_coverage"].max()
+                ),
             },
         )
         grouped_by_rate = group.groupby("rate_a", sort=True, dropna=False)
@@ -1455,12 +1874,22 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
                     "width_mean_across_lines": float(rate_group["width_mean"].mean()),
                     "width_min_across_lines": float(rate_group["width_mean"].min()),
                     "width_max_across_lines": float(rate_group["width_mean"].max()),
-                    "empirical_coverage_mean_across_lines": float(rate_group["empirical_coverage"].mean()),
-                    "empirical_coverage_min_across_lines": float(rate_group["empirical_coverage"].min()),
-                    "empirical_coverage_max_across_lines": float(rate_group["empirical_coverage"].max()),
+                    "empirical_coverage_mean_across_lines": float(
+                        rate_group["empirical_coverage"].mean()
+                    ),
+                    "empirical_coverage_min_across_lines": float(
+                        rate_group["empirical_coverage"].min()
+                    ),
+                    "empirical_coverage_max_across_lines": float(
+                        rate_group["empirical_coverage"].max()
+                    ),
                 },
             )
-    return pd.DataFrame.from_records(records).sort_values(["scope", "variable", "rate_a"], na_position="first").reset_index(drop=True)
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(["scope", "variable", "rate_a"], na_position="first")
+        .reset_index(drop=True)
+    )
 
 
 def _aggregate_summary_rows(
@@ -1488,15 +1917,31 @@ def _aggregate_summary_rows(
                 "width_mean_across_buses": float(group["width_mean"].mean()),
                 "width_min_across_buses": float(group["width_mean"].min()),
                 "width_max_across_buses": float(group["width_mean"].max()),
-                "empirical_coverage_mean_across_buses": float(group["empirical_coverage"].mean()),
-                "empirical_coverage_min_across_buses": float(group["empirical_coverage"].min()),
-                "empirical_coverage_max_across_buses": float(group["empirical_coverage"].max()),
-                "width_mean_degrees_across_buses": _summary_or_nan(group["width_mean_degrees"]),
-                "width_min_degrees_across_buses": _summary_or_nan(group["width_mean_degrees"], op="min"),
-                "width_max_degrees_across_buses": _summary_or_nan(group["width_mean_degrees"], op="max"),
+                "empirical_coverage_mean_across_buses": float(
+                    group["empirical_coverage"].mean()
+                ),
+                "empirical_coverage_min_across_buses": float(
+                    group["empirical_coverage"].min()
+                ),
+                "empirical_coverage_max_across_buses": float(
+                    group["empirical_coverage"].max()
+                ),
+                "width_mean_degrees_across_buses": _summary_or_nan(
+                    group["width_mean_degrees"]
+                ),
+                "width_min_degrees_across_buses": _summary_or_nan(
+                    group["width_mean_degrees"], op="min"
+                ),
+                "width_max_degrees_across_buses": _summary_or_nan(
+                    group["width_mean_degrees"], op="max"
+                ),
             },
         )
-    return pd.DataFrame.from_records(records).sort_values(["scope", "variable", "bus_type"]).reset_index(drop=True)
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(["scope", "variable", "bus_type"])
+        .reset_index(drop=True)
+    )
 
 
 def _summary_or_nan(values: pd.Series, op: str = "mean") -> float:
