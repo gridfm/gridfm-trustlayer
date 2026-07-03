@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable, cast
 
 import numpy as np
 
@@ -159,17 +159,27 @@ class NaiveIntervalCalibrator:
         if version != "trustlayer_naive_interval_v1":
             raise ValueError(f"Unsupported interval artifact version: {version!r}")
 
-        channel_names = tuple(str(name) for name in data["channel_names"])
+        raw_channel_names = data.get("channel_names")
+        if not isinstance(raw_channel_names, list):
+            raise ValueError("Interval artifact field 'channel_names' must be a list.")
+        raw_lower_residual_quantiles = data.get("lower_residual_quantiles")
+        if not isinstance(raw_lower_residual_quantiles, dict):
+            raise ValueError("Interval artifact field 'lower_residual_quantiles' must be a mapping.")
+        raw_upper_residual_quantiles = data.get("upper_residual_quantiles")
+        if not isinstance(raw_upper_residual_quantiles, dict):
+            raise ValueError("Interval artifact field 'upper_residual_quantiles' must be a mapping.")
+
+        channel_names = tuple(str(name) for name in raw_channel_names)
         lower_residual_quantiles = {
             str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
-            for key, values in dict(data["lower_residual_quantiles"]).items()
+            for key, values in raw_lower_residual_quantiles.items()
         }
         upper_residual_quantiles = {
             str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
-            for key, values in dict(data["upper_residual_quantiles"]).items()
+            for key, values in raw_upper_residual_quantiles.items()
         }
         return cls(
-            alpha=float(data["alpha"]),
+            alpha=float(cast(Any, data["alpha"])),
             entity_ids=np.asarray(data.get("entity_ids", data.get("bus_ids")), dtype=np.int64),
             entity_name=str(data.get("entity_name", "bus")),
             channel_names=channel_names,
@@ -289,10 +299,10 @@ def _optional_int_array(value: object | None) -> np.ndarray | None:
 def _optional_float(value: object | None) -> float | None:
     if value is None:
         return None
-    return float(value)
+    return float(cast(Any, value))
 
 
 def _optional_int(value: object | None) -> int | None:
     if value is None:
         return None
-    return int(value)
+    return int(cast(Any, value))

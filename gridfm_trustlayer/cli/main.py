@@ -798,7 +798,7 @@ def _save_screen_figures(
             ax.set_title(f"{variable} {side} confusion")
             for row_index in range(2):
                 for column_index in range(2):
-                    ax.text(column_index, row_index, int(matrix[row_index, column_index]), ha="center", va="center")
+                    ax.text(column_index, row_index, str(int(matrix[row_index, column_index])), ha="center", va="center")
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
             fig.tight_layout()
             fig.savefig(figures_dir / f"{variable.lower()}_{side}_confusion.png", dpi=150)
@@ -1342,7 +1342,7 @@ def _save_analysis_figures(
 
         fig, ax = plt.subplots(figsize=(8, 4))
         coverage_bins = np.linspace(0.0, 1.0, num=11)
-        ax.hist(empirical_coverage, bins=coverage_bins, density=True, alpha=0.75)
+        ax.hist(empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75)
         ax.set_title(f"{variable} empirical coverage density")
         ax.set_xlabel("empirical coverage")
         ax.set_ylabel("density")
@@ -1397,7 +1397,7 @@ def _save_line_analysis_figures(
 
         fig, ax = plt.subplots(figsize=(8, 4))
         coverage_bins = np.linspace(0.0, 1.0, num=11)
-        ax.hist(empirical_coverage, bins=coverage_bins, density=True, alpha=0.75)
+        ax.hist(empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75)
         ax.set_title(f"{variable} empirical coverage density")
         ax.set_xlabel("empirical coverage")
         ax.set_ylabel("density")

@@ -30,17 +30,17 @@ class TaskAdapter:
         generator_parquet_path: str | None,
     ) -> str | None:
         if generator_parquet_path is not None:
-            candidate = Path(generator_parquet_path)
-            if not candidate.exists():
-                raise ValueError(f"Missing generator predictions parquet: {candidate}")
-            return str(candidate)
+            candidate_path = Path(generator_parquet_path)
+            if not candidate_path.exists():
+                raise ValueError(f"Missing generator predictions parquet: {candidate_path}")
+            return str(candidate_path)
 
         if not self.requires_generator_artifact:
             return None
 
-        candidate = default_generator_artifact_path(bus_parquet_path)
-        if candidate is not None:
-            return candidate
+        sibling_generator_path = default_generator_artifact_path(bus_parquet_path)
+        if sibling_generator_path is not None:
+            return sibling_generator_path
         raise ValueError(
             "OptimalPowerFlow predictions require a sibling *_gen_predictions.parquet artifact.",
         )

@@ -508,7 +508,6 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     volt_entity = pd.read_csv(screen_dir / "trust_screen_entity_volt.csv")
     volt_summary = pd.read_csv(screen_dir / "trust_screen_summary_volt.csv")
     line_detail = pd.read_csv(screen_dir / "trust_screen_detail_line.csv")
-    line_entity = pd.read_csv(screen_dir / "trust_screen_entity_line.csv")
     line_summary = pd.read_csv(screen_dir / "trust_screen_summary_line.csv")
 
     assert set(volt_detail["variable"].unique().tolist()) == {"Vm"}
