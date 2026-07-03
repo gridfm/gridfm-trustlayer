@@ -23,7 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 graphkit = ["gridfm-graphkit>=0.0.6", "gridfm-datakit>=1.0.2"]
 dev = ["ruff", "mypy", "pre-commit", "build", "mkdocs", "mkdocs-material"]
-test = ["pytest", "pytest-cov"]
+test = ["pytest", "pytest-cov", "gridfm-datakit>=1.0.2"]
 
 [project.scripts]
 gridfm_trustlayer = "gridfm_trustlayer.cli:main"
