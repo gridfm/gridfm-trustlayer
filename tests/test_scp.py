@@ -115,12 +115,16 @@ def test_naive_interval_stratified_by_n_outages() -> None:
     )
     np.testing.assert_allclose(
         calibrator.stratified_lower_residual_quantiles["Vm"][0],
-        np.quantile(np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32), 0.1, axis=0),
+        np.quantile(
+            np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32), 0.1, axis=0
+        ),
         atol=1e-6,
     )
     np.testing.assert_allclose(
         calibrator.stratified_upper_residual_quantiles["Vm"][1],
-        np.quantile(np.array([[0.5, -0.5], [0.6, -0.6]], dtype=np.float32), 0.9, axis=0),
+        np.quantile(
+            np.array([[0.5, -0.5], [0.6, -0.6]], dtype=np.float32), 0.9, axis=0
+        ),
         atol=1e-6,
     )
 
@@ -186,8 +190,12 @@ def test_naive_interval_stratified_by_outage_type() -> None:
     )
 
     intervals = calibrator.predict_intervals(predictions)
-    np.testing.assert_allclose(intervals["Vm"][0][0], np.array([1.0, 1.0], dtype=np.float32))
-    np.testing.assert_allclose(intervals["Vm"][1][3], np.array([1.3, 0.7], dtype=np.float32))
+    np.testing.assert_allclose(
+        intervals["Vm"][0][0], np.array([1.0, 1.0], dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        intervals["Vm"][1][3], np.array([1.3, 0.7], dtype=np.float32)
+    )
 
     loaded = NaiveIntervalCalibrator.from_dict(calibrator.to_dict())
     assert loaded.strat == "outage_type"

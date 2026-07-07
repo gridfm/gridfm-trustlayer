@@ -354,7 +354,9 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                 scenario_columns=(
                     {}
                     if analysis_ground_truth is None
-                    else _build_scenario_columns(analysis_ground_truth, calibrator.strat)
+                    else _build_scenario_columns(
+                        analysis_ground_truth, calibrator.strat
+                    )
                 ),
             )
             intervals = calibrator.predict_intervals(application_predictions)
@@ -1286,9 +1288,7 @@ def _append_voltage_analysis_records(
                 "stratum_value": float("nan")
                 if stratum_value is None
                 else int(stratum_value),
-                "stratum_label": _format_stratum_label(
-                    stratification, stratum_value
-                ),
+                "stratum_label": _format_stratum_label(stratification, stratum_value),
                 "variable": variable,
                 "bus": int(bus_id),
                 "bus_type": bus_type_by_bus.get(int(bus_id), "Unknown"),
@@ -1709,7 +1709,9 @@ def _build_line_analysis_frame(
                     variable_frame=stratum_group,
                     analysis_scope="stratified",
                     stratification=stratification,
-                    stratum_value=None if pd.isna(stratum_value) else int(stratum_value),
+                    stratum_value=None
+                    if pd.isna(stratum_value)
+                    else int(stratum_value),
                 )
     return _finalize_analysis_frame(pd.DataFrame.from_records(records), "branch")
 
@@ -1743,9 +1745,7 @@ def _append_line_analysis_records(
                 "stratum_value": float("nan")
                 if stratum_value is None
                 else int(stratum_value),
-                "stratum_label": _format_stratum_label(
-                    stratification, stratum_value
-                ),
+                "stratum_label": _format_stratum_label(stratification, stratum_value),
                 "variable": variable,
                 "branch": int(row["branch"]),
                 "from_bus": int(row["from_bus"]),
@@ -1777,7 +1777,15 @@ def _build_analysis_frame_from_targets(
             return None
 
         variable_frame = frame.loc[
-            :, ["scenario", "bus", target_column, lower_column, upper_column, *strat_columns]
+            :,
+            [
+                "scenario",
+                "bus",
+                target_column,
+                lower_column,
+                upper_column,
+                *strat_columns,
+            ],
         ].copy()
         variable_frame["interval_width"] = (
             variable_frame[upper_column] - variable_frame[lower_column]
@@ -1804,7 +1812,9 @@ def _build_analysis_frame_from_targets(
                     bus_type_by_bus=bus_type_by_bus,
                     analysis_scope="stratified",
                     stratification=stratification,
-                    stratum_value=None if pd.isna(stratum_value) else int(stratum_value),
+                    stratum_value=None
+                    if pd.isna(stratum_value)
+                    else int(stratum_value),
                 )
     return _finalize_analysis_frame(pd.DataFrame.from_records(records), "bus")
 
@@ -1836,9 +1846,7 @@ def _append_voltage_analysis_records_from_frame(
                 "stratum_value": float("nan")
                 if stratum_value is None
                 else int(stratum_value),
-                "stratum_label": _format_stratum_label(
-                    stratification, stratum_value
-                ),
+                "stratum_label": _format_stratum_label(stratification, stratum_value),
                 "variable": variable,
                 "bus": int(row["bus"]),
                 "bus_type": bus_type_by_bus.get(int(row["bus"]), "Unknown"),
@@ -2099,7 +2107,9 @@ def _save_stratified_entity_figures(
         ["variable", "stratification"], sort=True, dropna=False
     ):
         suffix = _normalize_output_segment(f"by_{stratification}")
-        ordered_group = group.sort_values(["stratum_value", entity_column], na_position="first")
+        ordered_group = group.sort_values(
+            ["stratum_value", entity_column], na_position="first"
+        )
 
         fig, ax = plt.subplots(figsize=(10, 4))
         for stratum_value, stratum_group in ordered_group.groupby(
@@ -2110,12 +2120,16 @@ def _save_stratified_entity_figures(
                 stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
                 label=_format_stratum_label(stratification, stratum_value),
             )
-        ax.set_title(f"{variable} mean interval width by {entity_label} and {stratification}")
+        ax.set_title(
+            f"{variable} mean interval width by {entity_label} and {stratification}"
+        )
         ax.set_xlabel(entity_label)
         ax.set_ylabel("mean interval width")
         ax.legend()
         fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_summary_{suffix}.png", dpi=150)
+        fig.savefig(
+            figures_dir / f"{variable.lower()}_width_summary_{suffix}.png", dpi=150
+        )
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(10, 4))
@@ -2128,12 +2142,16 @@ def _save_stratified_entity_figures(
                 label=_format_stratum_label(stratification, stratum_value),
             )
         ax.set_ylim(0.0, 1.05)
-        ax.set_title(f"{variable} empirical coverage by {entity_label} and {stratification}")
+        ax.set_title(
+            f"{variable} empirical coverage by {entity_label} and {stratification}"
+        )
         ax.set_xlabel(entity_label)
         ax.set_ylabel("coverage")
         ax.legend()
         fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_summary_{suffix}.png", dpi=150)
+        fig.savefig(
+            figures_dir / f"{variable.lower()}_coverage_summary_{suffix}.png", dpi=150
+        )
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -2151,7 +2169,9 @@ def _save_stratified_entity_figures(
         ax.set_ylabel("density")
         ax.legend()
         fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_density_{suffix}.png", dpi=150)
+        fig.savefig(
+            figures_dir / f"{variable.lower()}_width_density_{suffix}.png", dpi=150
+        )
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -2160,9 +2180,7 @@ def _save_stratified_entity_figures(
         ):
             _plot_density_curve(
                 ax,
-                stratum_group["empirical_coverage"].to_numpy(
-                    dtype=float, copy=True
-                ),
+                stratum_group["empirical_coverage"].to_numpy(dtype=float, copy=True),
                 label=_format_stratum_label(stratification, stratum_value),
                 clip=(0.0, 1.0),
                 fill_alpha=0.22,
@@ -2173,7 +2191,9 @@ def _save_stratified_entity_figures(
         ax.set_xlim(0.0, 1.0)
         ax.legend()
         fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_density_{suffix}.png", dpi=150)
+        fig.savefig(
+            figures_dir / f"{variable.lower()}_coverage_density_{suffix}.png", dpi=150
+        )
         plt.close(fig)
 
         per_stratum = (
@@ -2191,22 +2211,38 @@ def _save_stratified_entity_figures(
         ]
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.bar(labels, per_stratum["width_mean_across_entities"].to_numpy(dtype=float, copy=True))
-        ax.set_title(f"{variable} mean interval width across {entity_label}s by {stratification}")
+        ax.bar(
+            labels,
+            per_stratum["width_mean_across_entities"].to_numpy(dtype=float, copy=True),
+        )
+        ax.set_title(
+            f"{variable} mean interval width across {entity_label}s by {stratification}"
+        )
         ax.set_xlabel(stratification)
         ax.set_ylabel("mean interval width")
         fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_mean_{suffix}.png", dpi=150)
+        fig.savefig(
+            figures_dir / f"{variable.lower()}_width_mean_{suffix}.png", dpi=150
+        )
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.bar(labels, per_stratum["empirical_coverage_across_entities"].to_numpy(dtype=float, copy=True))
+        ax.bar(
+            labels,
+            per_stratum["empirical_coverage_across_entities"].to_numpy(
+                dtype=float, copy=True
+            ),
+        )
         ax.set_ylim(0.0, 1.05)
-        ax.set_title(f"{variable} empirical coverage across {entity_label}s by {stratification}")
+        ax.set_title(
+            f"{variable} empirical coverage across {entity_label}s by {stratification}"
+        )
         ax.set_xlabel(stratification)
         ax.set_ylabel("coverage")
         fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_mean_{suffix}.png", dpi=150)
+        fig.savefig(
+            figures_dir / f"{variable.lower()}_coverage_mean_{suffix}.png", dpi=150
+        )
         plt.close(fig)
 
 
@@ -2219,7 +2255,13 @@ def _build_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
     )
     bus_type_summary = _aggregate_summary_rows(
         analysis_frame,
-        group_columns=["analysis_scope", "stratification", "stratum_value", "variable", "bus_type"],
+        group_columns=[
+            "analysis_scope",
+            "stratification",
+            "stratum_value",
+            "variable",
+            "bus_type",
+        ],
         scope="bus_type",
         include_bus_type=True,
     )
@@ -2245,9 +2287,7 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
                 "analysis_scope": analysis_scope,
                 "stratification": stratification,
                 "stratum_value": stratum_value,
-                "stratum_label": _format_stratum_label(
-                    stratification, stratum_value
-                ),
+                "stratum_label": _format_stratum_label(stratification, stratum_value),
                 "scope": "system",
                 "variable": variable,
                 "rate_a": float("nan"),
@@ -2305,7 +2345,14 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
     return (
         pd.DataFrame.from_records(records)
         .sort_values(
-            ["analysis_scope", "stratification", "stratum_value", "scope", "variable", "rate_a"],
+            [
+                "analysis_scope",
+                "stratification",
+                "stratum_value",
+                "scope",
+                "variable",
+                "rate_a",
+            ],
             na_position="first",
         )
         .reset_index(drop=True)
@@ -2334,9 +2381,7 @@ def _aggregate_summary_rows(
                 "analysis_scope": analysis_scope,
                 "stratification": stratification,
                 "stratum_value": stratum_value,
-                "stratum_label": _format_stratum_label(
-                    stratification, stratum_value
-                ),
+                "stratum_label": _format_stratum_label(stratification, stratum_value),
                 "scope": scope,
                 "variable": variable,
                 "bus_type": bus_type,
@@ -2371,7 +2416,14 @@ def _aggregate_summary_rows(
     return (
         pd.DataFrame.from_records(records)
         .sort_values(
-            ["analysis_scope", "stratification", "stratum_value", "scope", "variable", "bus_type"],
+            [
+                "analysis_scope",
+                "stratification",
+                "stratum_value",
+                "scope",
+                "variable",
+                "bus_type",
+            ],
             na_position="first",
         )
         .reset_index(drop=True)

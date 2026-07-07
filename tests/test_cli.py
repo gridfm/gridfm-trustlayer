@@ -232,7 +232,7 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
             [
                 "version: 1",
                 "task_name: StateEstimation",
-                    "cp_type: element",
+                "cp_type: element",
                 "alpha: 0.2",
                 "variables:",
                 "  - Vm",
@@ -246,7 +246,7 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
                 f"  calibrated_predictions: {output_path}",
                 "commands:",
                 "  calibrate:",
-                    "    cp_type: element",
+                "    cp_type: element",
             ],
         ),
         encoding="utf-8",
@@ -283,7 +283,10 @@ def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
         strat="n_outages",
     )
 
-    assert main(["compute", "--config", str(config_path), "--output", str(artifact_path)]) == 0
+    assert (
+        main(["compute", "--config", str(config_path), "--output", str(artifact_path)])
+        == 0
+    )
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["strat"] == "n_outages"
     assert artifact["stratification_values"] == [0, 1]
@@ -372,7 +375,10 @@ def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> Non
         strat="outage_type",
     )
 
-    assert main(["compute", "--config", str(config_path), "--output", str(artifact_path)]) == 0
+    assert (
+        main(["compute", "--config", str(config_path), "--output", str(artifact_path)])
+        == 0
+    )
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["strat"] == "outage_type"
     assert artifact["stratification_values"] == [0, 1, 2, 3]

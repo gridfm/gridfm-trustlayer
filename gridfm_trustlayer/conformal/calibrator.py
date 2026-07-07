@@ -164,7 +164,9 @@ class NaiveIntervalCalibrator:
         _validate_entity_alignment(self.entity_ids, _get_entity_ids(predictions))
         intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         scenario_strata = (
-            None if self.strat is None else _get_scenario_column(predictions, self.strat)
+            None
+            if self.strat is None
+            else _get_scenario_column(predictions, self.strat)
         )
         for channel_name in self.channel_names:
             prediction_values = _get_prediction_channel(predictions, channel_name)
@@ -320,7 +322,9 @@ class NaiveIntervalCalibrator:
             lower_residual_quantiles=lower_residual_quantiles,
             upper_residual_quantiles=upper_residual_quantiles,
             strat=cast(str | None, data.get("strat")),
-            stratification_values=_optional_int_array(data.get("stratification_values")),
+            stratification_values=_optional_int_array(
+                data.get("stratification_values")
+            ),
             stratified_lower_residual_quantiles=stratified_lower_residual_quantiles,
             stratified_upper_residual_quantiles=stratified_upper_residual_quantiles,
             calibration_fraction=_optional_float(data.get("calibration_fraction")),
