@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
@@ -10,6 +11,10 @@ import pandas as pd  # type: ignore[import-untyped]
 
 
 FLOAT32_DTYPE = np.dtype(np.float32)
+OUTAGE_TYPE_NONE = np.int32(0)
+OUTAGE_TYPE_BRANCH_ONLY = np.int32(1)
+OUTAGE_TYPE_GEN_ONLY = np.int32(2)
+OUTAGE_TYPE_MIXED = np.int32(3)
 
 
 @dataclass
@@ -20,6 +25,7 @@ class GroundTruthSet:
     bus_ids: np.ndarray
     branch_ids: np.ndarray
     n_outages: np.ndarray
+    outage_type: np.ndarray
     removed_mask: np.ndarray
     Vm: np.ndarray
     Va: np.ndarray
@@ -160,7 +166,14 @@ def load_ground_truth(
         FLOAT32_DTYPE,
     )
     removed_mask = br_status != 1.0
-    n_outages = removed_mask.sum(axis=1).astype(np.int32)
+    branch_outages = _count_reference_outages(br_status)
+    generator_outages = _load_generator_outage_counts(
+        pf_node_parquet,
+        pf_edge_parquet,
+        selected_scenarios,
+    )
+    n_outages = (branch_outages + generator_outages).astype(np.int32, copy=False)
+    outage_type = _classify_outage_type(branch_outages, generator_outages)
 
     first_branch_rows = (
         sorted_branch[sorted_branch["scenario"] == selected_scenarios[0]]
@@ -182,6 +195,7 @@ def load_ground_truth(
         bus_ids=bus_ids,
         branch_ids=branch_ids,
         n_outages=n_outages,
+        outage_type=outage_type,
         removed_mask=removed_mask,
         Vm=vm,
         Va=va,
@@ -239,6 +253,68 @@ def _resolve_direct_channel_names(
 
     defaults = [name for name in ("Pg", "Qg") if name in columns]
     return defaults
+
+
+def _load_generator_outage_counts(
+    pf_node_parquet: str,
+    pf_edge_parquet: str,
+    scenario_ids: np.ndarray,
+) -> np.ndarray:
+    generator_path = _default_generator_parquet_path(pf_node_parquet, pf_edge_parquet)
+    if generator_path is None:
+        return np.zeros(len(scenario_ids), dtype=np.int32)
+
+    gen_frame = pd.read_parquet(generator_path)
+    _require_columns(gen_frame, ("scenario", "idx", "in_service"))
+    gen_frame = gen_frame.copy()
+    gen_frame["scenario"] = gen_frame["scenario"].astype(np.int64)
+    gen_frame["idx"] = gen_frame["idx"].astype(np.int64)
+    gen_frame = gen_frame[gen_frame["scenario"].isin(scenario_ids)].copy()
+    if gen_frame.empty:
+        return np.zeros(len(scenario_ids), dtype=np.int32)
+
+    generator_ids = np.sort(gen_frame["idx"].unique().astype(np.int64, copy=False))
+    sorted_gen = _sort_rectangular_frame(gen_frame, scenario_ids, generator_ids, "idx")
+    gen_status = _reshape_column(
+        sorted_gen,
+        "in_service",
+        scenario_ids,
+        generator_ids,
+        "idx",
+        FLOAT32_DTYPE,
+    )
+    return _count_reference_outages(gen_status)
+
+
+def _default_generator_parquet_path(
+    pf_node_parquet: str,
+    pf_edge_parquet: str,
+) -> str | None:
+    for parent in (Path(pf_node_parquet).parent, Path(pf_edge_parquet).parent):
+        candidate = parent / "gen_data.parquet"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _count_reference_outages(status: np.ndarray) -> np.ndarray:
+    if status.size == 0:
+        return np.zeros(status.shape[0], dtype=np.int32)
+    reference_active = np.nanmax(status, axis=0, keepdims=True) == 1.0
+    return np.sum(reference_active & (status != 1.0), axis=1).astype(np.int32)
+
+
+def _classify_outage_type(
+    branch_outages: np.ndarray,
+    generator_outages: np.ndarray,
+) -> np.ndarray:
+    branch_present = branch_outages > 0
+    generator_present = generator_outages > 0
+    outage_type = np.full(len(branch_outages), OUTAGE_TYPE_NONE, dtype=np.int32)
+    outage_type[branch_present & (~generator_present)] = OUTAGE_TYPE_BRANCH_ONLY
+    outage_type[(~branch_present) & generator_present] = OUTAGE_TYPE_GEN_ONLY
+    outage_type[branch_present & generator_present] = OUTAGE_TYPE_MIXED
+    return outage_type
 
 
 def _normalize_angle_units(values: np.ndarray) -> np.ndarray:

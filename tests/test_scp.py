@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gridfm_trustlayer.conformal import NaiveIntervalCalibrator
+from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.io.predictions import PredictionSet
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 
@@ -71,6 +71,129 @@ def test_naive_interval_roundtrip() -> None:
     )
 
 
+def test_naive_interval_stratified_by_n_outages() -> None:
+    scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
+    bus_ids = np.array([0, 1], dtype=np.int64)
+    scenario_columns = {"n_outages": np.array([0, 0, 1, 1], dtype=np.int32)}
+    predictions = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.array(
+                [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]],
+                dtype=np.float32,
+            )
+        },
+        scenario_columns=scenario_columns,
+    )
+    ground_truth = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.array(
+                [[1.1, 0.9], [1.2, 0.8], [1.5, 0.5], [1.6, 0.4]],
+                dtype=np.float32,
+            )
+        },
+        scenario_columns=scenario_columns,
+    )
+
+    calibrator = NaiveIntervalCalibrator.fit(
+        predictions,
+        ground_truth,
+        alpha=0.2,
+        channel_names=("Vm",),
+        strat="n_outages",
+    )
+
+    assert calibrator.strat == "n_outages"
+    np.testing.assert_array_equal(
+        calibrator.stratification_values,
+        np.array([0, 1], dtype=np.int64),
+    )
+    np.testing.assert_allclose(
+        calibrator.stratified_lower_residual_quantiles["Vm"][0],
+        np.quantile(np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32), 0.1, axis=0),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        calibrator.stratified_upper_residual_quantiles["Vm"][1],
+        np.quantile(np.array([[0.5, -0.5], [0.6, -0.6]], dtype=np.float32), 0.9, axis=0),
+        atol=1e-6,
+    )
+
+    intervals = calibrator.predict_intervals(predictions)
+    np.testing.assert_allclose(
+        intervals["Vm"][0][0],
+        predictions.channels["Vm"][0]
+        + calibrator.stratified_lower_residual_quantiles["Vm"][0],
+    )
+    np.testing.assert_allclose(
+        intervals["Vm"][1][3],
+        predictions.channels["Vm"][3]
+        + calibrator.stratified_upper_residual_quantiles["Vm"][1],
+    )
+
+    loaded = NaiveIntervalCalibrator.from_dict(calibrator.to_dict())
+    assert loaded.strat == "n_outages"
+    np.testing.assert_array_equal(loaded.stratification_values, np.array([0, 1]))
+    np.testing.assert_allclose(
+        loaded.stratified_lower_residual_quantiles["Vm"],
+        calibrator.stratified_lower_residual_quantiles["Vm"],
+    )
+
+
+def test_naive_interval_stratified_by_outage_type() -> None:
+    scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
+    bus_ids = np.array([0, 1], dtype=np.int64)
+    scenario_columns = {"outage_type": np.array([0, 1, 2, 3], dtype=np.int32)}
+    predictions = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.ones((4, 2), dtype=np.float32),
+        },
+        scenario_columns=scenario_columns,
+    )
+    ground_truth = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.array(
+                [[1.0, 1.0], [1.1, 0.9], [1.2, 0.8], [1.3, 0.7]],
+                dtype=np.float32,
+            )
+        },
+        scenario_columns=scenario_columns,
+    )
+
+    calibrator = NaiveIntervalCalibrator.fit(
+        predictions,
+        ground_truth,
+        alpha=0.2,
+        channel_names=("Vm",),
+        strat="outage_type",
+    )
+
+    assert calibrator.strat == "outage_type"
+    np.testing.assert_array_equal(
+        calibrator.stratification_values,
+        np.array([0, 1, 2, 3], dtype=np.int64),
+    )
+
+    intervals = calibrator.predict_intervals(predictions)
+    np.testing.assert_allclose(intervals["Vm"][0][0], np.array([1.0, 1.0], dtype=np.float32))
+    np.testing.assert_allclose(intervals["Vm"][1][3], np.array([1.3, 0.7], dtype=np.float32))
+
+    loaded = NaiveIntervalCalibrator.from_dict(calibrator.to_dict())
+    assert loaded.strat == "outage_type"
+    np.testing.assert_array_equal(loaded.stratification_values, np.array([0, 1, 2, 3]))
+
+
 def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:
     scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
     bus_ids = np.array([0, 1], dtype=np.int64)
@@ -105,6 +228,7 @@ def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:
         bus_ids=bus_ids,
         branch_ids=np.array([0], dtype=np.int64),
         n_outages=np.zeros(len(scenario_ids), dtype=np.int32),
+        outage_type=np.zeros(len(scenario_ids), dtype=np.int32),
         removed_mask=np.zeros((len(scenario_ids), 1), dtype=bool),
         Vm=vm_target,
         Va=va_target,

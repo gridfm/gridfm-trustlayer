@@ -186,7 +186,7 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
         == 0
     )
 
-    output_dir = tmp_path / "trustlayer_outputs" / "stateestimation" / "base"
+    output_dir = tmp_path / "trustlayer_outputs" / "stateestimation" / "element"
     artifact_path = output_dir / "predictions_vm_va.trustlayer"
     assert artifact_path.exists()
 
@@ -232,7 +232,7 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
             [
                 "version: 1",
                 "task_name: StateEstimation",
-                "cp_type: base",
+                    "cp_type: element",
                 "alpha: 0.2",
                 "variables:",
                 "  - Vm",
@@ -246,7 +246,7 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
                 f"  calibrated_predictions: {output_path}",
                 "commands:",
                 "  calibrate:",
-                "    cp_type: base",
+                    "    cp_type: element",
             ],
         ),
         encoding="utf-8",
@@ -259,10 +259,171 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
 
     output_frame = pd.read_parquet(output_path)
     assert {"Vm_pi_lower", "Va_pi_upper"}.issubset(output_frame.columns)
-    assert (output_path.parent / "trust_analysis_volt.csv").exists()
-    assert (output_path.parent / "trust_summary_volt.csv").exists()
+
+
+def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
+    predictions_path = tmp_path / "predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    artifact_path = tmp_path / "vm_va_intervals.trustlayer"
+    output_path = tmp_path / "predictions_with_intervals.parquet"
+    config_path = tmp_path / "trust_config.yaml"
+
+    _write_prediction_fixture(predictions_path)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    _write_generator_status_fixture(
+        tmp_path / "gen_data.parquet",
+        in_service=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
+    )
+    _write_cli_config(
+        config_path,
+        predictions_path,
+        pf_node_path,
+        pf_edge_path,
+        strat="n_outages",
+    )
+
+    assert main(["compute", "--config", str(config_path), "--output", str(artifact_path)]) == 0
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["strat"] == "n_outages"
+    assert artifact["stratification_values"] == [0, 1]
+
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+
+    output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
+    outage_one = output_frame[output_frame["scenario"].eq(3)].reset_index(drop=True)
+    outage_zero = output_frame[output_frame["scenario"].eq(0)].reset_index(drop=True)
+    assert not np.allclose(
+        outage_one["Vm_pi_upper"].to_numpy(),
+        outage_zero["Vm_pi_upper"].to_numpy(),
+    )
+    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
+    summary_frame = pd.read_csv(output_path.parent / "trust_summary_volt.csv")
+    assert {
+        "analysis_scope",
+        "stratification",
+        "stratum_value",
+        "stratum_label",
+        "n_scenarios",
+    }.issubset(analysis_frame.columns)
+    assert set(analysis_frame["analysis_scope"].unique().tolist()) == {
+        "overall",
+        "stratified",
+    }
+    strat_rows = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
+    assert set(strat_rows["stratification"].unique().tolist()) == {"n_outages"}
+    np.testing.assert_array_equal(
+        np.sort(strat_rows["stratum_value"].dropna().to_numpy(dtype=int)),
+        np.array([0, 0, 0, 0, 1, 1, 1, 1]),
+    )
+    assert {
+        "analysis_scope",
+        "stratification",
+        "stratum_value",
+        "stratum_label",
+        "n_scenarios_min",
+        "n_scenarios_max",
+    }.issubset(summary_frame.columns)
     assert (output_path.parent / "figures" / "va_coverage_summary.png").exists()
     assert (output_path.parent / "figures" / "va_coverage_density.png").exists()
+    assert (
+        output_path.parent / "figures" / "vm_width_summary_by-n-outages.png"
+    ).exists()
+    assert (
+        output_path.parent / "figures" / "vm_coverage_mean_by-n-outages.png"
+    ).exists()
+
+
+def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> None:
+    predictions_path = tmp_path / "predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    artifact_path = tmp_path / "vm_va_intervals.trustlayer"
+    output_path = tmp_path / "predictions_with_intervals.parquet"
+    config_path = tmp_path / "trust_config.yaml"
+
+    _write_prediction_fixture(predictions_path)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    branch_frame = pd.read_parquet(pf_edge_path)
+    branch_frame["br_status"] = [1.0, 0.0, 1.0, 0.0]
+    branch_frame.to_parquet(pf_edge_path, index=False)
+    _write_generator_status_fixture(
+        tmp_path / "gen_data.parquet",
+        in_service=[1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0],
+    )
+    _write_cli_config(
+        config_path,
+        predictions_path,
+        pf_node_path,
+        pf_edge_path,
+        strat="outage_type",
+    )
+
+    assert main(["compute", "--config", str(config_path), "--output", str(artifact_path)]) == 0
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["strat"] == "outage_type"
+    assert artifact["stratification_values"] == [0, 1, 2, 3]
+
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+
+    output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
+    mixed = output_frame[output_frame["scenario"].eq(3)].reset_index(drop=True)
+    no_outage = output_frame[output_frame["scenario"].eq(0)].reset_index(drop=True)
+    assert not np.allclose(
+        mixed["Vm_pi_upper"].to_numpy(),
+        no_outage["Vm_pi_upper"].to_numpy(),
+    )
+    assert {"outage_type", "outage_type_label"}.issubset(output_frame.columns)
+    assert set(output_frame["outage_type_label"].unique().tolist()) == {
+        "none",
+        "branch_only",
+        "gen_only",
+        "mixed",
+    }
+    assert set(
+        output_frame.loc[output_frame["outage_type"].eq(3), "outage_type_label"]
+        .unique()
+        .tolist()
+    ) == {"mixed"}
+
+    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
+    strat_rows = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
+    assert set(strat_rows["stratification"].unique().tolist()) == {"outage_type"}
+    assert set(strat_rows["stratum_label"].unique().tolist()) == {
+        "outage_type=none",
+        "outage_type=branch_only",
+        "outage_type=gen_only",
+        "outage_type=mixed",
+    }
+    assert (
+        output_path.parent / "figures" / "vm_width_summary_by-outage-type.png"
+    ).exists()
 
 
 def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
@@ -403,7 +564,7 @@ def test_config_driven_line_loading_compute_and_calibrate(tmp_path) -> None:
             [
                 "version: 1",
                 "task_name: StateEstimation",
-                "cp_type: naive",
+                "cp_type: element",
                 "alpha: 0.2",
                 "variables:",
                 "  - line_loading",
@@ -454,7 +615,7 @@ def test_config_driven_mixed_compute_and_calibrate(tmp_path) -> None:
             [
                 "version: 1",
                 "task_name: StateEstimation",
-                "cp_type: naive",
+                "cp_type: element",
                 "alpha: 0.2",
                 "variables:",
                 "  - Vm",
@@ -512,7 +673,7 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
             [
                 "version: 1",
                 "task_name: StateEstimation",
-                "cp_type: naive",
+                "cp_type: element",
                 "alpha: 0.2",
                 "variables:",
                 "  - Vm",
@@ -631,7 +792,7 @@ def test_cli_flags_override_config(tmp_path) -> None:
     config_path.write_text(
         "\n".join(
             [
-                "cp_type: naive",
+                "cp_type: element",
                 "alpha: 0.2",
                 "variables:",
                 "  - Vm",
@@ -760,23 +921,29 @@ def _write_cli_config(
     *,
     alpha: float = 0.2,
     task_name: str = "StateEstimation",
+    strat: str | None = None,
 ) -> None:
+    lines = [
+        "version: 1",
+        f"task_name: {task_name}",
+        "cp_type: element",
+        f"alpha: {alpha}",
+    ]
+    if strat is not None:
+        lines.append(f"strat: {strat}")
+    lines.extend(
+        [
+            "variables:",
+            "  - Vm",
+            "  - Va",
+            "inputs:",
+            f"  predictions: {predictions_path}",
+            f"  pf_node: {pf_node_path}",
+            f"  pf_edge: {pf_edge_path}",
+        ]
+    )
     config_path.write_text(
-        "\n".join(
-            [
-                "version: 1",
-                f"task_name: {task_name}",
-                "cp_type: naive",
-                f"alpha: {alpha}",
-                "variables:",
-                "  - Vm",
-                "  - Va",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
-            ],
-        ),
+        "\n".join(lines),
         encoding="utf-8",
     )
 
@@ -835,3 +1002,15 @@ def _write_ground_truth_fixture(bus_path, branch_path) -> None:
     )
     bus_frame.to_parquet(bus_path, index=False)
     branch_frame.to_parquet(branch_path, index=False)
+
+
+def _write_generator_status_fixture(path, *, in_service: list[float]) -> None:
+    gen_frame = pd.DataFrame(
+        {
+            "scenario": [0, 0, 1, 1, 2, 2, 3, 3],
+            "idx": [0, 1, 0, 1, 0, 1, 0, 1],
+            "bus": [0, 1, 0, 1, 0, 1, 0, 1],
+            "in_service": in_service,
+        }
+    )
+    gen_frame.to_parquet(path, index=False)

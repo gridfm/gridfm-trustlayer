@@ -39,7 +39,7 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 Purpose:
 
 - load prediction and ground-truth artifacts
-- fit one or more `base` conformal interval calibrators
+- fit one or more `element` conformal interval calibrators
 - optionally fit only on a calibration subset of scenarios
 - save the result as a `.trustlayer` artifact
 
@@ -57,7 +57,8 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | `--pf-edge` | `str` | Ground-truth branch parquet used during fitting and loading computation. |
 | `--output` | `str` | Artifact output path. |
 | `--alpha` | `float` | Miscoverage level. |
-| `--cp-type` | `str` | Current supported value is `base`. Legacy alias `naive` is accepted. |
+| `--cp-type` | `str` | Current supported value is `element`. |
+| `--strat` | `str` | Optional residual stratification. Current supported value is `n_outages`. |
 | `--variables` | `list[str]` | Any subset of `Vm`, `Va`, `line_loading`. |
 | `--calibration-fraction` | `float` | Reserve a scenario fraction for fitting and apply the learned intervals on the remaining holdout scenarios. |
 | `--random-seed` | `int` | Random seed used for the calibration/holdout split. |
@@ -68,6 +69,7 @@ Notes:
 
 - A mixed run such as `variables: [Vm, Va, line_loading]` still writes one artifact bundle.
 - The saved artifact may contain one calibrator or multiple calibrators keyed by target family.
+- With `--strat n_outages`, residual quantiles are fitted separately per scenario outage count.
 
 ## `calibrate`
 
@@ -90,7 +92,8 @@ gridfm_trustlayer calibrate --config path/to/trust_config.yaml
 | `--predictions` | `str` | Input predictions parquet. |
 | `--artifact` | `str` | Saved `.trustlayer` artifact from `compute`. |
 | `--output` | `str` | Output parquet path for a single target family, or output directory for mixed voltage + loading runs. |
-| `--cp-type` | `str` | Current supported value is `base`. Legacy alias `naive` is accepted. |
+| `--cp-type` | `str` | Current supported value is `element`. |
+| `--strat` | `str` | Optional stratification override. When provided, it must match the saved artifact. |
 | `--pf-node` | `str` | Bus ground truth used for analysis or target reconstruction when needed. |
 | `--pf-edge` | `str` | Branch ground truth used for line-loading analysis or target reconstruction when needed. |
 | `--task-name` | `str` | Task adapter name used while loading predictions. |
@@ -101,6 +104,7 @@ Output behavior:
 - Bus targets produce a calibrated bus parquet with interval columns merged onto the original prediction rows.
 - Branch targets produce a branch-level output parquet derived from aligned bus predictions and branch topology.
 - Mixed runs write separate voltage and line-loading parquet outputs.
+- When the artifact uses scenario stratification such as `strat: n_outages` or `strat: outage_type`, `calibrate` reloads raw ground truth for the application scenarios so it can apply the correct scenario stratum.
 
 Analysis side outputs:
 
@@ -163,8 +167,11 @@ Saved outputs:
 
 ### `cp_type`
 
-- `base`
-- `naive` as a legacy alias for `base`
+- `element`
+
+### `strat`
+
+- `n_outages`
 
 ### Variables
 

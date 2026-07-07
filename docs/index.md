@@ -34,6 +34,6 @@ All verbs require `--config`, and CLI flags act as overrides of the YAML.
 
 ## Current implementation notes
 
-- `cp_type: base` is the canonical name for the current residual-quantile interval workflow
-- `cp_type: naive` is still accepted as a legacy alias
+- `cp_type: element` is the canonical name for the current residual-quantile interval workflow
+- `strat: n_outages` and `strat: outage_type` are the current supported residual-stratification modes
 - screening currently uses a possible-violation interpretation based on interval endpoints crossing the configured bounds

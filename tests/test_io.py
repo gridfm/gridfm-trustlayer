@@ -124,7 +124,10 @@ def test_ground_truth_roundtrip_and_outages(tmp_path) -> None:
     assert ground_truth.channels["Pg"].shape == (2, 2)
     assert ground_truth.channels["Qg"].shape == (2, 2)
     np.testing.assert_array_equal(
-        ground_truth.n_outages, np.array([0, 1], dtype=np.int32)
+        ground_truth.n_outages, np.array([0, 2], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        ground_truth.outage_type, np.array([0, 3], dtype=np.int32)
     )
     assert not bool(ground_truth.removed_mask[0, 0])
     assert bool(ground_truth.removed_mask[1, 0])
@@ -313,5 +316,14 @@ def _write_ground_truth_fixture(bus_path, branch_path) -> None:
             "Ytt_i": [0.0, 0.0],
         },
     )
+    gen_frame = pd.DataFrame(
+        {
+            "scenario": [0, 0, 1, 1],
+            "idx": [0, 1, 0, 1],
+            "bus": [0, 1, 0, 1],
+            "in_service": [1.0, 1.0, 1.0, 0.0],
+        },
+    )
     bus_frame.to_parquet(bus_path, index=False)
     branch_frame.to_parquet(branch_path, index=False)
+    gen_frame.to_parquet(bus_path.parent / "gen_data.parquet", index=False)

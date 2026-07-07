@@ -206,7 +206,7 @@ Current interpretation:
 
 - `idx` defines the rectangular branch axis
 - `br_status != 1` marks inactive branches
-- `n_outages` is derived from inactive-branch counts per scenario
+- `n_outages` is derived per scenario from both inactive-branch counts and inactive-generator counts when a sibling `gen_data.parquet` is available
 - `from_bus`, `to_bus`, and `rate_a` are taken from the first scenario as topology and rating reference columns
 - the complex admittance coefficients are kept as aligned rectangular arrays
 

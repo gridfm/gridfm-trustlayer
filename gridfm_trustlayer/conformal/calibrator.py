@@ -24,6 +24,7 @@ class ChannelSet:
     channels: dict[str, np.ndarray]
     valid_masks: dict[str, np.ndarray] = field(default_factory=dict)
     entity_columns: dict[str, np.ndarray] = field(default_factory=dict)
+    scenario_columns: dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def bus_ids(self) -> np.ndarray:
@@ -48,6 +49,14 @@ class NaiveIntervalCalibrator:
     channel_names: tuple[str, ...]
     lower_residual_quantiles: dict[str, np.ndarray]
     upper_residual_quantiles: dict[str, np.ndarray]
+    strat: str | None = None
+    stratification_values: np.ndarray | None = None
+    stratified_lower_residual_quantiles: dict[str, np.ndarray] = field(
+        default_factory=dict
+    )
+    stratified_upper_residual_quantiles: dict[str, np.ndarray] = field(
+        default_factory=dict
+    )
     calibration_fraction: float | None = None
     random_seed: int | None = None
     split_pool_scenario_ids: np.ndarray | None = None
@@ -62,6 +71,7 @@ class NaiveIntervalCalibrator:
         *,
         alpha: float,
         channel_names: Iterable[str] = ("Vm", "Va"),
+        strat: str | None = None,
     ) -> "NaiveIntervalCalibrator":
         """Fit naive residual-quantile intervals from aligned predictions and targets."""
 
@@ -77,6 +87,15 @@ class NaiveIntervalCalibrator:
         selected_channels = tuple(channel_names)
         lower_residual_quantiles: dict[str, np.ndarray] = {}
         upper_residual_quantiles: dict[str, np.ndarray] = {}
+        stratified_lower_residual_quantiles: dict[str, np.ndarray] = {}
+        stratified_upper_residual_quantiles: dict[str, np.ndarray] = {}
+        stratification_values: np.ndarray | None = None
+        scenario_strata: np.ndarray | None = None
+        if strat is not None:
+            scenario_strata = _get_scenario_column(ground_truth, strat)
+            stratification_values = np.sort(
+                np.unique(scenario_strata.astype(np.int64, copy=False))
+            )
         for channel_name in selected_channels:
             prediction_values = _get_prediction_channel(predictions, channel_name)
             target_values = _get_ground_truth_channel(ground_truth, channel_name)
@@ -97,6 +116,29 @@ class NaiveIntervalCalibrator:
                 valid_mask,
                 1.0 - (alpha / 2.0),
             )
+            if scenario_strata is not None and stratification_values is not None:
+                lower_by_stratum = np.zeros(
+                    (len(stratification_values), residuals.shape[1]),
+                    dtype=FLOAT32_DTYPE,
+                )
+                upper_by_stratum = np.zeros_like(lower_by_stratum)
+                for index, stratum_value in enumerate(stratification_values):
+                    stratum_mask = scenario_strata == stratum_value
+                    stratum_valid_mask = (
+                        None if valid_mask is None else valid_mask[stratum_mask]
+                    )
+                    lower_by_stratum[index] = _masked_column_quantile(
+                        residuals[stratum_mask],
+                        stratum_valid_mask,
+                        alpha / 2.0,
+                    )
+                    upper_by_stratum[index] = _masked_column_quantile(
+                        residuals[stratum_mask],
+                        stratum_valid_mask,
+                        1.0 - (alpha / 2.0),
+                    )
+                stratified_lower_residual_quantiles[channel_name] = lower_by_stratum
+                stratified_upper_residual_quantiles[channel_name] = upper_by_stratum
 
         return cls(
             alpha=float(alpha),
@@ -105,6 +147,12 @@ class NaiveIntervalCalibrator:
             channel_names=selected_channels,
             lower_residual_quantiles=lower_residual_quantiles,
             upper_residual_quantiles=upper_residual_quantiles,
+            strat=strat,
+            stratification_values=None
+            if stratification_values is None
+            else stratification_values.copy(),
+            stratified_lower_residual_quantiles=stratified_lower_residual_quantiles,
+            stratified_upper_residual_quantiles=stratified_upper_residual_quantiles,
         )
 
     def predict_intervals(
@@ -115,14 +163,43 @@ class NaiveIntervalCalibrator:
 
         _validate_entity_alignment(self.entity_ids, _get_entity_ids(predictions))
         intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        scenario_strata = (
+            None if self.strat is None else _get_scenario_column(predictions, self.strat)
+        )
         for channel_name in self.channel_names:
             prediction_values = _get_prediction_channel(predictions, channel_name)
-            lower = (
-                prediction_values + self.lower_residual_quantiles[channel_name][None, :]
+            lower_offsets = np.repeat(
+                self.lower_residual_quantiles[channel_name][None, :],
+                len(prediction_values),
+                axis=0,
             )
-            upper = (
-                prediction_values + self.upper_residual_quantiles[channel_name][None, :]
+            upper_offsets = np.repeat(
+                self.upper_residual_quantiles[channel_name][None, :],
+                len(prediction_values),
+                axis=0,
             )
+            if (
+                scenario_strata is not None
+                and self.stratification_values is not None
+                and channel_name in self.stratified_lower_residual_quantiles
+                and channel_name in self.stratified_upper_residual_quantiles
+            ):
+                for index, stratum_value in enumerate(self.stratification_values):
+                    stratum_mask = scenario_strata == stratum_value
+                    if not np.any(stratum_mask):
+                        continue
+                    lower_offsets[stratum_mask] = (
+                        self.stratified_lower_residual_quantiles[channel_name][index][
+                            None, :
+                        ]
+                    )
+                    upper_offsets[stratum_mask] = (
+                        self.stratified_upper_residual_quantiles[channel_name][index][
+                            None, :
+                        ]
+                    )
+            lower = prediction_values + lower_offsets
+            upper = prediction_values + upper_offsets
             valid_mask = _get_valid_mask(predictions, channel_name)
             if valid_mask is not None:
                 lower = np.where(valid_mask, lower, prediction_values)
@@ -137,13 +214,17 @@ class NaiveIntervalCalibrator:
         """Serialize the calibrator into a JSON-friendly dictionary."""
 
         return {
-            "version": "trustlayer_naive_interval_v1",
+            "version": "trustlayer_naive_interval_v2",
             "method": "naive_residual_quantiles",
             "alpha": self.alpha,
             "entity_ids": self.entity_ids.tolist(),
             "entity_name": self.entity_name,
             "bus_ids": self.entity_ids.tolist() if self.entity_name == "bus" else None,
             "channel_names": list(self.channel_names),
+            "strat": self.strat,
+            "stratification_values": None
+            if self.stratification_values is None
+            else self.stratification_values.tolist(),
             "calibration_fraction": self.calibration_fraction,
             "random_seed": self.random_seed,
             "split_pool_scenario_ids": None
@@ -163,6 +244,14 @@ class NaiveIntervalCalibrator:
                 key: values.tolist()
                 for key, values in self.upper_residual_quantiles.items()
             },
+            "stratified_lower_residual_quantiles": {
+                key: values.tolist()
+                for key, values in self.stratified_lower_residual_quantiles.items()
+            },
+            "stratified_upper_residual_quantiles": {
+                key: values.tolist()
+                for key, values in self.stratified_upper_residual_quantiles.items()
+            },
         }
 
     @classmethod
@@ -170,7 +259,10 @@ class NaiveIntervalCalibrator:
         """Deserialize a calibrator previously produced by :meth:`to_dict`."""
 
         version = data.get("version")
-        if version != "trustlayer_naive_interval_v1":
+        if version not in {
+            "trustlayer_naive_interval_v1",
+            "trustlayer_naive_interval_v2",
+        }:
             raise ValueError(f"Unsupported interval artifact version: {version!r}")
 
         raw_channel_names = data.get("channel_names")
@@ -186,6 +278,20 @@ class NaiveIntervalCalibrator:
             raise ValueError(
                 "Interval artifact field 'upper_residual_quantiles' must be a mapping."
             )
+        raw_stratified_lower_residual_quantiles = data.get(
+            "stratified_lower_residual_quantiles", {}
+        )
+        if not isinstance(raw_stratified_lower_residual_quantiles, dict):
+            raise ValueError(
+                "Interval artifact field 'stratified_lower_residual_quantiles' must be a mapping."
+            )
+        raw_stratified_upper_residual_quantiles = data.get(
+            "stratified_upper_residual_quantiles", {}
+        )
+        if not isinstance(raw_stratified_upper_residual_quantiles, dict):
+            raise ValueError(
+                "Interval artifact field 'stratified_upper_residual_quantiles' must be a mapping."
+            )
 
         channel_names = tuple(str(name) for name in raw_channel_names)
         lower_residual_quantiles = {
@@ -196,6 +302,14 @@ class NaiveIntervalCalibrator:
             str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
             for key, values in raw_upper_residual_quantiles.items()
         }
+        stratified_lower_residual_quantiles = {
+            str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
+            for key, values in raw_stratified_lower_residual_quantiles.items()
+        }
+        stratified_upper_residual_quantiles = {
+            str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
+            for key, values in raw_stratified_upper_residual_quantiles.items()
+        }
         return cls(
             alpha=float(cast(Any, data["alpha"])),
             entity_ids=np.asarray(
@@ -205,6 +319,10 @@ class NaiveIntervalCalibrator:
             channel_names=channel_names,
             lower_residual_quantiles=lower_residual_quantiles,
             upper_residual_quantiles=upper_residual_quantiles,
+            strat=cast(str | None, data.get("strat")),
+            stratification_values=_optional_int_array(data.get("stratification_values")),
+            stratified_lower_residual_quantiles=stratified_lower_residual_quantiles,
+            stratified_upper_residual_quantiles=stratified_upper_residual_quantiles,
             calibration_fraction=_optional_float(data.get("calibration_fraction")),
             random_seed=_optional_int(data.get("random_seed")),
             split_pool_scenario_ids=_optional_int_array(
@@ -283,6 +401,24 @@ def _get_entity_name(values: PredictionSet | GroundTruthSet | ChannelSet) -> str
     if isinstance(values, ChannelSet):
         return values.entity_name
     return "bus"
+
+
+def _get_scenario_column(
+    values: PredictionSet | GroundTruthSet | ChannelSet,
+    column_name: str,
+) -> np.ndarray:
+    if isinstance(values, ChannelSet):
+        if column_name not in values.scenario_columns:
+            raise ValueError(f"Scenario column not available: {column_name}")
+        return values.scenario_columns[column_name]
+    if isinstance(values, GroundTruthSet):
+        if column_name == "n_outages":
+            return values.n_outages
+        if column_name == "outage_type":
+            return values.outage_type
+    raise ValueError(
+        f"Scenario column {column_name!r} is not available on this prediction artifact."
+    )
 
 
 def _get_valid_mask(

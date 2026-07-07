@@ -21,9 +21,18 @@ This repository implements a post-hoc conformal prediction layer for continuous 
 
 The current implementation exposes one conformal method family:
 
-- `cp_type: base`
+- `cp_type: element`
 
-`base` is the canonical label for the current residual-quantile interval workflow. The legacy alias `naive` is still accepted in configs and CLI overrides, but it is normalized internally to `base`.
+`element` is the canonical label for the current residual-quantile interval workflow.
+
+The current implementation also exposes optional residual-stratification modes:
+
+- `strat: n_outages`
+- `strat: outage_type`
+
+When enabled, residual quantiles are fitted and applied per scenario outage count, where `n_outages` includes both inactive branches and inactive generators in the raw datakit scenario.
+
+`outage_type` groups scenarios into four coarse outage regimes: `none`, `branch_only`, `gen_only`, and `mixed`.
 
 Today the repository supports three CLI verbs:
 
@@ -96,7 +105,7 @@ The repository ships one generic example config at:
 
 The YAML carries:
 
-- shared run metadata such as `task_name`, `cp_type`, and `alpha`
+- shared run metadata such as `task_name`, `cp_type`, `strat`, and `alpha`
 - input paths for predictions and ground truth
 - output paths for artifacts, calibrated parquets, and screening outputs
 - `screen_bounds` for bounded variables such as `Vm` and `line_loading`
@@ -117,8 +126,8 @@ The current workflow produces:
 
 ## Current Limits
 
-- Only `cp_type: base` is implemented today.
-- Stratification is not implemented yet.
+- Only `cp_type: element` is implemented today.
+- Only `strat: n_outages` and `strat: outage_type` are implemented today when stratification is requested.
 - Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
 
 ## Documentation

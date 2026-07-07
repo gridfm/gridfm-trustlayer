@@ -19,7 +19,8 @@ CLI flags always override the YAML.
 version: 1
 
 task_name: PowerFlow
-cp_type: base
+cp_type: element
+strat: n_outages
 alpha: 0.1
 calibration_fraction: 0.25
 random_seed: 7
@@ -45,10 +46,10 @@ inputs:
   analysis_pf_edge: null
 
 outputs:
-  artifact: trustlayer_outputs/powerflow/base/grid_predictions_vm_va_line_loading.trustlayer
-  calibrated_predictions_volt: trustlayer_outputs/powerflow/base/grid_predictions_vm_va_with_intervals.parquet
-  calibrated_predictions_line: trustlayer_outputs/powerflow/base/grid_predictions_line_loading_with_intervals.parquet
-  screen_dir: trustlayer_outputs/powerflow/base/screen
+  artifact: trustlayer_outputs/powerflow/element/grid_predictions_vm_va_line_loading.trustlayer
+  calibrated_predictions_volt: trustlayer_outputs/powerflow/element/grid_predictions_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/powerflow/element/grid_predictions_line_loading_with_intervals.parquet
+  screen_dir: trustlayer_outputs/powerflow/element/screen
 
 commands:
   screen:
@@ -63,12 +64,17 @@ commands:
 | --- | --- | --- | --- |
 | `version` | `int` | No | Config schema marker. |
 | `task_name` | `str` | Usually yes | Task adapter used when reading prediction artifacts. |
-| `cp_type` | `str` | Yes | Current supported value: `base`. Legacy alias: `naive`. |
+| `cp_type` | `str` | Yes | Current supported value: `element`. |
+| `strat` | `str or null` | No | Optional residual stratification. Current supported values: `n_outages`, `outage_type`. |
 | `alpha` | `float` | Required for `compute` | Miscoverage level used while fitting intervals. |
 | `calibration_fraction` | `float or null` | No | Optional fraction of scenarios reserved for fitting before applying on holdout scenarios. |
 | `random_seed` | `int or null` | No | Random seed used with `calibration_fraction`. |
 | `variables` | `list[str]` | Usually yes | Any subset of `Vm`, `Va`, and `line_loading`. Defaults to `Vm, Va` if omitted. |
 | `screen_bounds` | `mapping` | Required for `screen` on each screened variable | Per-variable lower and upper screening bounds. |
+
+`strat: n_outages` means residual quantiles are fitted and applied per scenario outage count. The current `n_outages` value includes both inactive branches and inactive generators detected in the raw datakit scenario files.
+
+`strat: outage_type` means residual quantiles are fitted and applied per scenario outage regime. The current implementation uses four labels derived from the raw datakit scenario: `none`, `branch_only`, `gen_only`, and `mixed`.
 
 ## `inputs`
 
@@ -124,6 +130,7 @@ Supported override keys:
 - `task_name`
 - `alpha`
 - `cp_type`
+- `strat`
 - `variables`
 - `output`
 - `artifact`
@@ -142,7 +149,14 @@ commands:
       - Vm
       - line_loading
     outputs:
-      screen_dir: trustlayer_outputs/powerflow/base/screen
+      screen_dir: trustlayer_outputs/powerflow/element/screen
+
+You can also override stratification per command, for example:
+
+```yaml
+commands:
+  compute:
+    strat: outage_type
 ```
 
 ## Mixed-variable behavior

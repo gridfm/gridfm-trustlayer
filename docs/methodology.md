@@ -39,20 +39,21 @@ The current derived target is:
 
 Trustlayer computes line loading through the datakit-backed branch-power path and then calibrates the derived quantity in the same conformal framework.
 
-## Current method: `cp_type: base`
+## Current method: `cp_type: element`
 
 The current shipped method is exposed as:
 
-- `cp_type: base`
+- `cp_type: element`
 
 This is the current residual-quantile conformal workflow used by the repository.
 
 Current characteristics:
 
 - separate calibration per target dimension
+- optional stratification by `n_outages`, where the outage count includes inactive branches and inactive generators per scenario
 - mixed bus-level and branch-level runs supported through separate target families
 
-The legacy label `naive` is still accepted in configs for backward compatibility, but `base` is the canonical name going forward.
+`element` is the canonical name used by the current workflow.
 
 ## Workflow
 
@@ -65,7 +66,7 @@ Inputs:
 - prediction parquet
 - bus ground-truth parquet
 - branch ground-truth parquet when derived loading is requested
-- conformal settings such as `alpha`, `cp_type`, and `variables`
+- conformal settings such as `alpha`, `cp_type`, `strat`, and `variables`
 
 Outputs:
 

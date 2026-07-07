@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+from scipy.stats import gaussian_kde
 
 from gridfm_trustlayer.cli.config import (
     coalesce_option,
@@ -15,6 +16,7 @@ from gridfm_trustlayer.cli.config import (
     normalize_variables,
     resolve_command_config,
     validate_cp_type,
+    validate_strat,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.io import (
@@ -29,6 +31,7 @@ from gridfm_trustlayer.io.artifact import (
 
 
 SCREEN_BOUND_TOLERANCE = 1e-6
+ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,7 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--alpha", type=float, help="Miscoverage level for conformal intervals."
     )
     compute_parser.add_argument(
-        "--cp-type", help="Currently only 'base' is supported. Legacy alias: 'naive'."
+        "--cp-type", help="Currently only 'element' is supported."
+    )
+    compute_parser.add_argument(
+        "--strat",
+        help="Optional residual stratification. Supported values: 'n_outages', 'outage_type'.",
     )
     compute_parser.add_argument(
         "--variables",
@@ -122,7 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", help="Destination parquet for calibrated predictions."
     )
     calibrate_parser.add_argument(
-        "--cp-type", help="Currently only 'base' is supported. Legacy alias: 'naive'."
+        "--cp-type", help="Currently only 'element' is supported."
+    )
+    calibrate_parser.add_argument(
+        "--strat",
+        help="Optional residual stratification override. Supported values: 'n_outages', 'outage_type'. Must match the saved artifact when provided.",
     )
     calibrate_parser.add_argument(
         "--pf-node",
@@ -197,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_compute(args: argparse.Namespace) -> None:
     config = resolve_command_config(load_cli_config(args.config), "compute")
     cp_type = validate_cp_type(coalesce_option(args.cp_type, config, "cp_type"))
+    strat = validate_strat(coalesce_option(args.strat, config, "strat"))
     variables = normalize_variables(
         coalesce_option(args.variables, config, "variables")
     )
@@ -237,6 +249,7 @@ def _run_compute(args: argparse.Namespace) -> None:
             predictions,
             ground_truth,
             target_variables,
+            strat=strat,
         )
         if split is not None:
             calibration_predictions = _subset_channel_set(
@@ -252,6 +265,7 @@ def _run_compute(args: argparse.Namespace) -> None:
             calibration_ground_truth,
             alpha=float(coalesce_option(args.alpha, config, "alpha", required=True)),
             channel_names=target_variables,
+            strat=strat,
         )
         if split is not None and calibration_fraction is not None:
             _apply_split_metadata(
@@ -271,11 +285,18 @@ def _run_compute(args: argparse.Namespace) -> None:
 def _run_calibrate(args: argparse.Namespace) -> None:
     config = resolve_command_config(load_cli_config(args.config), "calibrate")
     cp_type = validate_cp_type(coalesce_option(args.cp_type, config, "cp_type"))
+    requested_strat = validate_strat(coalesce_option(args.strat, config, "strat"))
     predictions_path = coalesce_option(
         args.predictions, config, "predictions", required=True
     )
     artifact_path = coalesce_option(args.artifact, config, "artifact", required=True)
     calibrators = load_interval_artifacts(artifact_path)
+    if requested_strat is not None:
+        for calibrator in calibrators.values():
+            if calibrator.strat != requested_strat:
+                raise ValueError(
+                    "Requested stratification does not match the saved interval artifact."
+                )
     predictions = load_predictions(
         predictions_path,
         task_name=coalesce_option(args.task_name, config, "task_name"),
@@ -303,6 +324,10 @@ def _run_calibrate(args: argparse.Namespace) -> None:
             ].copy()
 
     analysis_ground_truth = None
+    if any(calibrator.strat is not None for calibrator in calibrators.values()):
+        analysis_ground_truth = _load_analysis_ground_truth(
+            args, config, predictions.scenario_ids
+        )
     multiple_targets = len(calibrators) > 1
     for target_kind, calibrator in calibrators.items():
         if calibrator.entity_name == "branch":
@@ -314,6 +339,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                 predictions,
                 analysis_ground_truth,
                 calibrator.channel_names,
+                strat=calibrator.strat,
             )
             intervals = calibrator.predict_intervals(application_predictions)
             output_frame = _build_entity_output_frame(
@@ -323,7 +349,13 @@ def _run_calibrate(args: argparse.Namespace) -> None:
             )
         else:
             application_predictions = _build_bus_channel_set(
-                predictions, calibrator.channel_names
+                predictions,
+                calibrator.channel_names,
+                scenario_columns=(
+                    {}
+                    if analysis_ground_truth is None
+                    else _build_scenario_columns(analysis_ground_truth, calibrator.strat)
+                ),
             )
             intervals = calibrator.predict_intervals(application_predictions)
             interval_frame = _build_interval_frame(application_predictions, intervals)
@@ -1106,6 +1138,12 @@ def _build_interval_frame(
             entity_column: np.tile(entity_ids, len(scenario_ids)),
         },
     )
+    _append_scenario_columns_to_frame(
+        frame,
+        scenario_ids,
+        len(entity_ids),
+        predictions.scenario_columns,
+    )
     for channel_name, (lower, upper) in intervals.items():
         frame[f"{channel_name}_pi_lower"] = lower.reshape(-1)
         frame[f"{channel_name}_pi_upper"] = upper.reshape(-1)
@@ -1126,6 +1164,12 @@ def _build_entity_output_frame(
             entity_column: np.tile(entity_ids, len(scenario_ids)),
         },
     )
+    _append_scenario_columns_to_frame(
+        frame,
+        scenario_ids,
+        len(entity_ids),
+        predictions.scenario_columns,
+    )
     for column_name, values in predictions.entity_columns.items():
         frame[column_name] = np.tile(values, len(scenario_ids))
     for channel_name, prediction_values in predictions.channels.items():
@@ -1139,6 +1183,24 @@ def _build_entity_output_frame(
     return frame
 
 
+def _append_scenario_columns_to_frame(
+    frame: pd.DataFrame,
+    scenario_ids: np.ndarray,
+    entity_count: int,
+    scenario_columns: dict[str, np.ndarray],
+) -> None:
+    for column_name, values in scenario_columns.items():
+        if len(values) != len(scenario_ids):
+            raise ValueError(
+                f"Scenario column {column_name!r} does not align with the scenario axis."
+            )
+        repeated_values = np.repeat(values, entity_count)
+        frame[column_name] = repeated_values
+        label_column = _scenario_label_column(column_name, repeated_values)
+        if label_column is not None:
+            frame[f"{column_name}_label"] = label_column
+
+
 def _resolve_target_kind(channel_names: tuple[str, ...]) -> str:
     if tuple(channel_names) == ("line_loading",):
         return "line"
@@ -1149,18 +1211,35 @@ def _build_calibration_sets(
     predictions,
     ground_truth,
     channel_names: tuple[str, ...],
+    *,
+    strat: str | None = None,
 ) -> tuple[ChannelSet, ChannelSet]:
+    scenario_columns = _build_scenario_columns(ground_truth, strat)
     if _resolve_target_kind(channel_names) == "line":
-        return _build_line_loading_sets(predictions, ground_truth)
+        return _build_line_loading_sets(
+            predictions,
+            ground_truth,
+            scenario_columns=scenario_columns,
+        )
     return (
-        _build_bus_channel_set(predictions, channel_names),
-        _build_ground_truth_bus_channel_set(ground_truth, channel_names),
+        _build_bus_channel_set(
+            predictions,
+            channel_names,
+            scenario_columns=scenario_columns,
+        ),
+        _build_ground_truth_bus_channel_set(
+            ground_truth,
+            channel_names,
+            scenario_columns=scenario_columns,
+        ),
     )
 
 
 def _build_bus_channel_set(
     predictions,
     channel_names: tuple[str, ...],
+    *,
+    scenario_columns: dict[str, np.ndarray] | None = None,
 ) -> ChannelSet:
     return ChannelSet(
         scenario_ids=predictions.scenario_ids.copy(),
@@ -1175,12 +1254,74 @@ def _build_bus_channel_set(
                 predictions.bus_ids, predictions.bus_type_masks
             ),
         },
+        scenario_columns={
+            name: values.copy() for name, values in (scenario_columns or {}).items()
+        },
     )
+
+
+def _append_voltage_analysis_records(
+    records: list[dict[str, object]],
+    *,
+    variable: str,
+    entity_ids: np.ndarray,
+    bus_type_by_bus: dict[int, object],
+    widths: np.ndarray,
+    coverage: np.ndarray,
+    analysis_scope: str,
+    stratification: str = "",
+    stratum_value: int | None = None,
+) -> None:
+    width_mean_per_bus = widths.mean(axis=0)
+    width_min_per_bus = widths.min(axis=0)
+    width_max_per_bus = widths.max(axis=0)
+    coverage_mean_per_bus = coverage.mean(axis=0)
+    n_samples = int(widths.shape[0])
+
+    for index, bus_id in enumerate(entity_ids.tolist()):
+        records.append(
+            {
+                "analysis_scope": analysis_scope,
+                "stratification": stratification,
+                "stratum_value": float("nan")
+                if stratum_value is None
+                else int(stratum_value),
+                "stratum_label": _format_stratum_label(
+                    stratification, stratum_value
+                ),
+                "variable": variable,
+                "bus": int(bus_id),
+                "bus_type": bus_type_by_bus.get(int(bus_id), "Unknown"),
+                "width_mean": float(width_mean_per_bus[index]),
+                "width_min": float(width_min_per_bus[index]),
+                "width_max": float(width_max_per_bus[index]),
+                "width_mean_degrees": _maybe_width_degrees(
+                    variable, width_mean_per_bus[index]
+                ),
+                "width_min_degrees": _maybe_width_degrees(
+                    variable, width_min_per_bus[index]
+                ),
+                "width_max_degrees": _maybe_width_degrees(
+                    variable, width_max_per_bus[index]
+                ),
+                "empirical_coverage": float(coverage_mean_per_bus[index]),
+                "n_samples": n_samples,
+                "n_scenarios": n_samples,
+            },
+        )
+
+
+def _finalize_analysis_frame(frame: pd.DataFrame, entity_kind: str) -> pd.DataFrame:
+    sort_columns = ["variable", "analysis_scope", "stratification", "stratum_value"]
+    sort_columns.append("bus" if entity_kind == "bus" else "branch")
+    return frame.sort_values(sort_columns, na_position="first").reset_index(drop=True)
 
 
 def _build_ground_truth_bus_channel_set(
     ground_truth,
     channel_names: tuple[str, ...],
+    *,
+    scenario_columns: dict[str, np.ndarray] | None = None,
 ) -> ChannelSet:
     return ChannelSet(
         scenario_ids=ground_truth.scenario_ids.copy(),
@@ -1195,12 +1336,17 @@ def _build_ground_truth_bus_channel_set(
                 ground_truth.bus_ids, ground_truth.bus_type_masks
             ),
         },
+        scenario_columns={
+            name: values.copy() for name, values in (scenario_columns or {}).items()
+        },
     )
 
 
 def _build_line_loading_sets(
     predictions,
     ground_truth,
+    *,
+    scenario_columns: dict[str, np.ndarray] | None = None,
 ) -> tuple[ChannelSet, ChannelSet]:
     predicted_loading = compute_line_loading(
         predictions.Vm, predictions.Va, ground_truth
@@ -1222,6 +1368,9 @@ def _build_line_loading_sets(
             channels={"line_loading": predicted_loading},
             valid_masks={"line_loading": valid_mask},
             entity_columns=entity_columns,
+            scenario_columns={
+                name: values.copy() for name, values in (scenario_columns or {}).items()
+            },
         ),
         ChannelSet(
             scenario_ids=ground_truth.scenario_ids.copy(),
@@ -1230,8 +1379,24 @@ def _build_line_loading_sets(
             channels={"line_loading": target_loading},
             valid_masks={"line_loading": valid_mask},
             entity_columns=entity_columns,
+            scenario_columns={
+                name: values.copy() for name, values in (scenario_columns or {}).items()
+            },
         ),
     )
+
+
+def _build_scenario_columns(
+    ground_truth,
+    strat: str | None,
+) -> dict[str, np.ndarray]:
+    if strat is None:
+        return {}
+    if strat == "n_outages":
+        return {"n_outages": ground_truth.n_outages.astype(np.int32, copy=True)}
+    if strat == "outage_type":
+        return {"outage_type": ground_truth.outage_type.astype(np.int32, copy=True)}
+    raise ValueError(f"Unsupported stratification: {strat!r}")
 
 
 def _subset_channel_set(
@@ -1253,6 +1418,10 @@ def _subset_channel_set(
         },
         entity_columns={
             name: values.copy() for name, values in channel_set.entity_columns.items()
+        },
+        scenario_columns={
+            name: values[scenario_mask].copy()
+            for name, values in channel_set.scenario_columns.items()
         },
     )
 
@@ -1363,6 +1532,7 @@ def _subset_ground_truth_set(
         bus_ids=ground_truth.bus_ids.copy(),
         branch_ids=ground_truth.branch_ids.copy(),
         n_outages=ground_truth.n_outages[scenario_mask].copy(),
+        outage_type=ground_truth.outage_type[scenario_mask].copy(),
         removed_mask=ground_truth.removed_mask[scenario_mask].copy(),
         Vm=ground_truth.Vm[scenario_mask].copy(),
         Va=ground_truth.Va[scenario_mask].copy(),
@@ -1476,6 +1646,7 @@ def _build_line_analysis_frame(
     variables: tuple[str, ...],
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
+    strat_columns = _analysis_scenario_columns_from_frame(frame)
     for variable in variables:
         target_column = f"{variable}_target"
         lower_column = f"{variable}_pi_lower"
@@ -1499,6 +1670,7 @@ def _build_line_analysis_frame(
         variable_frame = frame.loc[
             :,
             [
+                "scenario",
                 "branch",
                 "from_bus",
                 "to_bus",
@@ -1507,6 +1679,7 @@ def _build_line_analysis_frame(
                 target_column,
                 lower_column,
                 upper_column,
+                *strat_columns,
             ],
         ].copy()
         valid_mask = (variable_frame[pred_column] >= 0.0) & (
@@ -1520,37 +1693,72 @@ def _build_line_analysis_frame(
             (variable_frame[target_column] >= variable_frame[lower_column])
             & (variable_frame[target_column] <= variable_frame[upper_column])
         ).astype(float)
-        grouped = variable_frame.groupby("branch", sort=True)
-        summary = grouped.agg(
-            from_bus=("from_bus", "first"),
-            to_bus=("to_bus", "first"),
-            rate_a=("rate_a", "first"),
-            width_mean=("interval_width", "mean"),
-            width_min=("interval_width", "min"),
-            width_max=("interval_width", "max"),
-            empirical_coverage=("covered", "mean"),
-            n_samples=("covered", "size"),
+        _append_line_analysis_records(
+            records,
+            variable=variable,
+            variable_frame=variable_frame,
+            analysis_scope="overall",
         )
-        for _, row in summary.reset_index().iterrows():
-            records.append(
-                {
-                    "variable": variable,
-                    "branch": int(row["branch"]),
-                    "from_bus": int(row["from_bus"]),
-                    "to_bus": int(row["to_bus"]),
-                    "rate_a": float(row["rate_a"]),
-                    "width_mean": float(row["width_mean"]),
-                    "width_min": float(row["width_min"]),
-                    "width_max": float(row["width_max"]),
-                    "empirical_coverage": float(row["empirical_coverage"]),
-                    "n_samples": int(row["n_samples"]),
-                },
-            )
-    return (
-        pd.DataFrame.from_records(records)
-        .sort_values(["variable", "branch"])
-        .reset_index(drop=True)
+        for stratification in strat_columns:
+            for stratum_value, stratum_group in variable_frame.groupby(
+                stratification, sort=True, dropna=False
+            ):
+                _append_line_analysis_records(
+                    records,
+                    variable=variable,
+                    variable_frame=stratum_group,
+                    analysis_scope="stratified",
+                    stratification=stratification,
+                    stratum_value=None if pd.isna(stratum_value) else int(stratum_value),
+                )
+    return _finalize_analysis_frame(pd.DataFrame.from_records(records), "branch")
+
+
+def _append_line_analysis_records(
+    records: list[dict[str, object]],
+    *,
+    variable: str,
+    variable_frame: pd.DataFrame,
+    analysis_scope: str,
+    stratification: str = "",
+    stratum_value: int | None = None,
+) -> None:
+    grouped = variable_frame.groupby("branch", sort=True)
+    summary = grouped.agg(
+        from_bus=("from_bus", "first"),
+        to_bus=("to_bus", "first"),
+        rate_a=("rate_a", "first"),
+        width_mean=("interval_width", "mean"),
+        width_min=("interval_width", "min"),
+        width_max=("interval_width", "max"),
+        empirical_coverage=("covered", "mean"),
+        n_samples=("covered", "size"),
+        n_scenarios=("scenario", "nunique"),
     )
+    for _, row in summary.reset_index().iterrows():
+        records.append(
+            {
+                "analysis_scope": analysis_scope,
+                "stratification": stratification,
+                "stratum_value": float("nan")
+                if stratum_value is None
+                else int(stratum_value),
+                "stratum_label": _format_stratum_label(
+                    stratification, stratum_value
+                ),
+                "variable": variable,
+                "branch": int(row["branch"]),
+                "from_bus": int(row["from_bus"]),
+                "to_bus": int(row["to_bus"]),
+                "rate_a": float(row["rate_a"]),
+                "width_mean": float(row["width_mean"]),
+                "width_min": float(row["width_min"]),
+                "width_max": float(row["width_max"]),
+                "empirical_coverage": float(row["empirical_coverage"]),
+                "n_samples": int(row["n_samples"]),
+                "n_scenarios": int(row["n_scenarios"]),
+            },
+        )
 
 
 def _build_analysis_frame_from_targets(
@@ -1559,6 +1767,7 @@ def _build_analysis_frame_from_targets(
 ) -> pd.DataFrame | None:
     records: list[dict[str, object]] = []
     bus_type_by_bus = _resolve_bus_type_labels_from_frame(frame)
+    strat_columns = _analysis_scenario_columns_from_frame(frame)
     for variable in variables:
         target_column = f"{variable}_target"
         lower_column = f"{variable}_pi_lower"
@@ -1568,7 +1777,7 @@ def _build_analysis_frame_from_targets(
             return None
 
         variable_frame = frame.loc[
-            :, ["bus", target_column, lower_column, upper_column]
+            :, ["scenario", "bus", target_column, lower_column, upper_column, *strat_columns]
         ].copy()
         variable_frame["interval_width"] = (
             variable_frame[upper_column] - variable_frame[lower_column]
@@ -1577,41 +1786,87 @@ def _build_analysis_frame_from_targets(
             (variable_frame[target_column] >= variable_frame[lower_column])
             & (variable_frame[target_column] <= variable_frame[upper_column])
         ).astype(float)
-        grouped = variable_frame.groupby("bus", sort=True)
-        summary = grouped.agg(
-            width_mean=("interval_width", "mean"),
-            width_min=("interval_width", "min"),
-            width_max=("interval_width", "max"),
-            empirical_coverage=("covered", "mean"),
-            n_samples=("covered", "size"),
+        _append_voltage_analysis_records_from_frame(
+            records,
+            variable=variable,
+            variable_frame=variable_frame,
+            bus_type_by_bus=bus_type_by_bus,
+            analysis_scope="overall",
         )
-        for bus_id, row in summary.reset_index().iterrows():
-            records.append(
-                {
-                    "variable": variable,
-                    "bus": int(row["bus"]),
-                    "bus_type": bus_type_by_bus.get(int(row["bus"]), "Unknown"),
-                    "width_mean": float(row["width_mean"]),
-                    "width_min": float(row["width_min"]),
-                    "width_max": float(row["width_max"]),
-                    "width_mean_degrees": _maybe_width_degrees(
-                        variable, row["width_mean"]
-                    ),
-                    "width_min_degrees": _maybe_width_degrees(
-                        variable, row["width_min"]
-                    ),
-                    "width_max_degrees": _maybe_width_degrees(
-                        variable, row["width_max"]
-                    ),
-                    "empirical_coverage": float(row["empirical_coverage"]),
-                    "n_samples": int(row["n_samples"]),
-                },
-            )
-    return (
-        pd.DataFrame.from_records(records)
-        .sort_values(["variable", "bus"])
-        .reset_index(drop=True)
+        for stratification in strat_columns:
+            for stratum_value, stratum_group in variable_frame.groupby(
+                stratification, sort=True, dropna=False
+            ):
+                _append_voltage_analysis_records_from_frame(
+                    records,
+                    variable=variable,
+                    variable_frame=stratum_group,
+                    bus_type_by_bus=bus_type_by_bus,
+                    analysis_scope="stratified",
+                    stratification=stratification,
+                    stratum_value=None if pd.isna(stratum_value) else int(stratum_value),
+                )
+    return _finalize_analysis_frame(pd.DataFrame.from_records(records), "bus")
+
+
+def _append_voltage_analysis_records_from_frame(
+    records: list[dict[str, object]],
+    *,
+    variable: str,
+    variable_frame: pd.DataFrame,
+    bus_type_by_bus: dict[int, str],
+    analysis_scope: str,
+    stratification: str = "",
+    stratum_value: int | None = None,
+) -> None:
+    grouped = variable_frame.groupby("bus", sort=True)
+    summary = grouped.agg(
+        width_mean=("interval_width", "mean"),
+        width_min=("interval_width", "min"),
+        width_max=("interval_width", "max"),
+        empirical_coverage=("covered", "mean"),
+        n_samples=("covered", "size"),
+        n_scenarios=("scenario", "nunique"),
     )
+    for _, row in summary.reset_index().iterrows():
+        records.append(
+            {
+                "analysis_scope": analysis_scope,
+                "stratification": stratification,
+                "stratum_value": float("nan")
+                if stratum_value is None
+                else int(stratum_value),
+                "stratum_label": _format_stratum_label(
+                    stratification, stratum_value
+                ),
+                "variable": variable,
+                "bus": int(row["bus"]),
+                "bus_type": bus_type_by_bus.get(int(row["bus"]), "Unknown"),
+                "width_mean": float(row["width_mean"]),
+                "width_min": float(row["width_min"]),
+                "width_max": float(row["width_max"]),
+                "width_mean_degrees": _maybe_width_degrees(variable, row["width_mean"]),
+                "width_min_degrees": _maybe_width_degrees(variable, row["width_min"]),
+                "width_max_degrees": _maybe_width_degrees(variable, row["width_max"]),
+                "empirical_coverage": float(row["empirical_coverage"]),
+                "n_samples": int(row["n_samples"]),
+                "n_scenarios": int(row["n_scenarios"]),
+            },
+        )
+
+
+def _analysis_scenario_columns_from_channel_set(
+    channel_set: ChannelSet,
+) -> dict[str, np.ndarray]:
+    return {
+        name: values.astype(np.int64, copy=False)
+        for name, values in channel_set.scenario_columns.items()
+        if name in ANALYSIS_STRAT_COLUMNS
+    }
+
+
+def _analysis_scenario_columns_from_frame(frame: pd.DataFrame) -> list[str]:
+    return [column for column in ANALYSIS_STRAT_COLUMNS if column in frame.columns]
 
 
 def _resolve_bus_type_labels_from_masks(
@@ -1705,7 +1960,8 @@ def _save_analysis_figures(
     analysis_frame: pd.DataFrame,
     figures_dir: Path,
 ) -> None:
-    for variable, group in analysis_frame.groupby("variable", sort=True):
+    overall_frame = analysis_frame[analysis_frame["analysis_scope"].eq("overall")]
+    for variable, group in overall_frame.groupby("variable", sort=True):
         bus_values = group["bus"].to_numpy(dtype=int, copy=True)
         width_mean = group["width_mean"].to_numpy(dtype=float, copy=True)
         width_min = group["width_min"].to_numpy(dtype=float, copy=True)
@@ -1738,8 +1994,7 @@ def _save_analysis_figures(
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        width_bins = min(max(len(width_mean) // 2, 5), 20)
-        ax.hist(width_mean, bins=width_bins, density=True, alpha=0.75)
+        _plot_density_curve(ax, width_mean)
         ax.set_title(f"{variable} mean interval width density")
         ax.set_xlabel("mean interval width")
         ax.set_ylabel("density")
@@ -1748,23 +2003,29 @@ def _save_analysis_figures(
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        coverage_bins = np.linspace(0.0, 1.0, num=11)
-        ax.hist(
-            empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75
-        )
+        _plot_density_curve(ax, empirical_coverage, clip=(0.0, 1.0))
         ax.set_title(f"{variable} empirical coverage density")
         ax.set_xlabel("empirical coverage")
         ax.set_ylabel("density")
+        ax.set_xlim(0.0, 1.0)
         fig.tight_layout()
         fig.savefig(figures_dir / f"{variable.lower()}_coverage_density.png", dpi=150)
         plt.close(fig)
+
+    _save_stratified_entity_figures(
+        analysis_frame,
+        figures_dir,
+        entity_column="bus",
+        entity_label="bus",
+    )
 
 
 def _save_line_analysis_figures(
     analysis_frame: pd.DataFrame,
     figures_dir: Path,
 ) -> None:
-    for variable, group in analysis_frame.groupby("variable", sort=True):
+    overall_frame = analysis_frame[analysis_frame["analysis_scope"].eq("overall")]
+    for variable, group in overall_frame.groupby("variable", sort=True):
         branch_values = group["branch"].to_numpy(dtype=int, copy=True)
         width_mean = group["width_mean"].to_numpy(dtype=float, copy=True)
         width_min = group["width_min"].to_numpy(dtype=float, copy=True)
@@ -1797,8 +2058,7 @@ def _save_line_analysis_figures(
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        width_bins = min(max(len(width_mean) // 2, 5), 20)
-        ax.hist(width_mean, bins=width_bins, density=True, alpha=0.75)
+        _plot_density_curve(ax, width_mean)
         ax.set_title(f"{variable} mean interval width density")
         ax.set_xlabel("mean interval width")
         ax.set_ylabel("density")
@@ -1807,28 +2067,159 @@ def _save_line_analysis_figures(
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        coverage_bins = np.linspace(0.0, 1.0, num=11)
-        ax.hist(
-            empirical_coverage, bins=coverage_bins.tolist(), density=True, alpha=0.75
-        )
+        _plot_density_curve(ax, empirical_coverage, clip=(0.0, 1.0))
         ax.set_title(f"{variable} empirical coverage density")
         ax.set_xlabel("empirical coverage")
         ax.set_ylabel("density")
+        ax.set_xlim(0.0, 1.0)
         fig.tight_layout()
         fig.savefig(figures_dir / f"{variable.lower()}_coverage_density.png", dpi=150)
+        plt.close(fig)
+
+    _save_stratified_entity_figures(
+        analysis_frame,
+        figures_dir,
+        entity_column="branch",
+        entity_label="branch",
+    )
+
+
+def _save_stratified_entity_figures(
+    analysis_frame: pd.DataFrame,
+    figures_dir: Path,
+    *,
+    entity_column: str,
+    entity_label: str,
+) -> None:
+    stratified_frame = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
+    if stratified_frame.empty:
+        return
+
+    for (variable, stratification), group in stratified_frame.groupby(
+        ["variable", "stratification"], sort=True, dropna=False
+    ):
+        suffix = _normalize_output_segment(f"by_{stratification}")
+        ordered_group = group.sort_values(["stratum_value", entity_column], na_position="first")
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for stratum_value, stratum_group in ordered_group.groupby(
+            "stratum_value", sort=True, dropna=False
+        ):
+            ax.plot(
+                stratum_group[entity_column].to_numpy(dtype=int, copy=True),
+                stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
+                label=_format_stratum_label(stratification, stratum_value),
+            )
+        ax.set_title(f"{variable} mean interval width by {entity_label} and {stratification}")
+        ax.set_xlabel(entity_label)
+        ax.set_ylabel("mean interval width")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(figures_dir / f"{variable.lower()}_width_summary_{suffix}.png", dpi=150)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for stratum_value, stratum_group in ordered_group.groupby(
+            "stratum_value", sort=True, dropna=False
+        ):
+            ax.plot(
+                stratum_group[entity_column].to_numpy(dtype=int, copy=True),
+                stratum_group["empirical_coverage"].to_numpy(dtype=float, copy=True),
+                label=_format_stratum_label(stratification, stratum_value),
+            )
+        ax.set_ylim(0.0, 1.05)
+        ax.set_title(f"{variable} empirical coverage by {entity_label} and {stratification}")
+        ax.set_xlabel(entity_label)
+        ax.set_ylabel("coverage")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(figures_dir / f"{variable.lower()}_coverage_summary_{suffix}.png", dpi=150)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        for stratum_value, stratum_group in ordered_group.groupby(
+            "stratum_value", sort=True, dropna=False
+        ):
+            _plot_density_curve(
+                ax,
+                stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
+                label=_format_stratum_label(stratification, stratum_value),
+                fill_alpha=0.22,
+            )
+        ax.set_title(f"{variable} mean interval width density by {stratification}")
+        ax.set_xlabel("mean interval width")
+        ax.set_ylabel("density")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(figures_dir / f"{variable.lower()}_width_density_{suffix}.png", dpi=150)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        for stratum_value, stratum_group in ordered_group.groupby(
+            "stratum_value", sort=True, dropna=False
+        ):
+            _plot_density_curve(
+                ax,
+                stratum_group["empirical_coverage"].to_numpy(
+                    dtype=float, copy=True
+                ),
+                label=_format_stratum_label(stratification, stratum_value),
+                clip=(0.0, 1.0),
+                fill_alpha=0.22,
+            )
+        ax.set_title(f"{variable} empirical coverage density by {stratification}")
+        ax.set_xlabel("empirical coverage")
+        ax.set_ylabel("density")
+        ax.set_xlim(0.0, 1.0)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(figures_dir / f"{variable.lower()}_coverage_density_{suffix}.png", dpi=150)
+        plt.close(fig)
+
+        per_stratum = (
+            ordered_group.groupby("stratum_value", sort=True, dropna=False)
+            .agg(
+                width_mean_across_entities=("width_mean", "mean"),
+                empirical_coverage_across_entities=("empirical_coverage", "mean"),
+                n_entities=(entity_column, "nunique"),
+            )
+            .reset_index()
+        )
+        labels = [
+            _format_stratum_label(stratification, value)
+            for value in per_stratum["stratum_value"].tolist()
+        ]
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(labels, per_stratum["width_mean_across_entities"].to_numpy(dtype=float, copy=True))
+        ax.set_title(f"{variable} mean interval width across {entity_label}s by {stratification}")
+        ax.set_xlabel(stratification)
+        ax.set_ylabel("mean interval width")
+        fig.tight_layout()
+        fig.savefig(figures_dir / f"{variable.lower()}_width_mean_{suffix}.png", dpi=150)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(labels, per_stratum["empirical_coverage_across_entities"].to_numpy(dtype=float, copy=True))
+        ax.set_ylim(0.0, 1.05)
+        ax.set_title(f"{variable} empirical coverage across {entity_label}s by {stratification}")
+        ax.set_xlabel(stratification)
+        ax.set_ylabel("coverage")
+        fig.tight_layout()
+        fig.savefig(figures_dir / f"{variable.lower()}_coverage_mean_{suffix}.png", dpi=150)
         plt.close(fig)
 
 
 def _build_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
     system_summary = _aggregate_summary_rows(
         analysis_frame,
-        group_columns=["variable"],
+        group_columns=["analysis_scope", "stratification", "stratum_value", "variable"],
         scope="system",
         include_bus_type=False,
     )
     bus_type_summary = _aggregate_summary_rows(
         analysis_frame,
-        group_columns=["variable", "bus_type"],
+        group_columns=["analysis_scope", "stratification", "stratum_value", "variable", "bus_type"],
         scope="bus_type",
         include_bus_type=True,
     )
@@ -1837,16 +2228,34 @@ def _build_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
 
 def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
     records: list[dict[str, object]] = []
-    grouped = analysis_frame.groupby("variable", sort=True, dropna=False)
-    for variable, group in grouped:
+    grouped = analysis_frame.groupby(
+        ["analysis_scope", "stratification", "stratum_value", "variable"],
+        sort=True,
+        dropna=False,
+    )
+    for group_key, group in grouped:
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+        analysis_scope = str(group_key[0])
+        stratification = str(group_key[1])
+        stratum_value = group_key[2]
+        variable = str(group_key[3])
         records.append(
             {
+                "analysis_scope": analysis_scope,
+                "stratification": stratification,
+                "stratum_value": stratum_value,
+                "stratum_label": _format_stratum_label(
+                    stratification, stratum_value
+                ),
                 "scope": "system",
-                "variable": str(variable),
+                "variable": variable,
                 "rate_a": float("nan"),
                 "n_lines": int(group["branch"].nunique()),
                 "n_samples_min": int(group["n_samples"].min()),
                 "n_samples_max": int(group["n_samples"].max()),
+                "n_scenarios_min": int(group["n_scenarios"].min()),
+                "n_scenarios_max": int(group["n_scenarios"].max()),
                 "width_mean_across_lines": float(group["width_mean"].mean()),
                 "width_min_across_lines": float(group["width_mean"].min()),
                 "width_max_across_lines": float(group["width_mean"].max()),
@@ -1865,12 +2274,20 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
         for rate_a, rate_group in grouped_by_rate:
             records.append(
                 {
+                    "analysis_scope": analysis_scope,
+                    "stratification": stratification,
+                    "stratum_value": stratum_value,
+                    "stratum_label": _format_stratum_label(
+                        stratification, stratum_value
+                    ),
                     "scope": "rate_a",
-                    "variable": str(variable),
+                    "variable": variable,
                     "rate_a": float(rate_a),
                     "n_lines": int(rate_group["branch"].nunique()),
                     "n_samples_min": int(rate_group["n_samples"].min()),
                     "n_samples_max": int(rate_group["n_samples"].max()),
+                    "n_scenarios_min": int(rate_group["n_scenarios"].min()),
+                    "n_scenarios_max": int(rate_group["n_scenarios"].max()),
                     "width_mean_across_lines": float(rate_group["width_mean"].mean()),
                     "width_min_across_lines": float(rate_group["width_mean"].min()),
                     "width_max_across_lines": float(rate_group["width_mean"].max()),
@@ -1887,7 +2304,10 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
             )
     return (
         pd.DataFrame.from_records(records)
-        .sort_values(["scope", "variable", "rate_a"], na_position="first")
+        .sort_values(
+            ["analysis_scope", "stratification", "stratum_value", "scope", "variable", "rate_a"],
+            na_position="first",
+        )
         .reset_index(drop=True)
     )
 
@@ -1904,16 +2324,27 @@ def _aggregate_summary_rows(
     for group_key, group in grouped:
         if not isinstance(group_key, tuple):
             group_key = (group_key,)
-        variable = str(group_key[0])
-        bus_type = str(group_key[1]) if include_bus_type else "All"
+        analysis_scope = str(group_key[0])
+        stratification = str(group_key[1])
+        stratum_value = group_key[2]
+        variable = str(group_key[3])
+        bus_type = str(group_key[4]) if include_bus_type else "All"
         records.append(
             {
+                "analysis_scope": analysis_scope,
+                "stratification": stratification,
+                "stratum_value": stratum_value,
+                "stratum_label": _format_stratum_label(
+                    stratification, stratum_value
+                ),
                 "scope": scope,
                 "variable": variable,
                 "bus_type": bus_type,
                 "n_buses": int(group["bus"].nunique()),
                 "n_samples_min": int(group["n_samples"].min()),
                 "n_samples_max": int(group["n_samples"].max()),
+                "n_scenarios_min": int(group["n_scenarios"].min()),
+                "n_scenarios_max": int(group["n_scenarios"].max()),
                 "width_mean_across_buses": float(group["width_mean"].mean()),
                 "width_min_across_buses": float(group["width_mean"].min()),
                 "width_max_across_buses": float(group["width_mean"].max()),
@@ -1939,8 +2370,100 @@ def _aggregate_summary_rows(
         )
     return (
         pd.DataFrame.from_records(records)
-        .sort_values(["scope", "variable", "bus_type"])
+        .sort_values(
+            ["analysis_scope", "stratification", "stratum_value", "scope", "variable", "bus_type"],
+            na_position="first",
+        )
         .reset_index(drop=True)
+    )
+
+
+def _format_stratum_label(stratification: str, stratum_value: object) -> str:
+    if pd.isna(stratum_value):
+        return "all"
+    if isinstance(stratum_value, (int, float, np.integer, np.floating)):
+        normalized_value = int(float(stratum_value))
+        if stratification == "outage_type":
+            return f"{stratification}={_format_outage_type_value(normalized_value)}"
+        return f"{stratification}={normalized_value}"
+    return f"{stratification}={str(stratum_value)}"
+
+
+def _format_outage_type_value(value: int) -> str:
+    labels = {
+        0: "none",
+        1: "branch_only",
+        2: "gen_only",
+        3: "mixed",
+    }
+    return labels.get(int(value), str(int(value)))
+
+
+def _plot_density_curve(
+    ax: plt.Axes,
+    values: np.ndarray,
+    *,
+    label: str | None = None,
+    clip: tuple[float, float] | None = None,
+    fill_alpha: float = 0.28,
+) -> None:
+    finite_values = np.asarray(values, dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if clip is not None:
+        lower_clip, upper_clip = clip
+        finite_values = finite_values[
+            (finite_values >= lower_clip) & (finite_values <= upper_clip)
+        ]
+    if finite_values.size == 0:
+        return
+
+    unique_values = np.unique(finite_values)
+    if unique_values.size < 2:
+        line = ax.axvline(
+            float(unique_values[0]),
+            label=label,
+            linewidth=2.0,
+            alpha=0.95,
+        )
+        ax.axvspan(
+            float(unique_values[0]),
+            float(unique_values[0]),
+            color=line.get_color(),
+            alpha=fill_alpha,
+        )
+        return
+
+    value_min = float(finite_values.min())
+    value_max = float(finite_values.max())
+    span = max(value_max - value_min, 1e-6)
+    if clip is None:
+        grid_min = value_min - 0.1 * span
+        grid_max = value_max + 0.1 * span
+    else:
+        clip_min, clip_max = clip
+        padding = 0.02 * (clip_max - clip_min)
+        grid_min = max(clip_min, value_min - padding)
+        grid_max = min(clip_max, value_max + padding)
+
+    if np.isclose(grid_min, grid_max):
+        grid_min -= 0.5
+        grid_max += 0.5
+
+    grid = np.linspace(grid_min, grid_max, num=256)
+    density = gaussian_kde(finite_values)(grid)
+    (line,) = ax.plot(grid, density, linewidth=2.0, label=label)
+    ax.fill_between(grid, 0.0, density, color=line.get_color(), alpha=fill_alpha)
+
+
+def _scenario_label_column(
+    column_name: str,
+    repeated_values: np.ndarray,
+) -> np.ndarray | None:
+    if column_name != "outage_type":
+        return None
+    return np.array(
+        [_format_outage_type_value(int(value)) for value in repeated_values.tolist()],
+        dtype=object,
     )
 
 

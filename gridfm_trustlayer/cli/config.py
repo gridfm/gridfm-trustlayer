@@ -34,6 +34,7 @@ def resolve_command_config(
         "task_name",
         "alpha",
         "cp_type",
+        "strat",
         "variables",
         "calibration_fraction",
         "random_seed",
@@ -82,6 +83,7 @@ def resolve_command_config(
         "task_name",
         "alpha",
         "cp_type",
+        "strat",
         "variables",
         "output",
         "artifact",
@@ -178,12 +180,23 @@ def normalize_variables(raw_value: Any) -> tuple[str, ...]:
 def validate_cp_type(cp_type: str | None) -> str:
     """Validate the currently supported CP type selection."""
 
-    normalized = "base" if cp_type is None else str(cp_type).strip().lower()
-    if normalized == "naive":
-        return "base"
-    if normalized != "base":
+    normalized = "element" if cp_type is None else str(cp_type).strip().lower()
+    if normalized != "element":
         raise ValueError(
-            f"Unsupported cp_type: {cp_type!r}. The current implementation supports 'base' (legacy alias: 'naive').",
+            f"Unsupported cp_type: {cp_type!r}. The current implementation supports 'element'.",
+        )
+    return normalized
+
+
+def validate_strat(strat: str | None) -> str | None:
+    """Validate the supported residual stratification modes."""
+
+    if strat is None:
+        return None
+    normalized = str(strat).strip().lower()
+    if normalized not in {"n_outages", "outage_type"}:
+        raise ValueError(
+            f"Unsupported strat: {strat!r}. The current implementation supports only 'n_outages' and 'outage_type'."
         )
     return normalized
 

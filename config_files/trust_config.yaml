@@ -2,7 +2,8 @@
 version: 1
 
 task_name: PowerFlow
-cp_type: base
+cp_type: element
+strat: outage_type
 alpha: 0.1
 calibration_fraction: null
 random_seed: 7
@@ -34,13 +35,13 @@ inputs:
 
 outputs:
   # `compute` writes one combined artifact when multiple target families are requested.
-  artifact: trustlayer_outputs/powerflow/base/grid_predictions_vm_va_line_loading.trustlayer
+  artifact: trustlayer_outputs/powerflow/element/grid_predictions_vm_va_line_loading.trustlayer
   # `calibrate` writes separate parquet outputs because bus-level and branch-level
   # predictions have different shapes.
-  calibrated_predictions_volt: trustlayer_outputs/powerflow/base/grid_predictions_vm_va_with_intervals.parquet
-  calibrated_predictions_line: trustlayer_outputs/powerflow/base/grid_predictions_line_loading_with_intervals.parquet
+  calibrated_predictions_volt: trustlayer_outputs/powerflow/element/grid_predictions_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/powerflow/element/grid_predictions_line_loading_with_intervals.parquet
   # `screen` writes detailed CSVs, aggregate confusion summaries, and figures here.
-  screen_dir: trustlayer_outputs/powerflow/base/screen
+  screen_dir: trustlayer_outputs/powerflow/element/screen
 
 commands:
   screen:
