@@ -8,7 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.cli.config import (
     coalesce_option,
