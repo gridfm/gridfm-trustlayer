@@ -645,9 +645,7 @@ def _resolve_screen_bounds(
                 )
             if variable == "line_loading":
                 if "upper" not in raw_value:
-                    raise ValueError(
-                        f"screen_bounds.{raw_name} must define 'upper'."
-                    )
+                    raise ValueError(f"screen_bounds.{raw_name} must define 'upper'.")
                 lower_value = float(raw_value.get("lower", float("nan")))
             else:
                 if "lower" not in raw_value or "upper" not in raw_value:
@@ -670,7 +668,9 @@ def _resolve_screen_bounds(
                 raise ValueError(
                     "Provide --upper-bound when overriding line_loading screening bounds from the CLI."
                 )
-            lower_value = float("nan") if args.lower_bound is None else float(args.lower_bound)
+            lower_value = (
+                float("nan") if args.lower_bound is None else float(args.lower_bound)
+            )
         else:
             if args.lower_bound is None or args.upper_bound is None:
                 raise ValueError(
@@ -2645,9 +2645,7 @@ def _format_stratum_label(stratification: str, stratum_value: object) -> str:
         if stratification == "outage_type":
             return f"{stratification}={_format_outage_type_value(normalized_value)}"
         if stratification == "system_load_bin":
-            return (
-                f"{stratification}={_format_system_load_bin_value(normalized_value)}"
-            )
+            return f"{stratification}={_format_system_load_bin_value(normalized_value)}"
         return f"{stratification}={normalized_value}"
     return f"{stratification}={str(stratum_value)}"
 

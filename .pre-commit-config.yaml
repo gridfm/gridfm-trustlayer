@@ -11,3 +11,15 @@ repos:
     hooks:
       - id: ruff-check
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: /opt/miniconda3/bin/conda run --no-capture-output -n trustlayer python -m mypy gridfm_trustlayer tests
+        language: system
+        pass_filenames: false
+      - id: pytest
+        name: pytest
+        entry: /opt/miniconda3/bin/conda run --no-capture-output -n trustlayer python -m pytest -q
+        language: system
+        pass_filenames: false

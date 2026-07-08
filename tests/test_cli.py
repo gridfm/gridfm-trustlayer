@@ -499,9 +499,7 @@ def test_compute_then_calibrate_with_system_load_bin_stratification(tmp_path) ->
     )
 
     output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
-    assert {"system_load_bin", "system_load_bin_label"}.issubset(
-        output_frame.columns
-    )
+    assert {"system_load_bin", "system_load_bin_label"}.issubset(output_frame.columns)
     assert set(output_frame["system_load_bin_label"].unique().tolist()) == {
         "p00-p50 (<50)",
         "p50-p100 (>=50)",
