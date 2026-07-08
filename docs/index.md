@@ -27,7 +27,7 @@ All verbs require `--config`, and CLI flags act as overrides of the YAML.
 
 ## Documentation map
 
-- [methodology.md](methodology.md): current trustlayer method, workflow, and screening interpretation
+- [methodology.md](methodology.md): current trustlayer method, workflow, implementation details, and screening interpretation
 - [cli.md](cli.md): CLI verbs, options, and workflow behavior
 - [configuration.md](configuration.md): YAML config structure, merge rules, and mixed-run path rules
 - [schemas.md](schemas.md): current prediction, ground-truth, and produced-artifact schema reference

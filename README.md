@@ -130,13 +130,13 @@ The current workflow produces:
 ## Current Limits
 
 - Only `cp_type: element` is implemented today.
-- Only `strat: n_outages` and `strat: outage_type` are implemented today when stratification is requested.
+- Only `strat: n_outages`, `strat: outage_type`, and `strat: system_load_bin` are implemented today when stratification is requested.
 - Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
 
 ## Documentation
 
 - `docs/index.md`: project overview
-- `docs/methodology.md`: current method, workflow, and screening semantics
+- `docs/methodology.md`: current method, workflow, implementation details, and screening semantics
 - `docs/cli.md`: detailed CLI reference
 - `docs/configuration.md`: YAML configuration reference
 - `docs/schemas.md`: current schema and loading-path notes
