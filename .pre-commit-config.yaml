@@ -15,11 +15,23 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: /opt/miniconda3/bin/conda run --no-capture-output -n trustlayer python -m mypy gridfm_trustlayer tests
+        entry: >-
+          bash -lc '
+          if [ -x /opt/miniconda3/bin/conda ] && /opt/miniconda3/bin/conda env list | grep -qE "^[[:space:]]*trustlayer[[:space:]]"; then
+            /opt/miniconda3/bin/conda run --no-capture-output -n trustlayer python -m mypy gridfm_trustlayer tests;
+          else
+            python -m mypy gridfm_trustlayer tests;
+          fi'
         language: system
         pass_filenames: false
       - id: pytest
         name: pytest
-        entry: /opt/miniconda3/bin/conda run --no-capture-output -n trustlayer python -m pytest -q
+        entry: >-
+          bash -lc '
+          if [ -x /opt/miniconda3/bin/conda ] && /opt/miniconda3/bin/conda env list | grep -qE "^[[:space:]]*trustlayer[[:space:]]"; then
+            /opt/miniconda3/bin/conda run --no-capture-output -n trustlayer python -m pytest -q;
+          else
+            python -m pytest -q;
+          fi'
         language: system
         pass_filenames: false
