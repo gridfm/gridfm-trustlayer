@@ -781,7 +781,6 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
                 "    lower: 0.95",
                 "    upper: 1.05",
                 "  line_loading:",
-                "    lower: 0.0",
                 "    upper: 1.0",
                 "inputs:",
                 f"  predictions: {predictions_path}",
@@ -858,6 +857,17 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     system_line = line_summary[line_summary["scope"].eq("system")].iloc[0]
     assert int(system_line["n_samples"]) == len(line_detail)
     assert set(line_summary["scope"].unique().tolist()) == {"system", "rate_a"}
+    assert line_detail["lower_bound"].isna().all()
+    assert not line_detail["pred_lower_violation"].any()
+    assert not line_detail["true_lower_violation"].any()
+    np.testing.assert_array_equal(
+        line_detail["pred_any_violation"].to_numpy(dtype=bool),
+        line_detail["pred_upper_violation"].to_numpy(dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        line_detail["true_any_violation"].to_numpy(dtype=bool),
+        line_detail["true_upper_violation"].to_numpy(dtype=bool),
+    )
 
     assert (screen_dir / "screen_figures" / "vm_precision_bus_summary.png").exists()
     assert (screen_dir / "screen_figures" / "vm_any_confusion.png").exists()

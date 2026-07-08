@@ -159,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     screen_parser = subparsers.add_parser(
         "screen",
-        help="Evaluate screened lower/upper bounds against ground truth using calibrated prediction intervals.",
+        help="Evaluate screened operating bounds against ground truth using calibrated prediction intervals.",
     )
     screen_parser.add_argument(
         "--config",
@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     screen_parser.add_argument(
         "--lower-bound",
         type=float,
-        help="Override lower screening bound for a single selected variable.",
+        help="Override lower screening bound for a single selected variable. Not used for line_loading.",
     )
     screen_parser.add_argument(
         "--upper-bound",
@@ -641,14 +641,22 @@ def _resolve_screen_bounds(
             variable = normalize_variables([str(raw_name)])[0]
             if not isinstance(raw_value, dict):
                 raise ValueError(
-                    f"screen_bounds.{raw_name} must be a mapping with 'lower' and 'upper'."
+                    f"screen_bounds.{raw_name} must be a mapping with screening bounds."
                 )
-            if "lower" not in raw_value or "upper" not in raw_value:
-                raise ValueError(
-                    f"screen_bounds.{raw_name} must define both 'lower' and 'upper'."
-                )
+            if variable == "line_loading":
+                if "upper" not in raw_value:
+                    raise ValueError(
+                        f"screen_bounds.{raw_name} must define 'upper'."
+                    )
+                lower_value = float(raw_value.get("lower", float("nan")))
+            else:
+                if "lower" not in raw_value or "upper" not in raw_value:
+                    raise ValueError(
+                        f"screen_bounds.{raw_name} must define both 'lower' and 'upper'."
+                    )
+                lower_value = float(raw_value["lower"])
             bounds_by_variable[variable] = {
-                "lower": float(raw_value["lower"]),
+                "lower": lower_value,
                 "upper": float(raw_value["upper"]),
             }
 
@@ -657,12 +665,20 @@ def _resolve_screen_bounds(
             raise ValueError(
                 "--lower-bound and --upper-bound can override bounds only when screening a single variable."
             )
-        if args.lower_bound is None or args.upper_bound is None:
-            raise ValueError(
-                "Provide both --lower-bound and --upper-bound when overriding screening bounds from the CLI."
-            )
+        if variables[0] == "line_loading":
+            if args.upper_bound is None:
+                raise ValueError(
+                    "Provide --upper-bound when overriding line_loading screening bounds from the CLI."
+                )
+            lower_value = float("nan") if args.lower_bound is None else float(args.lower_bound)
+        else:
+            if args.lower_bound is None or args.upper_bound is None:
+                raise ValueError(
+                    "Provide both --lower-bound and --upper-bound when overriding screening bounds from the CLI."
+                )
+            lower_value = float(args.lower_bound)
         bounds_by_variable[variables[0]] = {
-            "lower": float(args.lower_bound),
+            "lower": lower_value,
             "upper": float(args.upper_bound),
         }
 
@@ -912,12 +928,16 @@ def _append_screen_flag_columns(
     frame["pi_upper"] = frame[upper_column].astype(float)
     frame["lower_bound"] = lower_bound
     frame["upper_bound"] = upper_bound
-    frame["pred_lower_violation"] = frame["pi_lower"] < (
-        lower_bound - SCREEN_BOUND_TOLERANCE
-    )
-    frame["true_lower_violation"] = frame["target"] < (
-        lower_bound - SCREEN_BOUND_TOLERANCE
-    )
+    if variable == "line_loading":
+        frame["pred_lower_violation"] = False
+        frame["true_lower_violation"] = False
+    else:
+        frame["pred_lower_violation"] = frame["pi_lower"] < (
+            lower_bound - SCREEN_BOUND_TOLERANCE
+        )
+        frame["true_lower_violation"] = frame["target"] < (
+            lower_bound - SCREEN_BOUND_TOLERANCE
+        )
     frame["pred_upper_violation"] = frame["pi_upper"] > (
         upper_bound + SCREEN_BOUND_TOLERANCE
     )

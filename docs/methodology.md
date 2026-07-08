@@ -95,7 +95,7 @@ This step is intentionally split by target family because bus-level and branch-l
 Example bounds:
 
 - `Vm` in `[0.95, 1.05]`
-- `line_loading` in `[0.0, 1.0]`
+- `line_loading` <= `1.0`
 
 Outputs:
 

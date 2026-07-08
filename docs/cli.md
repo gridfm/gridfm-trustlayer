@@ -140,7 +140,7 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 | --- | --- | --- |
 | `--config` | `str` | Required YAML config. |
 | `--variables` | `list[str]` | Variables to screen. Defaults to the `commands.screen.variables` or shared `variables` config. |
-| `--lower-bound` | `float` | Override lower bound for one screened variable. |
+| `--lower-bound` | `float` | Override lower bound for one screened variable. Not used for `line_loading`. |
 | `--upper-bound` | `float` | Override upper bound for one screened variable. |
 | `--output` | `str` | Output directory for screening artifacts. |
 | `--calibrated-predictions` | `str` | Shared calibrated parquet input for a single target family. |
@@ -152,8 +152,9 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 
 Current semantics:
 
-- lower violation alarm when `pi_lower < lower_bound`
+- lower violation alarm when `pi_lower < lower_bound` for variables that use a lower bound, such as `Vm`
 - upper violation alarm when `pi_upper > upper_bound`
+- `line_loading` uses only the upper-bound screening rule
 - a numeric tolerance is applied internally to avoid floating-point boundary drift on exact limits
 
 Saved outputs:
