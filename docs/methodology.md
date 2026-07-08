@@ -129,7 +129,7 @@ $$
 Those interior cut points are stored in the `.trustlayer` artifact. Each scenario is then assigned with a right-sided search over the stored edges:
 
 $$
-g_s = \operatorname{searchsorted}(E, L_s, \text{right}).
+g_s = \mathrm{searchsorted}(E, L_s).
 $$
 
 In practical terms:
@@ -168,17 +168,9 @@ For invalid or masked entries, the implementation does not expand an interval an
 
 The trust-analysis outputs are derived directly from those interval endpoints.
 
-For each scenario-entity pair:
+For each scenario-entity pair, the interval width is $u_{s,e} - \ell_{s,e}$.
 
-$$
-	ext{width}_{s,e} = u_{s,e} - \ell_{s,e}
-$$
-
-and the coverage indicator is
-
-$$
-\mathbf{1}\{\ell_{s,e} \le y_{s,e} \le u_{s,e}\}.
-$$
+Coverage is recorded as a binary indicator: it is `1` when $\ell_{s,e} \le y_{s,e} \le u_{s,e}$ and `0` otherwise.
 
 The entity-level `empirical_coverage` reported in the analysis CSV is the average of that indicator over scenarios for each bus or branch, and the reported width summaries are the mean, min, and max interval widths over scenarios.
 
