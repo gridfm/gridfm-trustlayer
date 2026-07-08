@@ -16,6 +16,7 @@ from gridfm_trustlayer.cli.config import (
     normalize_variables,
     resolve_command_config,
     validate_cp_type,
+    validate_system_load_n_bins,
     validate_strat,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
@@ -31,7 +32,7 @@ from gridfm_trustlayer.io.artifact import (
 
 
 SCREEN_BOUND_TOLERANCE = 1e-6
-ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type")
+ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type", "system_load_bin")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,7 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compute_parser.add_argument(
         "--strat",
-        help="Optional residual stratification. Supported values: 'n_outages', 'outage_type'.",
+        help="Optional residual stratification. Supported values: 'n_outages', 'outage_type', 'system_load_bin'.",
+    )
+    compute_parser.add_argument(
+        "--system-load-n-bins",
+        type=int,
+        help="Requested number of percentile bins when --strat system_load_bin is used.",
     )
     compute_parser.add_argument(
         "--variables",
@@ -133,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calibrate_parser.add_argument(
         "--strat",
-        help="Optional residual stratification override. Supported values: 'n_outages', 'outage_type'. Must match the saved artifact when provided.",
+        help="Optional residual stratification override. Supported values: 'n_outages', 'outage_type', 'system_load_bin'. Must match the saved artifact when provided.",
     )
     calibrate_parser.add_argument(
         "--pf-node",
@@ -209,6 +215,13 @@ def _run_compute(args: argparse.Namespace) -> None:
     config = resolve_command_config(load_cli_config(args.config), "compute")
     cp_type = validate_cp_type(coalesce_option(args.cp_type, config, "cp_type"))
     strat = validate_strat(coalesce_option(args.strat, config, "strat"))
+    system_load_n_bins = validate_system_load_n_bins(
+        coalesce_option(args.system_load_n_bins, config, "system_load_n_bins")
+    )
+    if strat == "system_load_bin" and system_load_n_bins is None:
+        raise ValueError(
+            "system_load_n_bins is required when strat is 'system_load_bin'."
+        )
     variables = normalize_variables(
         coalesce_option(args.variables, config, "variables")
     )
@@ -245,27 +258,41 @@ def _run_compute(args: argparse.Namespace) -> None:
         )
     calibrators: dict[str, NaiveIntervalCalibrator] = {}
     for target_kind, target_variables in variable_groups.items():
+        working_predictions = predictions
+        working_ground_truth = ground_truth
+        if split is not None:
+            working_predictions = _subset_prediction_set(
+                predictions,
+                split["calibration_scenario_ids"],
+            )
+            working_ground_truth = _subset_ground_truth_set(
+                ground_truth,
+                split["calibration_scenario_ids"],
+            )
+
+        system_load_bin_edges = None
+        if strat == "system_load_bin":
+            assert system_load_n_bins is not None
+            system_load_bin_edges = _compute_system_load_bin_edges(
+                working_ground_truth.system_load,
+                system_load_n_bins,
+            )
         calibration_predictions, calibration_ground_truth = _build_calibration_sets(
-            predictions,
-            ground_truth,
+            working_predictions,
+            working_ground_truth,
             target_variables,
             strat=strat,
+            system_load_n_bins=system_load_n_bins,
+            system_load_bin_edges=system_load_bin_edges,
         )
-        if split is not None:
-            calibration_predictions = _subset_channel_set(
-                calibration_predictions,
-                split["calibration_scenario_ids"],
-            )
-            calibration_ground_truth = _subset_channel_set(
-                calibration_ground_truth,
-                split["calibration_scenario_ids"],
-            )
         calibrator = NaiveIntervalCalibrator.fit(
             calibration_predictions,
             calibration_ground_truth,
             alpha=float(coalesce_option(args.alpha, config, "alpha", required=True)),
             channel_names=target_variables,
             strat=strat,
+            system_load_n_bins=system_load_n_bins,
+            system_load_bin_edges=system_load_bin_edges,
         )
         if split is not None and calibration_fraction is not None:
             _apply_split_metadata(
@@ -340,6 +367,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                 analysis_ground_truth,
                 calibrator.channel_names,
                 strat=calibrator.strat,
+                system_load_bin_edges=calibrator.system_load_bin_edges,
             )
             intervals = calibrator.predict_intervals(application_predictions)
             output_frame = _build_entity_output_frame(
@@ -355,7 +383,9 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                     {}
                     if analysis_ground_truth is None
                     else _build_scenario_columns(
-                        analysis_ground_truth, calibrator.strat
+                        analysis_ground_truth,
+                        calibrator.strat,
+                        system_load_bin_edges=calibrator.system_load_bin_edges,
                     )
                 ),
             )
@@ -1198,6 +1228,8 @@ def _append_scenario_columns_to_frame(
             )
         repeated_values = np.repeat(values, entity_count)
         frame[column_name] = repeated_values
+        if f"{column_name}_label" in scenario_columns:
+            continue
         label_column = _scenario_label_column(column_name, repeated_values)
         if label_column is not None:
             frame[f"{column_name}_label"] = label_column
@@ -1215,8 +1247,15 @@ def _build_calibration_sets(
     channel_names: tuple[str, ...],
     *,
     strat: str | None = None,
+    system_load_n_bins: int | None = None,
+    system_load_bin_edges: np.ndarray | None = None,
 ) -> tuple[ChannelSet, ChannelSet]:
-    scenario_columns = _build_scenario_columns(ground_truth, strat)
+    scenario_columns = _build_scenario_columns(
+        ground_truth,
+        strat,
+        system_load_n_bins=system_load_n_bins,
+        system_load_bin_edges=system_load_bin_edges,
+    )
     if _resolve_target_kind(channel_names) == "line":
         return _build_line_loading_sets(
             predictions,
@@ -1273,6 +1312,7 @@ def _append_voltage_analysis_records(
     analysis_scope: str,
     stratification: str = "",
     stratum_value: int | None = None,
+    stratum_label: str | None = None,
 ) -> None:
     width_mean_per_bus = widths.mean(axis=0)
     width_min_per_bus = widths.min(axis=0)
@@ -1288,7 +1328,8 @@ def _append_voltage_analysis_records(
                 "stratum_value": float("nan")
                 if stratum_value is None
                 else int(stratum_value),
-                "stratum_label": _format_stratum_label(stratification, stratum_value),
+                "stratum_label": stratum_label
+                or _format_stratum_label(stratification, stratum_value),
                 "variable": variable,
                 "bus": int(bus_id),
                 "bus_type": bus_type_by_bus.get(int(bus_id), "Unknown"),
@@ -1389,6 +1430,9 @@ def _build_line_loading_sets(
 def _build_scenario_columns(
     ground_truth,
     strat: str | None,
+    *,
+    system_load_n_bins: int | None = None,
+    system_load_bin_edges: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     if strat is None:
         return {}
@@ -1396,7 +1440,78 @@ def _build_scenario_columns(
         return {"n_outages": ground_truth.n_outages.astype(np.int32, copy=True)}
     if strat == "outage_type":
         return {"outage_type": ground_truth.outage_type.astype(np.int32, copy=True)}
+    if strat == "system_load_bin":
+        edges = system_load_bin_edges
+        if edges is None:
+            if system_load_n_bins is None:
+                raise ValueError(
+                    "system_load_n_bins is required to build system_load_bin strata."
+                )
+            edges = _compute_system_load_bin_edges(
+                ground_truth.system_load,
+                int(system_load_n_bins),
+            )
+        load_bins = _assign_system_load_bins(ground_truth.system_load, edges)
+        return {
+            "system_load_bin": load_bins,
+            "system_load_bin_label": _build_system_load_bin_labels(
+                load_bins,
+                edges,
+            ),
+        }
     raise ValueError(f"Unsupported stratification: {strat!r}")
+
+
+def _compute_system_load_bin_edges(
+    system_load: np.ndarray,
+    n_bins: int,
+) -> np.ndarray:
+    finite_load = np.asarray(system_load, dtype=np.float32)
+    finite_load = finite_load[np.isfinite(finite_load)]
+    if finite_load.size == 0:
+        raise ValueError(
+            "Unable to derive system_load_bin strata because bus demand column 'Pd' is missing or invalid."
+        )
+    quantiles = np.linspace(0.0, 1.0, num=int(n_bins) + 1)
+    edges = np.quantile(finite_load, quantiles).astype(np.float32, copy=False)
+    interior_edges = np.unique(edges[1:-1])
+    assigned = _assign_system_load_bins(finite_load, interior_edges)
+    if np.unique(assigned).size < 2:
+        raise ValueError(
+            "system_load_bin stratification requires at least two distinct percentile bins."
+        )
+    return interior_edges.astype(np.float32, copy=True)
+
+
+def _assign_system_load_bins(
+    system_load: np.ndarray,
+    system_load_bin_edges: np.ndarray,
+) -> np.ndarray:
+    values = np.asarray(system_load, dtype=np.float32)
+    if not np.all(np.isfinite(values)):
+        raise ValueError(
+            "system_load_bin stratification requires finite per-scenario system load values."
+        )
+    edges = np.asarray(system_load_bin_edges, dtype=np.float32)
+    return np.searchsorted(edges, values, side="right").astype(np.int32, copy=False)
+
+
+def _build_system_load_bin_labels(
+    system_load_bins: np.ndarray,
+    system_load_bin_edges: np.ndarray,
+) -> np.ndarray:
+    total_bins = len(np.asarray(system_load_bin_edges, dtype=np.float32)) + 1
+    return np.asarray(
+        [
+            _format_system_load_bin_value(
+                int(value),
+                total_bins=total_bins,
+                edges=system_load_bin_edges,
+            )
+            for value in system_load_bins.tolist()
+        ],
+        dtype=object,
+    )
 
 
 def _subset_channel_set(
@@ -1533,6 +1648,7 @@ def _subset_ground_truth_set(
         branch_ids=ground_truth.branch_ids.copy(),
         n_outages=ground_truth.n_outages[scenario_mask].copy(),
         outage_type=ground_truth.outage_type[scenario_mask].copy(),
+        system_load=ground_truth.system_load[scenario_mask].copy(),
         removed_mask=ground_truth.removed_mask[scenario_mask].copy(),
         Vm=ground_truth.Vm[scenario_mask].copy(),
         Va=ground_truth.Va[scenario_mask].copy(),
@@ -1647,6 +1763,7 @@ def _build_line_analysis_frame(
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
     strat_columns = _analysis_scenario_columns_from_frame(frame)
+    strat_metadata_columns = _analysis_scenario_metadata_columns_from_frame(frame)
     for variable in variables:
         target_column = f"{variable}_target"
         lower_column = f"{variable}_pi_lower"
@@ -1679,7 +1796,7 @@ def _build_line_analysis_frame(
                 target_column,
                 lower_column,
                 upper_column,
-                *strat_columns,
+                *strat_metadata_columns,
             ],
         ].copy()
         valid_mask = (variable_frame[pred_column] >= 0.0) & (
@@ -1712,6 +1829,11 @@ def _build_line_analysis_frame(
                     stratum_value=None
                     if pd.isna(stratum_value)
                     else int(stratum_value),
+                    stratum_label=_resolve_stratum_label_from_frame(
+                        stratum_group,
+                        stratification,
+                        None if pd.isna(stratum_value) else int(stratum_value),
+                    ),
                 )
     return _finalize_analysis_frame(pd.DataFrame.from_records(records), "branch")
 
@@ -1724,6 +1846,7 @@ def _append_line_analysis_records(
     analysis_scope: str,
     stratification: str = "",
     stratum_value: int | None = None,
+    stratum_label: str | None = None,
 ) -> None:
     grouped = variable_frame.groupby("branch", sort=True)
     summary = grouped.agg(
@@ -1745,7 +1868,8 @@ def _append_line_analysis_records(
                 "stratum_value": float("nan")
                 if stratum_value is None
                 else int(stratum_value),
-                "stratum_label": _format_stratum_label(stratification, stratum_value),
+                "stratum_label": stratum_label
+                or _format_stratum_label(stratification, stratum_value),
                 "variable": variable,
                 "branch": int(row["branch"]),
                 "from_bus": int(row["from_bus"]),
@@ -1768,6 +1892,7 @@ def _build_analysis_frame_from_targets(
     records: list[dict[str, object]] = []
     bus_type_by_bus = _resolve_bus_type_labels_from_frame(frame)
     strat_columns = _analysis_scenario_columns_from_frame(frame)
+    strat_metadata_columns = _analysis_scenario_metadata_columns_from_frame(frame)
     for variable in variables:
         target_column = f"{variable}_target"
         lower_column = f"{variable}_pi_lower"
@@ -1784,7 +1909,7 @@ def _build_analysis_frame_from_targets(
                 target_column,
                 lower_column,
                 upper_column,
-                *strat_columns,
+                *strat_metadata_columns,
             ],
         ].copy()
         variable_frame["interval_width"] = (
@@ -1815,6 +1940,11 @@ def _build_analysis_frame_from_targets(
                     stratum_value=None
                     if pd.isna(stratum_value)
                     else int(stratum_value),
+                    stratum_label=_resolve_stratum_label_from_frame(
+                        stratum_group,
+                        stratification,
+                        None if pd.isna(stratum_value) else int(stratum_value),
+                    ),
                 )
     return _finalize_analysis_frame(pd.DataFrame.from_records(records), "bus")
 
@@ -1828,6 +1958,7 @@ def _append_voltage_analysis_records_from_frame(
     analysis_scope: str,
     stratification: str = "",
     stratum_value: int | None = None,
+    stratum_label: str | None = None,
 ) -> None:
     grouped = variable_frame.groupby("bus", sort=True)
     summary = grouped.agg(
@@ -1846,7 +1977,8 @@ def _append_voltage_analysis_records_from_frame(
                 "stratum_value": float("nan")
                 if stratum_value is None
                 else int(stratum_value),
-                "stratum_label": _format_stratum_label(stratification, stratum_value),
+                "stratum_label": stratum_label
+                or _format_stratum_label(stratification, stratum_value),
                 "variable": variable,
                 "bus": int(row["bus"]),
                 "bus_type": bus_type_by_bus.get(int(row["bus"]), "Unknown"),
@@ -1875,6 +2007,18 @@ def _analysis_scenario_columns_from_channel_set(
 
 def _analysis_scenario_columns_from_frame(frame: pd.DataFrame) -> list[str]:
     return [column for column in ANALYSIS_STRAT_COLUMNS if column in frame.columns]
+
+
+def _analysis_scenario_metadata_columns_from_frame(frame: pd.DataFrame) -> list[str]:
+    columns: list[str] = []
+    for column in ANALYSIS_STRAT_COLUMNS:
+        if column not in frame.columns:
+            continue
+        columns.append(column)
+        label_column = f"{column}_label"
+        if label_column in frame.columns:
+            columns.append(label_column)
+    return columns
 
 
 def _resolve_bus_type_labels_from_masks(
@@ -2115,10 +2259,18 @@ def _save_stratified_entity_figures(
         for stratum_value, stratum_group in ordered_group.groupby(
             "stratum_value", sort=True, dropna=False
         ):
+            stratum_label = _format_figure_stratum_label(
+                _resolve_stratum_label_from_frame(
+                    stratum_group,
+                    str(stratification),
+                    None if pd.isna(stratum_value) else int(stratum_value),
+                ),
+                str(stratification),
+            )
             ax.plot(
                 stratum_group[entity_column].to_numpy(dtype=int, copy=True),
                 stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
-                label=_format_stratum_label(stratification, stratum_value),
+                label=stratum_label,
             )
         ax.set_title(
             f"{variable} mean interval width by {entity_label} and {stratification}"
@@ -2136,10 +2288,18 @@ def _save_stratified_entity_figures(
         for stratum_value, stratum_group in ordered_group.groupby(
             "stratum_value", sort=True, dropna=False
         ):
+            stratum_label = _format_figure_stratum_label(
+                _resolve_stratum_label_from_frame(
+                    stratum_group,
+                    str(stratification),
+                    None if pd.isna(stratum_value) else int(stratum_value),
+                ),
+                str(stratification),
+            )
             ax.plot(
                 stratum_group[entity_column].to_numpy(dtype=int, copy=True),
                 stratum_group["empirical_coverage"].to_numpy(dtype=float, copy=True),
-                label=_format_stratum_label(stratification, stratum_value),
+                label=stratum_label,
             )
         ax.set_ylim(0.0, 1.05)
         ax.set_title(
@@ -2158,10 +2318,18 @@ def _save_stratified_entity_figures(
         for stratum_value, stratum_group in ordered_group.groupby(
             "stratum_value", sort=True, dropna=False
         ):
+            stratum_label = _format_figure_stratum_label(
+                _resolve_stratum_label_from_frame(
+                    stratum_group,
+                    str(stratification),
+                    None if pd.isna(stratum_value) else int(stratum_value),
+                ),
+                str(stratification),
+            )
             _plot_density_curve(
                 ax,
                 stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
-                label=_format_stratum_label(stratification, stratum_value),
+                label=stratum_label,
                 fill_alpha=0.22,
             )
         ax.set_title(f"{variable} mean interval width density by {stratification}")
@@ -2178,10 +2346,18 @@ def _save_stratified_entity_figures(
         for stratum_value, stratum_group in ordered_group.groupby(
             "stratum_value", sort=True, dropna=False
         ):
+            stratum_label = _format_figure_stratum_label(
+                _resolve_stratum_label_from_frame(
+                    stratum_group,
+                    str(stratification),
+                    None if pd.isna(stratum_value) else int(stratum_value),
+                ),
+                str(stratification),
+            )
             _plot_density_curve(
                 ax,
                 stratum_group["empirical_coverage"].to_numpy(dtype=float, copy=True),
-                label=_format_stratum_label(stratification, stratum_value),
+                label=stratum_label,
                 clip=(0.0, 1.0),
                 fill_alpha=0.22,
             )
@@ -2199,6 +2375,7 @@ def _save_stratified_entity_figures(
         per_stratum = (
             ordered_group.groupby("stratum_value", sort=True, dropna=False)
             .agg(
+                stratum_label=("stratum_label", "first"),
                 width_mean_across_entities=("width_mean", "mean"),
                 empirical_coverage_across_entities=("empirical_coverage", "mean"),
                 n_entities=(entity_column, "nunique"),
@@ -2206,8 +2383,8 @@ def _save_stratified_entity_figures(
             .reset_index()
         )
         labels = [
-            _format_stratum_label(stratification, value)
-            for value in per_stratum["stratum_value"].tolist()
+            _format_figure_stratum_label(str(value), str(stratification))
+            for value in per_stratum["stratum_label"].astype(str).tolist()
         ]
 
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -2287,7 +2464,11 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
                 "analysis_scope": analysis_scope,
                 "stratification": stratification,
                 "stratum_value": stratum_value,
-                "stratum_label": _format_stratum_label(stratification, stratum_value),
+                "stratum_label": _resolve_stratum_label_from_group(
+                    group,
+                    stratification,
+                    stratum_value,
+                ),
                 "scope": "system",
                 "variable": variable,
                 "rate_a": float("nan"),
@@ -2317,8 +2498,10 @@ def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
                     "analysis_scope": analysis_scope,
                     "stratification": stratification,
                     "stratum_value": stratum_value,
-                    "stratum_label": _format_stratum_label(
-                        stratification, stratum_value
+                    "stratum_label": _resolve_stratum_label_from_group(
+                        rate_group,
+                        stratification,
+                        stratum_value,
                     ),
                     "scope": "rate_a",
                     "variable": variable,
@@ -2381,7 +2564,11 @@ def _aggregate_summary_rows(
                 "analysis_scope": analysis_scope,
                 "stratification": stratification,
                 "stratum_value": stratum_value,
-                "stratum_label": _format_stratum_label(stratification, stratum_value),
+                "stratum_label": _resolve_stratum_label_from_group(
+                    group,
+                    stratification,
+                    stratum_value,
+                ),
                 "scope": scope,
                 "variable": variable,
                 "bus_type": bus_type,
@@ -2437,6 +2624,10 @@ def _format_stratum_label(stratification: str, stratum_value: object) -> str:
         normalized_value = int(float(stratum_value))
         if stratification == "outage_type":
             return f"{stratification}={_format_outage_type_value(normalized_value)}"
+        if stratification == "system_load_bin":
+            return (
+                f"{stratification}={_format_system_load_bin_value(normalized_value)}"
+            )
         return f"{stratification}={normalized_value}"
     return f"{stratification}={str(stratum_value)}"
 
@@ -2449,6 +2640,67 @@ def _format_outage_type_value(value: int) -> str:
         3: "mixed",
     }
     return labels.get(int(value), str(int(value)))
+
+
+def _format_system_load_bin_value(
+    value: int,
+    *,
+    total_bins: int | None = None,
+    edges: np.ndarray | None = None,
+) -> str:
+    if total_bins is None or edges is None:
+        return f"bin_{int(value)}"
+    lower_pct = int(round((100.0 * int(value)) / total_bins))
+    upper_pct = int(round((100.0 * (int(value) + 1)) / total_bins))
+    edges_array = np.asarray(edges, dtype=np.float32)
+    label = f"p{lower_pct:02d}-p{upper_pct:02d}"
+    if edges_array.size == 0:
+        return label
+    if int(value) == 0:
+        return f"{label} (<{edges_array[0]:g})"
+    if int(value) == total_bins - 1:
+        return f"{label} (>={edges_array[-1]:g})"
+    return f"{label} [{edges_array[int(value) - 1]:g}, {edges_array[int(value)]:g})"
+
+
+def _resolve_stratum_label_from_frame(
+    frame: pd.DataFrame,
+    stratification: str,
+    stratum_value: int | None,
+) -> str:
+    if not stratification:
+        return _format_stratum_label(stratification, stratum_value)
+    label_column = f"{stratification}_label"
+    if label_column in frame.columns:
+        labels = frame[label_column].dropna().astype(str).unique().tolist()
+        if labels:
+            return f"{stratification}={labels[0]}"
+    if "stratum_label" in frame.columns:
+        labels = frame["stratum_label"].dropna().astype(str).unique().tolist()
+        if labels:
+            return labels[0]
+    return _format_stratum_label(stratification, stratum_value)
+
+
+def _resolve_stratum_label_from_group(
+    group: pd.DataFrame,
+    stratification: str,
+    stratum_value: object,
+) -> str:
+    if "stratum_label" in group.columns:
+        labels = group["stratum_label"].dropna().astype(str).unique().tolist()
+        if labels:
+            return labels[0]
+    return _format_stratum_label(stratification, stratum_value)
+
+
+def _format_figure_stratum_label(label: str, stratification: str) -> str:
+    if not stratification:
+        return label
+    prefix = f"{stratification}="
+    if label.startswith(prefix):
+        return label[len(prefix) :]
+    return label
 
 
 def _plot_density_curve(
@@ -2511,12 +2763,23 @@ def _scenario_label_column(
     column_name: str,
     repeated_values: np.ndarray,
 ) -> np.ndarray | None:
-    if column_name != "outage_type":
-        return None
-    return np.array(
-        [_format_outage_type_value(int(value)) for value in repeated_values.tolist()],
-        dtype=object,
-    )
+    if column_name == "outage_type":
+        return np.array(
+            [
+                _format_outage_type_value(int(value))
+                for value in repeated_values.tolist()
+            ],
+            dtype=object,
+        )
+    if column_name == "system_load_bin":
+        return np.array(
+            [
+                _format_system_load_bin_value(int(value))
+                for value in repeated_values.tolist()
+            ],
+            dtype=object,
+        )
+    return None
 
 
 def _summary_or_nan(values: pd.Series, op: str = "mean") -> float:

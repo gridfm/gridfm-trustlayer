@@ -26,6 +26,7 @@ class GroundTruthSet:
     branch_ids: np.ndarray
     n_outages: np.ndarray
     outage_type: np.ndarray
+    system_load: np.ndarray
     removed_mask: np.ndarray
     Vm: np.ndarray
     Va: np.ndarray
@@ -174,6 +175,7 @@ def load_ground_truth(
     )
     n_outages = (branch_outages + generator_outages).astype(np.int32, copy=False)
     outage_type = _classify_outage_type(branch_outages, generator_outages)
+    system_load = _resolve_system_load(bus_frame, selected_scenarios)
 
     first_branch_rows = (
         sorted_branch[sorted_branch["scenario"] == selected_scenarios[0]]
@@ -196,6 +198,7 @@ def load_ground_truth(
         branch_ids=branch_ids,
         n_outages=n_outages,
         outage_type=outage_type,
+        system_load=system_load,
         removed_mask=removed_mask,
         Vm=vm,
         Va=va,
@@ -253,6 +256,17 @@ def _resolve_direct_channel_names(
 
     defaults = [name for name in ("Pg", "Qg") if name in columns]
     return defaults
+
+
+def _resolve_system_load(
+    bus_frame: pd.DataFrame,
+    scenario_ids: np.ndarray,
+) -> np.ndarray:
+    if "Pd" not in bus_frame.columns:
+        return np.full(len(scenario_ids), np.nan, dtype=np.float32)
+    per_scenario = bus_frame.groupby("scenario", sort=False)["Pd"].sum()
+    ordered = per_scenario.reindex(scenario_ids.tolist())
+    return ordered.to_numpy(dtype=np.float32, copy=True)
 
 
 def _load_generator_outage_counts(

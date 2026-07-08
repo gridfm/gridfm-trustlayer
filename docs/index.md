@@ -35,5 +35,6 @@ All verbs require `--config`, and CLI flags act as overrides of the YAML.
 ## Current implementation notes
 
 - `cp_type: element` is the canonical name for the current residual-quantile interval workflow
-- `strat: n_outages` and `strat: outage_type` are the current supported residual-stratification modes
+- `strat: n_outages`, `strat: outage_type`, and `strat: system_load_bin` are the current supported residual-stratification modes
+- `system_load_bin` labels are exported as percentile ranges with cut-point hints instead of opaque integer-only names
 - screening currently uses a possible-violation interpretation based on interval endpoints crossing the configured bounds

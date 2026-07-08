@@ -129,6 +129,9 @@ def test_ground_truth_roundtrip_and_outages(tmp_path) -> None:
     np.testing.assert_array_equal(
         ground_truth.outage_type, np.array([0, 3], dtype=np.int32)
     )
+    np.testing.assert_allclose(
+        ground_truth.system_load, np.array([0.0, 0.0], dtype=np.float32)
+    )
     assert not bool(ground_truth.removed_mask[0, 0])
     assert bool(ground_truth.removed_mask[1, 0])
 

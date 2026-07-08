@@ -29,10 +29,13 @@ The current implementation also exposes optional residual-stratification modes:
 
 - `strat: n_outages`
 - `strat: outage_type`
+- `strat: system_load_bin`
 
 When enabled, residual quantiles are fitted and applied per scenario outage count, where `n_outages` includes both inactive branches and inactive generators in the raw datakit scenario.
 
 `outage_type` groups scenarios into four coarse outage regimes: `none`, `branch_only`, `gen_only`, and `mixed`.
+
+`system_load_bin` groups scenarios by percentile bins of total active load, where `system_load_n_bins` controls the requested number of bins learned from the compute/calibration scenarios. Output labels are written as percentile ranges with stored cut-point hints, for example `p00-p20 (<1450)` or `p80-p100 (>=1920)`.
 
 Today the repository supports three CLI verbs:
 

@@ -157,6 +157,8 @@ Fields currently used by trustlayer include:
 
 - `scenario`
 - `bus`
+- `Pd`
+- `Qd`
 - `Pg`
 - `Qg`
 - `Vm`
@@ -169,6 +171,7 @@ Fields currently used by trustlayer include:
 Current interpretation:
 
 - `Vm` and `Va` are loaded as rectangular `(n_scenarios, n_buses)` arrays
+- `Pd` is summed per scenario to derive `system_load` for `system_load_bin` stratification
 - `Pg` and `Qg` are preserved as direct ground-truth channels where relevant
 - bus-type masks are preserved as rectangular arrays
 - `vn_kv` is used to derive base voltage for loading computation
@@ -258,6 +261,8 @@ Behavioral reference:
 - `bus_ids`
 - `branch_ids`
 - `n_outages`
+- `outage_type`
+- `system_load`
 - `removed_mask`
 - `Vm`
 - `Va`
@@ -291,6 +296,7 @@ Typical columns include:
 - original prediction parquet columns
 - `Vm_pi_lower`, `Vm_pi_upper` when `Vm` is calibrated
 - `Va_pi_lower`, `Va_pi_upper` when `Va` is calibrated
+- optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, and `system_load_bin_label`
 
 ### Calibrated line-loading parquet
 
@@ -307,6 +313,7 @@ Typical columns include:
 - `line_loading_target`
 - `line_loading_pi_lower`
 - `line_loading_pi_upper`
+- optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, and `system_load_bin_label`
 
 ### Analysis CSVs
 
@@ -318,6 +325,9 @@ Voltage side:
 - `trust_summary_volt.csv`
 
 Line side:
+
+- both analysis families include `analysis_scope`, `stratification`, `stratum_value`, and `stratum_label` columns when scenario stratification is active
+- `system_load_bin` labels are emitted as percentile ranges with cut-point hints, for example `system_load_bin=p20-p40 [1450, 1620)`
 
 - `trust_analysis_line.csv`
 - `trust_summary_line.csv`

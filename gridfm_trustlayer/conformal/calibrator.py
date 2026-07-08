@@ -57,6 +57,8 @@ class NaiveIntervalCalibrator:
     stratified_upper_residual_quantiles: dict[str, np.ndarray] = field(
         default_factory=dict
     )
+    system_load_n_bins: int | None = None
+    system_load_bin_edges: np.ndarray | None = None
     calibration_fraction: float | None = None
     random_seed: int | None = None
     split_pool_scenario_ids: np.ndarray | None = None
@@ -72,6 +74,8 @@ class NaiveIntervalCalibrator:
         alpha: float,
         channel_names: Iterable[str] = ("Vm", "Va"),
         strat: str | None = None,
+        system_load_n_bins: int | None = None,
+        system_load_bin_edges: np.ndarray | None = None,
     ) -> "NaiveIntervalCalibrator":
         """Fit naive residual-quantile intervals from aligned predictions and targets."""
 
@@ -96,6 +100,10 @@ class NaiveIntervalCalibrator:
             stratification_values = np.sort(
                 np.unique(scenario_strata.astype(np.int64, copy=False))
             )
+            if strat == "system_load_bin" and system_load_bin_edges is None:
+                raise ValueError(
+                    "system_load_bin stratification requires stored percentile bin edges.",
+                )
         for channel_name in selected_channels:
             prediction_values = _get_prediction_channel(predictions, channel_name)
             target_values = _get_ground_truth_channel(ground_truth, channel_name)
@@ -153,6 +161,10 @@ class NaiveIntervalCalibrator:
             else stratification_values.copy(),
             stratified_lower_residual_quantiles=stratified_lower_residual_quantiles,
             stratified_upper_residual_quantiles=stratified_upper_residual_quantiles,
+            system_load_n_bins=system_load_n_bins,
+            system_load_bin_edges=None
+            if system_load_bin_edges is None
+            else system_load_bin_edges.astype(FLOAT32_DTYPE, copy=True),
         )
 
     def predict_intervals(
@@ -254,6 +266,10 @@ class NaiveIntervalCalibrator:
                 key: values.tolist()
                 for key, values in self.stratified_upper_residual_quantiles.items()
             },
+            "system_load_n_bins": self.system_load_n_bins,
+            "system_load_bin_edges": None
+            if self.system_load_bin_edges is None
+            else self.system_load_bin_edges.tolist(),
         }
 
     @classmethod
@@ -327,6 +343,10 @@ class NaiveIntervalCalibrator:
             ),
             stratified_lower_residual_quantiles=stratified_lower_residual_quantiles,
             stratified_upper_residual_quantiles=stratified_upper_residual_quantiles,
+            system_load_n_bins=_optional_int(data.get("system_load_n_bins")),
+            system_load_bin_edges=_optional_float_array(
+                data.get("system_load_bin_edges")
+            ),
             calibration_fraction=_optional_float(data.get("calibration_fraction")),
             random_seed=_optional_int(data.get("random_seed")),
             split_pool_scenario_ids=_optional_int_array(
@@ -420,6 +440,10 @@ def _get_scenario_column(
             return values.n_outages
         if column_name == "outage_type":
             return values.outage_type
+        if column_name == "system_load_bin":
+            raise ValueError(
+                "system_load_bin must be derived before fitting or prediction application.",
+            )
     raise ValueError(
         f"Scenario column {column_name!r} is not available on this prediction artifact."
     )
@@ -474,6 +498,12 @@ def _optional_float(value: object | None) -> float | None:
     if value is None:
         return None
     return float(cast(Any, value))
+
+
+def _optional_float_array(value: object | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    return np.asarray(value, dtype=FLOAT32_DTYPE)
 
 
 def _optional_int(value: object | None) -> int | None:

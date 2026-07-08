@@ -35,6 +35,7 @@ def resolve_command_config(
         "alpha",
         "cp_type",
         "strat",
+        "system_load_n_bins",
         "variables",
         "calibration_fraction",
         "random_seed",
@@ -84,6 +85,7 @@ def resolve_command_config(
         "alpha",
         "cp_type",
         "strat",
+        "system_load_n_bins",
         "variables",
         "output",
         "artifact",
@@ -194,9 +196,27 @@ def validate_strat(strat: str | None) -> str | None:
     if strat is None:
         return None
     normalized = str(strat).strip().lower()
-    if normalized not in {"n_outages", "outage_type"}:
+    if normalized not in {"n_outages", "outage_type", "system_load_bin"}:
         raise ValueError(
-            f"Unsupported strat: {strat!r}. The current implementation supports only 'n_outages' and 'outage_type'."
+            f"Unsupported strat: {strat!r}. The current implementation supports only 'n_outages', 'outage_type', and 'system_load_bin'."
+        )
+    return normalized
+
+
+def validate_system_load_n_bins(value: Any) -> int | None:
+    """Validate the requested percentile-bin count for system_load_bin."""
+
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"system_load_n_bins must be an integer when provided; got {value!r}."
+        ) from exc
+    if normalized < 2:
+        raise ValueError(
+            f"system_load_n_bins must be at least 2 when provided; got {normalized!r}."
         )
     return normalized
 

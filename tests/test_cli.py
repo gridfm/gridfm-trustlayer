@@ -9,12 +9,31 @@ import pandas as pd  # type: ignore[import-untyped]
 import pytest
 
 from gridfm_trustlayer.cli import main
+from gridfm_trustlayer.cli.main import _format_figure_stratum_label
 from gridfm_trustlayer.cli.config import normalize_variables
 from gridfm_trustlayer.io import (
     compute_line_loading,
     load_ground_truth,
     load_predictions,
 )
+
+
+def test_format_figure_stratum_label_strips_prefix() -> None:
+    assert (
+        _format_figure_stratum_label(
+            "system_load_bin=p20-p40 [2388.02, 2492.31)",
+            "system_load_bin",
+        )
+        == "p20-p40 [2388.02, 2492.31)"
+    )
+    assert (
+        _format_figure_stratum_label(
+            "outage_type=branch_only",
+            "outage_type",
+        )
+        == "branch_only"
+    )
+    assert _format_figure_stratum_label("all", "system_load_bin") == "all"
 
 
 def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
@@ -430,6 +449,78 @@ def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> Non
     assert (
         output_path.parent / "figures" / "vm_width_summary_by-outage-type.png"
     ).exists()
+
+
+def test_compute_then_calibrate_with_system_load_bin_stratification(tmp_path) -> None:
+    predictions_path = tmp_path / "predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    artifact_path = tmp_path / "vm_va_intervals.trustlayer"
+    output_path = tmp_path / "predictions_with_intervals.parquet"
+    config_path = tmp_path / "trust_config.yaml"
+
+    _write_prediction_fixture(predictions_path)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    _write_cli_config(
+        config_path,
+        predictions_path,
+        pf_node_path,
+        pf_edge_path,
+        strat="system_load_bin",
+    )
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\nsystem_load_n_bins: 2\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        main(["compute", "--config", str(config_path), "--output", str(artifact_path)])
+        == 0
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["strat"] == "system_load_bin"
+    assert artifact["system_load_n_bins"] == 2
+    assert artifact["system_load_bin_edges"] == [50.0]
+    assert artifact["stratification_values"] == [0, 1]
+
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+
+    output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
+    assert {"system_load_bin", "system_load_bin_label"}.issubset(
+        output_frame.columns
+    )
+    assert set(output_frame["system_load_bin_label"].unique().tolist()) == {
+        "p00-p50 (<50)",
+        "p50-p100 (>=50)",
+    }
+    low_load = output_frame[output_frame["scenario"].eq(0)].reset_index(drop=True)
+    high_load = output_frame[output_frame["scenario"].eq(3)].reset_index(drop=True)
+    assert not np.allclose(
+        low_load["Vm_pi_upper"].to_numpy(),
+        high_load["Vm_pi_upper"].to_numpy(),
+    )
+    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
+    strat_rows = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
+    assert set(strat_rows["stratification"].dropna().unique().tolist()) == {
+        "system_load_bin"
+    }
+    assert set(strat_rows["stratum_label"].dropna().unique().tolist()) == {
+        "system_load_bin=p00-p50 (<50)",
+        "system_load_bin=p50-p100 (>=50)",
+    }
 
 
 def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
@@ -978,6 +1069,8 @@ def _write_ground_truth_fixture(bus_path, branch_path) -> None:
         {
             "scenario": [0, 0, 1, 1, 2, 2, 3, 3],
             "bus": [0, 1, 0, 1, 0, 1, 0, 1],
+            "Pd": [10.0, 10.0, 20.0, 20.0, 30.0, 30.0, 40.0, 40.0],
+            "Qd": [0.0] * 8,
             "Vm": [1.05, 0.85, 1.12, 0.97, 1.0, 1.08, 1.0, 1.0],
             "Va": [0.02, 0.12, 0.16, -0.05, -0.1, 0.25, 0.08, -0.02],
             "Pg": [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],

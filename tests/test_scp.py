@@ -202,6 +202,62 @@ def test_naive_interval_stratified_by_outage_type() -> None:
     np.testing.assert_array_equal(loaded.stratification_values, np.array([0, 1, 2, 3]))
 
 
+def test_naive_interval_stratified_by_system_load_bin_roundtrip() -> None:
+    scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
+    bus_ids = np.array([0, 1], dtype=np.int64)
+    scenario_columns = {"system_load_bin": np.array([0, 0, 1, 1], dtype=np.int32)}
+    predictions = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={"Vm": np.ones((4, 2), dtype=np.float32)},
+        scenario_columns=scenario_columns,
+    )
+    ground_truth = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.array(
+                [[1.0, 1.0], [1.1, 0.9], [1.4, 0.6], [1.5, 0.5]],
+                dtype=np.float32,
+            )
+        },
+        scenario_columns=scenario_columns,
+    )
+
+    calibrator = NaiveIntervalCalibrator.fit(
+        predictions,
+        ground_truth,
+        alpha=0.2,
+        channel_names=("Vm",),
+        strat="system_load_bin",
+        system_load_n_bins=2,
+        system_load_bin_edges=np.array([50.0], dtype=np.float32),
+    )
+
+    assert calibrator.strat == "system_load_bin"
+    assert calibrator.system_load_n_bins == 2
+    assert calibrator.system_load_bin_edges is not None
+    np.testing.assert_allclose(
+        calibrator.system_load_bin_edges,
+        np.array([50.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        calibrator.stratification_values,
+        np.array([0, 1], dtype=np.int64),
+    )
+
+    loaded = NaiveIntervalCalibrator.from_dict(calibrator.to_dict())
+    assert loaded.strat == "system_load_bin"
+    assert loaded.system_load_n_bins == 2
+    assert loaded.system_load_bin_edges is not None
+    np.testing.assert_allclose(
+        loaded.system_load_bin_edges,
+        np.array([50.0], dtype=np.float32),
+    )
+
+
 def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:
     scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
     bus_ids = np.array([0, 1], dtype=np.int64)
@@ -237,6 +293,7 @@ def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:
         branch_ids=np.array([0], dtype=np.int64),
         n_outages=np.zeros(len(scenario_ids), dtype=np.int32),
         outage_type=np.zeros(len(scenario_ids), dtype=np.int32),
+        system_load=np.zeros(len(scenario_ids), dtype=np.float32),
         removed_mask=np.zeros((len(scenario_ids), 1), dtype=bool),
         Vm=vm_target,
         Va=va_target,

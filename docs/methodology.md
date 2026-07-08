@@ -51,6 +51,8 @@ Current characteristics:
 
 - separate calibration per target dimension
 - optional stratification by `n_outages`, where the outage count includes inactive branches and inactive generators per scenario
+- optional stratification by `outage_type`, which groups scenarios into `none`, `branch_only`, `gen_only`, and `mixed`
+- optional stratification by `system_load_bin`, which groups scenarios by percentile bins of total active load derived from raw bus `Pd` and exposes human-readable labels like `p20-p40 [1450, 1620)`
 - mixed bus-level and branch-level runs supported through separate target families
 
 `element` is the canonical name used by the current workflow.
