@@ -20,8 +20,8 @@ version: 1
 
 task_name: PowerFlow
 cp_type: element
-strat: system_load_bin
-system_load_n_bins: 5
+strat: pred_bins
+pred_n_bins: 5
 alpha: 0.1
 calibration_fraction: 0.25
 random_seed: 7
@@ -65,13 +65,15 @@ commands:
 | `version`              | `int`           | No                                               | Config schema marker.                                                                                           |
 | `task_name`            | `str`           | Usually yes                                      | Task adapter used when reading prediction artifacts.                                                            |
 | `cp_type`              | `str`           | Yes                                              | Current supported value:`element`.                                                                            |
-| `strat`                | `str or null`   | No                                               | Optional residual stratification. Current supported values:`n_outages`, `outage_type`, `system_load_bin`. |
+| `strat`                | `str or null`   | No                                               | Optional residual stratification. Current supported values:`n_outages`, `outage_type`, `system_load_bin`, `pred_bins`. |
 | `system_load_n_bins`   | `int or null`   | Required when`strat: system_load_bin`          | Requested number of percentile bins learned from per-scenario total active load.                                |
+| `pred_n_bins`          | `int or null`   | Required when`strat: pred_bins`                | Requested number of percentile bins learned from the calibration predictions for each calibrated variable. |
 | `alpha`                | `float`         | Required for`compute`                          | Miscoverage level used while fitting intervals.                                                                 |
 | `calibration_fraction` | `float or null` | No                                               | Optional fraction of scenarios reserved for fitting before applying on holdout scenarios.                       |
 | `random_seed`          | `int or null`   | No                                               | Random seed used with`calibration_fraction`.                                                                  |
 | `variables`            | `list[str]`     | Usually yes                                      | Any subset of`Vm`, `Va`, and `line_loading`. Defaults to `Vm, Va` if omitted.                           |
 | `screen_bounds`        | `mapping`       | Required for`screen` on each screened variable | Per-variable screening bounds.`Vm` uses lower and upper bounds; `line_loading` uses only `upper`.         |
+| `save_figures`         | `bool or null`  | No                                               | Optional default for `calibrate` figure generation. Set `false` to skip writing analysis figures while keeping parquet and CSV outputs. |
 
 `strat: n_outages` means residual quantiles are fitted and applied per scenario outage count. The current `n_outages` value includes both inactive branches and inactive generators detected in the raw datakit scenario files.
 
@@ -79,7 +81,9 @@ commands:
 
 `strat: system_load_bin` means residual quantiles are fitted and applied per percentile bin of total active demand. Trustlayer derives total load from the raw bus `Pd` column, learns percentile cut points during `compute`, stores them in the artifact, and reapplies the same cut points during `calibrate`.
 
-The produced label columns and summary labels use percentile-range notation with cut-point hints, for example `p00-p20 (<1450)`, `p20-p40 [1450, 1620)`, or `p80-p100 (>=1920)`.
+`strat: pred_bins` means residual quantiles are fitted and applied per percentile bin of the model's own predictions. Trustlayer pools all calibration predictions for each variable, learns percentile cut points from those values during `compute`, stores them in the artifact, and then assigns each prediction value to a bin during `calibrate`.
+
+The produced label columns and summary labels use percentile-range notation with cut-point hints, for example `p00-p20 (<1450)`, `p20-p40 [1450, 1620)`, or `p80-p100 (>=1920)`. For `pred_bins`, the same label pattern is emitted on variable-specific columns such as `pred_bins_vm_label`, but the bins are assigned per prediction row rather than per scenario.
 
 ## `inputs`
 
@@ -142,6 +146,7 @@ Supported override keys:
 - `calibration_fraction`
 - `random_seed`
 - `screen_bounds`
+- `save_figures` (calibrate only)
 - nested `inputs`
 - nested `outputs`
 

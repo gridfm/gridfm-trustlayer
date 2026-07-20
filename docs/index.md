@@ -28,6 +28,7 @@ All verbs require `--config`, and CLI flags act as overrides of the YAML.
 ## Documentation map
 
 - [methodology.md](methodology.md): current trustlayer method, workflow, implementation details, and screening interpretation
+- [analysis_and_figures.md](analysis_and_figures.md): exact definitions for analysis metrics, reliability metrics, figure computations, and stratification aggregation behavior
 - [cli.md](cli.md): CLI verbs, options, and workflow behavior
 - [configuration.md](configuration.md): YAML config structure, merge rules, and mixed-run path rules
 - [schemas.md](schemas.md): current prediction, ground-truth, and produced-artifact schema reference
@@ -35,6 +36,7 @@ All verbs require `--config`, and CLI flags act as overrides of the YAML.
 ## Current implementation notes
 
 - `cp_type: element` is the canonical name for the current residual-quantile interval workflow
-- `strat: n_outages`, `strat: outage_type`, and `strat: system_load_bin` are the current supported residual-stratification modes
+- `strat: n_outages`, `strat: outage_type`, `strat: system_load_bin`, and `strat: pred_bins` are the current supported residual-stratification modes
 - `system_load_bin` labels are exported as percentile ranges with cut-point hints instead of opaque integer-only names
+- `pred_bins` exports variable-specific prediction-bin columns such as `pred_bins_vm`, `pred_bins_va`, and `pred_bins_line_loading`, each with matching percentile-range labels
 - screening currently uses a possible-violation interpretation based on interval endpoints crossing the configured bounds

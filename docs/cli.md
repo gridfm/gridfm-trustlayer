@@ -58,8 +58,9 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | `--output` | `str` | Artifact output path. |
 | `--alpha` | `float` | Miscoverage level. |
 | `--cp-type` | `str` | Current supported value is `element`. |
-| `--strat` | `str` | Optional residual stratification. Current supported values are `n_outages`, `outage_type`, and `system_load_bin`. |
+| `--strat` | `str` | Optional residual stratification. Current supported values are `n_outages`, `outage_type`, `system_load_bin`, and `pred_bins`. |
 | `--system-load-n-bins` | `int` | Requested number of percentile bins when `--strat system_load_bin` is used. |
+| `--pred-n-bins` | `int` | Requested number of percentile bins when `--strat pred_bins` is used. |
 | `--variables` | `list[str]` | Any subset of `Vm`, `Va`, `line_loading`. |
 | `--calibration-fraction` | `float` | Reserve a scenario fraction for fitting and apply the learned intervals on the remaining holdout scenarios. |
 | `--random-seed` | `int` | Random seed used for the calibration/holdout split. |
@@ -72,6 +73,7 @@ Notes:
 - The saved artifact may contain one calibrator or multiple calibrators keyed by target family.
 - With `--strat n_outages`, residual quantiles are fitted separately per scenario outage count.
 - With `--strat system_load_bin`, residual quantiles are fitted separately per percentile bin of total active load derived from the raw bus `Pd` column.
+- With `--strat pred_bins`, residual quantiles are fitted separately per percentile bin of the model's own predictions, using one learned edge set per calibrated variable and assigning bins per prediction value.
 - The resulting labels in calibrated outputs and analysis artifacts are percentile ranges with cut-point hints, such as `p00-p20 (<1450)` or `p20-p40 [1450, 1620)`.
 
 ## `calibrate`
@@ -101,21 +103,31 @@ gridfm_trustlayer calibrate --config path/to/trust_config.yaml
 | `--pf-edge` | `str` | Branch ground truth used for line-loading analysis or target reconstruction when needed. |
 | `--task-name` | `str` | Task adapter name used while loading predictions. |
 | `--generator-predictions` | `str` | Optional OPF generator prediction parquet. |
+| `--no-figures` | flag | Skip analysis figure generation and write only calibrated parquet plus CSV outputs. |
 
 Output behavior:
 
 - Bus targets produce a calibrated bus parquet with interval columns merged onto the original prediction rows.
 - Branch targets produce a branch-level output parquet derived from aligned bus predictions and branch topology.
 - Mixed runs write separate voltage and line-loading parquet outputs.
-- When the artifact uses scenario stratification such as `strat: n_outages`, `strat: outage_type`, or `strat: system_load_bin`, `calibrate` reloads raw ground truth for the application scenarios so it can apply the correct scenario stratum.
+- When the artifact uses scenario stratification such as `strat: n_outages`, `strat: outage_type`, or `strat: system_load_bin`, `calibrate` rebuilds the application-time scenario strata before applying the calibrated intervals. For `strat: pred_bins`, `calibrate` instead assigns each prediction value to a stored percentile bin for its variable.
 
 Analysis side outputs:
 
 - `trust_analysis_volt.csv`
 - `trust_summary_volt.csv`
+- `trust_reliability_volt.csv`
 - `trust_analysis_line.csv`
 - `trust_summary_line.csv`
+- `trust_reliability_line.csv`
 - `figures/`
+
+Reliability side outputs summarize calibration quality per variable and stratum with expected coverage (`1 - alpha`), weighted empirical coverage, coverage gap, and mean-width aggregates.
+
+Figure aggregation semantics:
+
+- Summary and density figures are generated from entity-level analysis rows.
+- `*_width_density*.png` plots are densities of `width_mean` (per-entity mean interval width over scenarios), not densities of raw per-row `interval_width` samples.
 
 Mixed-run rule:
 
@@ -178,6 +190,7 @@ Saved outputs:
 - `n_outages`
 - `outage_type`
 - `system_load_bin`
+- `pred_bins`
 
 ### Variables
 

@@ -172,6 +172,7 @@ Current interpretation:
 
 - `Vm` and `Va` are loaded as rectangular `(n_scenarios, n_buses)` arrays
 - `Pd` is summed per scenario to derive `system_load` for `system_load_bin` stratification
+- prediction channels are also reduced to scenario-level summaries when `pred_bins` stratification is requested
 - `Pg` and `Qg` are preserved as direct ground-truth channels where relevant
 - bus-type masks are preserved as rectangular arrays
 - `vn_kv` is used to derive base voltage for loading computation
@@ -296,7 +297,7 @@ Typical columns include:
 - original prediction parquet columns
 - `Vm_pi_lower`, `Vm_pi_upper` when `Vm` is calibrated
 - `Va_pi_lower`, `Va_pi_upper` when `Va` is calibrated
-- optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, and `system_load_bin_label`
+- optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, `system_load_bin_label`, `pred_bins_vm`, `pred_bins_vm_label`, `pred_bins_va`, and `pred_bins_va_label`
 
 ### Calibrated line-loading parquet
 
@@ -313,7 +314,7 @@ Typical columns include:
 - `line_loading_target`
 - `line_loading_pi_lower`
 - `line_loading_pi_upper`
-- optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, and `system_load_bin_label`
+- optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, `system_load_bin_label`, `pred_bins_line_loading`, and `pred_bins_line_loading_label`
 
 ### Analysis CSVs
 
@@ -328,6 +329,7 @@ Line side:
 
 - both analysis families include `analysis_scope`, `stratification`, `stratum_value`, and `stratum_label` columns when scenario stratification is active
 - `system_load_bin` labels are emitted as percentile ranges with cut-point hints, for example `system_load_bin=p20-p40 [1450, 1620)`
+- `pred_bins` labels are emitted on variable-specific prediction-bin columns such as `pred_bins_vm=p00-p50 (<1.0)` or `pred_bins_line_loading=p50-p100 (>=0.82)`
 
 - `trust_analysis_line.csv`
 - `trust_summary_line.csv`

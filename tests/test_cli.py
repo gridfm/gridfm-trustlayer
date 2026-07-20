@@ -10,7 +10,7 @@ import pytest
 
 from gridfm_trustlayer.cli import main
 from gridfm_trustlayer.cli.main import _format_figure_stratum_label
-from gridfm_trustlayer.cli.config import normalize_variables
+from gridfm_trustlayer.cli.config import load_cli_config, normalize_variables
 from gridfm_trustlayer.io import (
     compute_line_loading,
     load_ground_truth,
@@ -120,11 +120,14 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
     )
     analysis_path = tmp_path / "trust_analysis_volt.csv"
     summary_path = tmp_path / "trust_summary_volt.csv"
+    reliability_path = tmp_path / "trust_reliability_volt.csv"
     figures_dir = tmp_path / "figures"
     assert analysis_path.exists()
     assert summary_path.exists()
+    assert reliability_path.exists()
     analysis_frame = pd.read_csv(analysis_path)
     summary_frame = pd.read_csv(summary_path)
+    reliability_frame = pd.read_csv(reliability_path)
     assert {
         "variable",
         "bus",
@@ -163,6 +166,22 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
     }.issubset(summary_frame.columns)
     assert set(summary_frame["scope"].unique().tolist()) == {"system", "bus_type"}
     assert len(summary_frame) == 6
+    assert {
+        "variable",
+        "analysis_scope",
+        "stratification",
+        "stratum_label",
+        "target_coverage",
+        "n_entities",
+        "n_samples_total",
+        "empirical_coverage_weighted",
+        "coverage_gap_weighted",
+        "width_mean_weighted",
+    }.issubset(reliability_frame.columns)
+    np.testing.assert_allclose(
+        reliability_frame["target_coverage"].to_numpy(),
+        np.full(len(reliability_frame), 0.8),
+    )
     assert figures_dir.joinpath("vm_width_summary.png").exists()
     assert figures_dir.joinpath("vm_coverage_summary.png").exists()
     assert figures_dir.joinpath("vm_width_density.png").exists()
@@ -234,6 +253,53 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
     assert (output_dir / "figures" / "vm_width_density.png").exists()
     output_frame = pd.read_parquet(output_path)
     assert {"Vm_pi_lower", "Va_pi_upper"}.issubset(output_frame.columns)
+
+
+def test_calibrate_no_figures_skips_figure_outputs(tmp_path) -> None:
+    predictions_path = tmp_path / "predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    artifact_path = tmp_path / "vm_va_intervals.trustlayer"
+    output_path = tmp_path / "predictions_with_intervals.parquet"
+    config_path = tmp_path / "trust_config.yaml"
+
+    _write_prediction_fixture(predictions_path)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
+
+    assert (
+        main(
+            [
+                "compute",
+                "--config",
+                str(config_path),
+                "--output",
+                str(artifact_path),
+            ],
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--no-figures",
+            ],
+        )
+        == 0
+    )
+
+    assert output_path.exists()
+    assert (tmp_path / "trust_analysis_volt.csv").exists()
+    assert (tmp_path / "trust_summary_volt.csv").exists()
+    assert (tmp_path / "trust_reliability_volt.csv").exists()
+    assert not (tmp_path / "figures").exists()
 
 
 def test_config_driven_compute_and_calibrate(tmp_path) -> None:
@@ -521,6 +587,76 @@ def test_compute_then_calibrate_with_system_load_bin_stratification(tmp_path) ->
     }
 
 
+def test_compute_then_calibrate_with_pred_bins_stratification(tmp_path) -> None:
+    predictions_path = tmp_path / "predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    artifact_path = tmp_path / "vm_va_intervals.trustlayer"
+    output_path = tmp_path / "predictions_with_intervals.parquet"
+    config_path = tmp_path / "trust_config.yaml"
+
+    _write_prediction_fixture(predictions_path)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    _write_cli_config(
+        config_path,
+        predictions_path,
+        pf_node_path,
+        pf_edge_path,
+        strat="pred_bins",
+    )
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\npred_n_bins: 2\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        main(["compute", "--config", str(config_path), "--output", str(artifact_path)])
+        == 0
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["strat"] == "pred_bins"
+    assert artifact["pred_n_bins"] == 2
+    assert set(artifact["pred_bin_edges"]) == {"Vm", "Va"}
+
+    assert (
+        main(
+            [
+                "calibrate",
+                "--config",
+                str(config_path),
+                "--artifact",
+                str(artifact_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+
+    output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
+    assert {
+        "pred_bins_vm",
+        "pred_bins_vm_label",
+        "pred_bins_va",
+        "pred_bins_va_label",
+    }.issubset(output_frame.columns)
+    assert set(output_frame["pred_bins_vm_label"].unique().tolist()) == {
+        "p00-p50 (<1)",
+        "p50-p100 (>=1)",
+    }
+    same_scenario = output_frame[output_frame["scenario"].eq(0)].sort_values("bus")
+    np.testing.assert_array_equal(
+        same_scenario["pred_bins_vm"].to_numpy(dtype=float),
+        np.array([1.0, 0.0]),
+    )
+    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
+    vm_rows = analysis_frame[
+        (analysis_frame["analysis_scope"].eq("stratified"))
+        & (analysis_frame["variable"].eq("Vm"))
+    ]
+    assert set(vm_rows["stratification"].dropna().unique().tolist()) == {"pred_bins_vm"}
+
+
 def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
     predictions_path = tmp_path / "predictions.parquet"
     pf_node_path = tmp_path / "pf_node.parquet"
@@ -616,6 +752,7 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
 
     analysis_frame = pd.read_csv(tmp_path / "trust_analysis_line.csv")
     summary_frame = pd.read_csv(tmp_path / "trust_summary_line.csv")
+    reliability_frame = pd.read_csv(tmp_path / "trust_reliability_line.csv")
     assert {
         "variable",
         "branch",
@@ -638,8 +775,70 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
     rate_rows = summary_frame[summary_frame["scope"].eq("rate_a")].copy()
     assert len(rate_rows) == 1
     np.testing.assert_allclose(rate_rows["rate_a"].to_numpy(), np.array([10.0]))
+    assert {
+        "variable",
+        "analysis_scope",
+        "stratification",
+        "stratum_label",
+        "target_coverage",
+        "n_entities",
+        "empirical_coverage_weighted",
+        "coverage_gap_weighted",
+        "width_mean_weighted",
+    }.issubset(reliability_frame.columns)
+    np.testing.assert_allclose(
+        reliability_frame["target_coverage"].to_numpy(),
+        np.full(len(reliability_frame), 0.8),
+    )
     assert (tmp_path / "figures" / "line_loading_width_summary.png").exists()
     assert (tmp_path / "figures" / "line_loading_coverage_density.png").exists()
+
+
+def test_compute_then_calibrate_line_loading_with_pred_bins_stratification(
+    tmp_path,
+) -> None:
+    predictions_path = tmp_path / "predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    artifact_path = tmp_path / "line_intervals.trustlayer"
+    output_path = tmp_path / "line_predictions_with_intervals.parquet"
+    config_path = tmp_path / "trust_config_line.yaml"
+
+    _write_prediction_fixture(predictions_path)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    config_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "task_name: StateEstimation",
+                "cp_type: element",
+                "alpha: 0.2",
+                "strat: pred_bins",
+                "pred_n_bins: 2",
+                "variables:",
+                "  - line_loading",
+                "inputs:",
+                f"  predictions: {predictions_path}",
+                f"  pf_node: {pf_node_path}",
+                f"  pf_edge: {pf_edge_path}",
+                "outputs:",
+                f"  artifact: {artifact_path}",
+                f"  calibrated_predictions: {output_path}",
+            ],
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["compute", "--config", str(config_path)]) == 0
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["strat"] == "pred_bins"
+    assert set(artifact["pred_bin_edges"]) == {"line_loading"}
+
+    assert main(["calibrate", "--config", str(config_path)]) == 0
+    output_frame = pd.read_parquet(output_path).sort_values(["scenario", "branch"])
+    assert {"pred_bins_line_loading", "pred_bins_line_loading_label"}.issubset(
+        output_frame.columns
+    )
 
 
 def test_config_driven_line_loading_compute_and_calibrate(tmp_path) -> None:
@@ -1016,6 +1215,28 @@ def test_cli_requires_config_flag() -> None:
         main(["compute"])
     with pytest.raises(SystemExit):
         main(["calibrate"])
+
+
+def test_load_cli_config_rejects_unknown_top_level_keys(tmp_path) -> None:
+    config_path = tmp_path / "trust_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "task_name: StateEstimation",
+                "cp_type: element",
+                "alpha: 0.2",
+                "variables:",
+                "  - Vm",
+                "mystery_key: value",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match="Unsupported top-level trustlayer config keys"
+    ):
+        load_cli_config(str(config_path))
 
 
 def _write_cli_config(

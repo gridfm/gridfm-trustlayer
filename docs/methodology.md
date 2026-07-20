@@ -53,6 +53,7 @@ Current characteristics:
 - optional stratification by `n_outages`, where the outage count includes inactive branches and inactive generators per scenario
 - optional stratification by `outage_type`, which groups scenarios into `none`, `branch_only`, `gen_only`, and `mixed`
 - optional stratification by `system_load_bin`, which groups scenarios by percentile bins of total active load derived from raw bus `Pd` and exposes human-readable labels like `p20-p40 [1450, 1620)`
+- optional stratification by `pred_bins`, which groups individual predictions by percentile bins of the model's own outputs and exposes variable-specific columns such as `pred_bins_vm`, `pred_bins_va`, or `pred_bins_line_loading`
 - mixed bus-level and branch-level runs supported through separate target families
 
 `element` is the canonical name used by the current workflow.
@@ -107,6 +108,7 @@ The currently supported strata are:
 - `n_outages`
 - `outage_type`
 - `system_load_bin`
+- `pred_bins`
 
 If no stratification is used, the artifact only stores the global per-entity quantiles $q^-_e$ and $q^+_e$.
 
@@ -137,6 +139,25 @@ In practical terms:
 - `compute` learns the load-bin edges from the calibration slice
 - `calibrate` reuses those same edges to assign new scenarios to bins
 - the human-readable labels such as `p20-p40 [1450, 1620)` are derived from those stored percentile edges
+
+### How `pred_bins` is constructed
+
+When `strat: pred_bins` is requested, trustlayer pools all calibration predictions for each calibrated variable and learns percentile cut points directly from those values.
+
+For a variable $v$, let $\hat{y}^{(v)}_{s,e}$ denote one predicted value at scenario $s$ and entity $e$. If the requested number of bins is $B$, trustlayer learns separate cut points for each variable from the calibration predictions:
+
+$$
+E^{(v)}_j = Q_{j/B}(\{\hat{y}^{(v)}_{s,e}\}_{s,e}), \qquad j = 1, \dots, B-1.
+$$
+
+Those variable-specific cut points are stored in the `.trustlayer` artifact. During both fitting and application, each prediction value is assigned to a bin using the stored edges for its variable.
+
+In practical terms:
+
+- `compute` learns one edge set per calibrated variable from all calibration predictions for that variable
+- residual quantiles are fitted separately for each entity and each prediction bin
+- `calibrate` reapplies those same variable-specific edge sets to each prediction row
+- the calibrated parquet and analysis outputs expose variable-specific columns such as `pred_bins_vm`, `pred_bins_va`, and `pred_bins_line_loading`
 
 ### Interval construction during `calibrate`
 
@@ -173,6 +194,10 @@ For each scenario-entity pair, the interval width is $u_{s,e} - \ell_{s,e}$.
 Coverage is recorded as a binary indicator: it is `1` when $\ell_{s,e} \le y_{s,e} \le u_{s,e}$ and `0` otherwise.
 
 The entity-level `empirical_coverage` reported in the analysis CSV is the average of that indicator over scenarios for each bus or branch, and the reported width summaries are the mean, min, and max interval widths over scenarios.
+
+The analysis figures are built from those same entity-level rows. In particular, the width-density plots use the distribution of `width_mean` across entities within each stratum, so they visualize per-entity average interval widths rather than raw per-sample interval-width values.
+
+The reliability CSV outputs (`trust_reliability_volt.csv` and `trust_reliability_line.csv`) aggregate those analysis rows by variable and stratum, reporting expected coverage (`1 - alpha`), weighted empirical coverage, coverage gap, and width aggregates.
 
 ## Workflow
 

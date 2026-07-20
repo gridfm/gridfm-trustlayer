@@ -5,6 +5,7 @@ repo_name: gridfm/gridfm-trustlayer
 nav:
   - Home: index.md
   - Methodology: methodology.md
+  - Analysis and Figures: analysis_and_figures.md
   - CLI Reference: cli.md
   - Configuration: configuration.md
   - Schemas: schemas.md

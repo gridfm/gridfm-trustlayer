@@ -258,6 +258,81 @@ def test_naive_interval_stratified_by_system_load_bin_roundtrip() -> None:
     )
 
 
+def test_naive_interval_stratified_by_pred_bins_roundtrip() -> None:
+    scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
+    bus_ids = np.array([0, 1], dtype=np.int64)
+    predictions = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.array(
+                [[0.90, 1.00], [0.95, 1.05], [1.10, 1.20], [1.15, 1.25]],
+                dtype=np.float32,
+            )
+        },
+    )
+    ground_truth = ChannelSet(
+        scenario_ids=scenario_ids,
+        entity_ids=bus_ids,
+        entity_name="bus",
+        channels={
+            "Vm": np.array(
+                [[0.95, 1.02], [0.97, 1.08], [1.20, 1.35], [1.25, 1.40]],
+                dtype=np.float32,
+            )
+        },
+    )
+
+    calibrator = NaiveIntervalCalibrator.fit(
+        predictions,
+        ground_truth,
+        alpha=0.2,
+        channel_names=("Vm",),
+        strat="pred_bins",
+        pred_n_bins=2,
+        pred_bin_edges={"Vm": np.array([1.025], dtype=np.float32)},
+    )
+
+    assert calibrator.strat == "pred_bins"
+    assert calibrator.pred_n_bins == 2
+    np.testing.assert_allclose(
+        calibrator.pred_bin_edges["Vm"],
+        np.array([1.025], dtype=np.float32),
+    )
+    intervals = calibrator.predict_intervals(predictions)
+    expected_lower_bin0 = np.array(
+        [
+            0.90 + np.quantile(np.array([0.05, 0.02], dtype=np.float32), 0.1),
+            1.00 + np.quantile(np.array([0.02], dtype=np.float32), 0.1),
+        ],
+        dtype=np.float32,
+    )
+    expected_upper_bin0 = np.array(
+        [
+            0.90 + np.quantile(np.array([0.05, 0.02], dtype=np.float32), 0.9),
+            1.00 + np.quantile(np.array([0.02], dtype=np.float32), 0.9),
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(
+        intervals["Vm"][0][0],
+        expected_lower_bin0,
+    )
+    np.testing.assert_allclose(
+        intervals["Vm"][1][0],
+        expected_upper_bin0,
+    )
+
+    loaded = NaiveIntervalCalibrator.from_dict(calibrator.to_dict())
+    assert loaded.strat == "pred_bins"
+    assert loaded.pred_n_bins == 2
+    np.testing.assert_allclose(
+        loaded.pred_bin_edges["Vm"],
+        np.array([1.025], dtype=np.float32),
+    )
+
+
 def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:
     scenario_ids = np.array([0, 1, 2, 3], dtype=np.int64)
     bus_ids = np.array([0, 1], dtype=np.int64)

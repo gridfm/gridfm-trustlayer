@@ -30,12 +30,15 @@ The current implementation also exposes optional residual-stratification modes:
 - `strat: n_outages`
 - `strat: outage_type`
 - `strat: system_load_bin`
+- `strat: pred_bins`
 
 When enabled, residual quantiles are fitted and applied per scenario outage count, where `n_outages` includes both inactive branches and inactive generators in the raw datakit scenario.
 
 `outage_type` groups scenarios into four coarse outage regimes: `none`, `branch_only`, `gen_only`, and `mixed`.
 
 `system_load_bin` groups scenarios by percentile bins of total active load, where `system_load_n_bins` controls the requested number of bins learned from the compute/calibration scenarios. Output labels are written as percentile ranges with stored cut-point hints, for example `p00-p20 (<1450)` or `p80-p100 (>=1920)`.
+
+`pred_bins` groups individual predictions by percentile bins of the model's own outputs. Trustlayer learns percentile cut points per calibrated variable from all calibration predictions during `compute`, stores them in the artifact, and reapplies them to each prediction value during `calibrate`. The calibrated outputs expose variable-specific columns such as `pred_bins_vm`, `pred_bins_va`, and `pred_bins_line_loading`.
 
 Today the repository supports three CLI verbs:
 
@@ -130,7 +133,7 @@ The current workflow produces:
 ## Current Limits
 
 - Only `cp_type: element` is implemented today.
-- Only `strat: n_outages`, `strat: outage_type`, and `strat: system_load_bin` are implemented today when stratification is requested.
+- Only `strat: n_outages`, `strat: outage_type`, `strat: system_load_bin`, and `strat: pred_bins` are implemented today when stratification is requested.
 - Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
 
 ## Documentation

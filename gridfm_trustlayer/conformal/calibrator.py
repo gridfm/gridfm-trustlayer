@@ -59,6 +59,8 @@ class NaiveIntervalCalibrator:
     )
     system_load_n_bins: int | None = None
     system_load_bin_edges: np.ndarray | None = None
+    pred_n_bins: int | None = None
+    pred_bin_edges: dict[str, np.ndarray] = field(default_factory=dict)
     calibration_fraction: float | None = None
     random_seed: int | None = None
     split_pool_scenario_ids: np.ndarray | None = None
@@ -76,6 +78,8 @@ class NaiveIntervalCalibrator:
         strat: str | None = None,
         system_load_n_bins: int | None = None,
         system_load_bin_edges: np.ndarray | None = None,
+        pred_n_bins: int | None = None,
+        pred_bin_edges: dict[str, np.ndarray] | None = None,
     ) -> "NaiveIntervalCalibrator":
         """Fit naive residual-quantile intervals from aligned predictions and targets."""
 
@@ -94,11 +98,20 @@ class NaiveIntervalCalibrator:
         stratified_lower_residual_quantiles: dict[str, np.ndarray] = {}
         stratified_upper_residual_quantiles: dict[str, np.ndarray] = {}
         stratification_values: np.ndarray | None = None
-        scenario_strata: np.ndarray | None = None
-        if strat is not None:
-            scenario_strata = _get_scenario_column(ground_truth, strat)
+        shared_scenario_strata: np.ndarray | None = None
+        if strat == "pred_bins":
+            if pred_n_bins is None:
+                raise ValueError(
+                    "pred_bins stratification requires a configured pred_n_bins value."
+                )
+            if pred_bin_edges is None:
+                raise ValueError(
+                    "pred_bins stratification requires stored prediction-bin edges for each channel."
+                )
+        elif strat is not None:
+            shared_scenario_strata = _get_scenario_column(ground_truth, strat)
             stratification_values = np.sort(
-                np.unique(scenario_strata.astype(np.int64, copy=False))
+                np.unique(shared_scenario_strata.astype(np.int64, copy=False))
             )
             if strat == "system_load_bin" and system_load_bin_edges is None:
                 raise ValueError(
@@ -124,14 +137,50 @@ class NaiveIntervalCalibrator:
                 valid_mask,
                 1.0 - (alpha / 2.0),
             )
-            if scenario_strata is not None and stratification_values is not None:
+            if strat == "pred_bins":
+                if pred_bin_edges is None or channel_name not in pred_bin_edges:
+                    raise ValueError(
+                        f"pred_bins stratification is missing stored bin edges for channel {channel_name!r}."
+                    )
+                prediction_bins = _assign_prediction_bins(
+                    prediction_values,
+                    pred_bin_edges[channel_name],
+                    valid_mask=valid_mask,
+                )
+                n_channel_bins = _prediction_bin_count(pred_bin_edges[channel_name])
                 lower_by_stratum = np.zeros(
-                    (len(stratification_values), residuals.shape[1]),
+                    (n_channel_bins, residuals.shape[1]),
                     dtype=FLOAT32_DTYPE,
                 )
                 upper_by_stratum = np.zeros_like(lower_by_stratum)
-                for index, stratum_value in enumerate(stratification_values):
-                    stratum_mask = scenario_strata == stratum_value
+                for index in range(n_channel_bins):
+                    stratum_valid_mask = prediction_bins == index
+                    if valid_mask is not None:
+                        stratum_valid_mask &= valid_mask
+                    lower_by_stratum[index] = _masked_column_quantile(
+                        residuals,
+                        stratum_valid_mask,
+                        alpha / 2.0,
+                    )
+                    upper_by_stratum[index] = _masked_column_quantile(
+                        residuals,
+                        stratum_valid_mask,
+                        1.0 - (alpha / 2.0),
+                    )
+                stratified_lower_residual_quantiles[channel_name] = lower_by_stratum
+                stratified_upper_residual_quantiles[channel_name] = upper_by_stratum
+                continue
+
+            channel_strata = shared_scenario_strata
+            channel_stratification_values = stratification_values
+            if channel_strata is not None and channel_stratification_values is not None:
+                lower_by_stratum = np.zeros(
+                    (len(channel_stratification_values), residuals.shape[1]),
+                    dtype=FLOAT32_DTYPE,
+                )
+                upper_by_stratum = np.zeros_like(lower_by_stratum)
+                for index, stratum_value in enumerate(channel_stratification_values):
+                    stratum_mask = channel_strata == stratum_value
                     stratum_valid_mask = (
                         None if valid_mask is None else valid_mask[stratum_mask]
                     )
@@ -165,6 +214,11 @@ class NaiveIntervalCalibrator:
             system_load_bin_edges=None
             if system_load_bin_edges is None
             else system_load_bin_edges.astype(FLOAT32_DTYPE, copy=True),
+            pred_n_bins=pred_n_bins,
+            pred_bin_edges={
+                name: values.astype(FLOAT32_DTYPE, copy=True)
+                for name, values in (pred_bin_edges or {}).items()
+            },
         )
 
     def predict_intervals(
@@ -175,9 +229,9 @@ class NaiveIntervalCalibrator:
 
         _validate_entity_alignment(self.entity_ids, _get_entity_ids(predictions))
         intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        scenario_strata = (
+        shared_scenario_strata = (
             None
-            if self.strat is None
+            if self.strat is None or self.strat == "pred_bins"
             else _get_scenario_column(predictions, self.strat)
         )
         for channel_name in self.channel_names:
@@ -193,25 +247,57 @@ class NaiveIntervalCalibrator:
                 axis=0,
             )
             if (
-                scenario_strata is not None
-                and self.stratification_values is not None
-                and channel_name in self.stratified_lower_residual_quantiles
+                channel_name in self.stratified_lower_residual_quantiles
                 and channel_name in self.stratified_upper_residual_quantiles
             ):
-                for index, stratum_value in enumerate(self.stratification_values):
-                    stratum_mask = scenario_strata == stratum_value
-                    if not np.any(stratum_mask):
-                        continue
-                    lower_offsets[stratum_mask] = (
-                        self.stratified_lower_residual_quantiles[channel_name][index][
-                            None, :
-                        ]
+                if self.strat == "pred_bins":
+                    if channel_name not in self.pred_bin_edges:
+                        raise ValueError(
+                            f"pred_bins stratification is missing stored bin edges for channel {channel_name!r}."
+                        )
+                    prediction_bins = _assign_prediction_bins(
+                        prediction_values,
+                        self.pred_bin_edges[channel_name],
+                        valid_mask=_get_valid_mask(predictions, channel_name),
                     )
-                    upper_offsets[stratum_mask] = (
-                        self.stratified_upper_residual_quantiles[channel_name][index][
-                            None, :
-                        ]
-                    )
+                    for index in range(
+                        self.stratified_lower_residual_quantiles[channel_name].shape[0]
+                    ):
+                        stratum_mask = prediction_bins == index
+                        if not np.any(stratum_mask):
+                            continue
+                        lower_offsets = np.where(
+                            stratum_mask,
+                            self.stratified_lower_residual_quantiles[channel_name][
+                                index
+                            ][None, :],
+                            lower_offsets,
+                        )
+                        upper_offsets = np.where(
+                            stratum_mask,
+                            self.stratified_upper_residual_quantiles[channel_name][
+                                index
+                            ][None, :],
+                            upper_offsets,
+                        )
+                elif (
+                    shared_scenario_strata is not None
+                    and self.stratification_values is not None
+                ):
+                    for index, stratum_value in enumerate(self.stratification_values):
+                        stratum_mask = shared_scenario_strata == stratum_value
+                        if not np.any(stratum_mask):
+                            continue
+                        lower_offsets[stratum_mask] = (
+                            self.stratified_lower_residual_quantiles[channel_name][
+                                index
+                            ][None, :]
+                        )
+                        upper_offsets[stratum_mask] = (
+                            self.stratified_upper_residual_quantiles[channel_name][
+                                index
+                            ][None, :]
+                        )
             lower = prediction_values + lower_offsets
             upper = prediction_values + upper_offsets
             valid_mask = _get_valid_mask(predictions, channel_name)
@@ -270,6 +356,10 @@ class NaiveIntervalCalibrator:
             "system_load_bin_edges": None
             if self.system_load_bin_edges is None
             else self.system_load_bin_edges.tolist(),
+            "pred_n_bins": self.pred_n_bins,
+            "pred_bin_edges": {
+                key: values.tolist() for key, values in self.pred_bin_edges.items()
+            },
         }
 
     @classmethod
@@ -310,6 +400,11 @@ class NaiveIntervalCalibrator:
             raise ValueError(
                 "Interval artifact field 'stratified_upper_residual_quantiles' must be a mapping."
             )
+        raw_pred_bin_edges = data.get("pred_bin_edges", {})
+        if not isinstance(raw_pred_bin_edges, dict):
+            raise ValueError(
+                "Interval artifact field 'pred_bin_edges' must be a mapping."
+            )
 
         channel_names = tuple(str(name) for name in raw_channel_names)
         lower_residual_quantiles = {
@@ -327,6 +422,10 @@ class NaiveIntervalCalibrator:
         stratified_upper_residual_quantiles = {
             str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
             for key, values in raw_stratified_upper_residual_quantiles.items()
+        }
+        pred_bin_edges = {
+            str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
+            for key, values in raw_pred_bin_edges.items()
         }
         return cls(
             alpha=float(cast(Any, data["alpha"])),
@@ -347,6 +446,8 @@ class NaiveIntervalCalibrator:
             system_load_bin_edges=_optional_float_array(
                 data.get("system_load_bin_edges")
             ),
+            pred_n_bins=_optional_int(data.get("pred_n_bins")),
+            pred_bin_edges=pred_bin_edges,
             calibration_fraction=_optional_float(data.get("calibration_fraction")),
             random_seed=_optional_int(data.get("random_seed")),
             split_pool_scenario_ids=_optional_int_array(
@@ -486,6 +587,34 @@ def _masked_column_quantile(
         else:
             output[index] = np.float32(0.0)
     return output.astype(FLOAT32_DTYPE, copy=False)
+
+
+def _assign_prediction_bins(
+    prediction_values: np.ndarray,
+    pred_bin_edges: np.ndarray,
+    *,
+    valid_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    values = np.asarray(prediction_values, dtype=np.float32)
+    edges = np.asarray(pred_bin_edges, dtype=np.float32)
+    if valid_mask is None:
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                "pred_bins stratification requires finite prediction values."
+            )
+    else:
+        if not np.all(np.isfinite(values[valid_mask])):
+            raise ValueError(
+                "pred_bins stratification requires finite prediction values on valid entries."
+            )
+    bins = np.searchsorted(edges, values, side="right").astype(np.int32, copy=False)
+    if valid_mask is not None:
+        bins = np.where(valid_mask, bins, 0).astype(np.int32, copy=False)
+    return bins
+
+
+def _prediction_bin_count(pred_bin_edges: np.ndarray) -> int:
+    return len(np.asarray(pred_bin_edges, dtype=np.float32)) + 1
 
 
 def _optional_int_array(value: object | None) -> np.ndarray | None:

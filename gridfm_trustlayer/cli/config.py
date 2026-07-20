@@ -8,6 +8,45 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 
+_ALLOWED_TOP_LEVEL_KEYS = {
+    "version",
+    "task_name",
+    "alpha",
+    "cp_type",
+    "strat",
+    "system_load_n_bins",
+    "pred_n_bins",
+    "variables",
+    "calibration_fraction",
+    "random_seed",
+    "screen_bounds",
+    "save_figures",
+    "inputs",
+    "outputs",
+    "commands",
+}
+
+_ALLOWED_COMMAND_NAMES = {"compute", "calibrate", "screen"}
+
+_ALLOWED_COMMAND_OVERRIDE_KEYS = {
+    "task_name",
+    "alpha",
+    "cp_type",
+    "strat",
+    "system_load_n_bins",
+    "pred_n_bins",
+    "variables",
+    "output",
+    "artifact",
+    "calibration_fraction",
+    "random_seed",
+    "screen_bounds",
+    "save_figures",
+    "inputs",
+    "outputs",
+}
+
+
 def load_cli_config(config_path: str | None) -> dict[str, Any]:
     """Load the required trustlayer YAML config file."""
 
@@ -19,7 +58,101 @@ def load_cli_config(config_path: str | None) -> dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         raise ValueError("trust_config.yaml must decode to a mapping at the top level.")
+    validate_config_schema(data)
     return data
+
+
+def validate_config_schema(config: dict[str, Any]) -> None:
+    """Validate trustlayer YAML structure before command-level resolution."""
+
+    unknown_top_level = sorted(set(config).difference(_ALLOWED_TOP_LEVEL_KEYS))
+    if unknown_top_level:
+        raise ValueError(
+            f"Unsupported top-level trustlayer config keys: {unknown_top_level}."
+        )
+
+    _validate_mapping_keys(
+        config,
+        key="inputs",
+        allowed_keys={
+            "predictions",
+            "generator_predictions",
+            "pf_node",
+            "pf_edge",
+            "artifact",
+            "analysis_pf_node",
+            "analysis_pf_edge",
+        },
+    )
+    _validate_mapping_keys(
+        config,
+        key="outputs",
+        allowed_keys={
+            "output",
+            "artifact",
+            "calibrated_predictions",
+            "calibrated_predictions_volt",
+            "calibrated_predictions_line",
+            "screen_dir",
+            "screened_predictions",
+        },
+    )
+
+    commands = config.get("commands")
+    if commands is None:
+        return
+    if not isinstance(commands, dict):
+        raise ValueError("commands must be a mapping when provided.")
+
+    unknown_commands = sorted(set(commands).difference(_ALLOWED_COMMAND_NAMES))
+    if unknown_commands:
+        raise ValueError(
+            f"Unsupported commands.* sections in trustlayer config: {unknown_commands}."
+        )
+
+    for command_name, overrides in commands.items():
+        if overrides is None:
+            continue
+        if not isinstance(overrides, dict):
+            raise ValueError(
+                f"commands.{command_name} must be a mapping when provided."
+            )
+        unknown_override_keys = sorted(
+            set(overrides).difference(_ALLOWED_COMMAND_OVERRIDE_KEYS)
+        )
+        if unknown_override_keys:
+            raise ValueError(
+                f"Unsupported keys under commands.{command_name}: "
+                f"{unknown_override_keys}."
+            )
+        _validate_mapping_keys(
+            overrides,
+            key="inputs",
+            allowed_keys={
+                "predictions",
+                "generator_predictions",
+                "pf_node",
+                "pf_edge",
+                "artifact",
+                "analysis_pf_node",
+                "analysis_pf_edge",
+            },
+            context=f"commands.{command_name}",
+        )
+        _validate_mapping_keys(
+            overrides,
+            key="outputs",
+            allowed_keys={
+                "output",
+                "artifact",
+                "calibrated_predictions",
+                "calibrated_predictions_volt",
+                "calibrated_predictions_line",
+                "screen_dir",
+                "screened_predictions",
+            },
+            context=f"commands.{command_name}",
+        )
 
 
 def resolve_command_config(
@@ -36,10 +169,12 @@ def resolve_command_config(
         "cp_type",
         "strat",
         "system_load_n_bins",
+        "pred_n_bins",
         "variables",
         "calibration_fraction",
         "random_seed",
         "screen_bounds",
+        "save_figures",
     ):
         if key in config:
             resolved[key] = config[key]
@@ -86,12 +221,14 @@ def resolve_command_config(
         "cp_type",
         "strat",
         "system_load_n_bins",
+        "pred_n_bins",
         "variables",
         "output",
         "artifact",
         "calibration_fraction",
         "random_seed",
         "screen_bounds",
+        "save_figures",
     ):
         if key in command_overrides:
             resolved[key] = command_overrides[key]
@@ -122,6 +259,53 @@ def resolve_command_config(
         },
     )
     return resolved
+
+
+def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
+    """Validate resolved command-level config values with clear messages."""
+
+    if "cp_type" in config:
+        validate_cp_type(config.get("cp_type"))
+    strat = validate_strat(config.get("strat"))
+    if "system_load_n_bins" in config:
+        validate_system_load_n_bins(config.get("system_load_n_bins"))
+    if "pred_n_bins" in config:
+        validate_pred_n_bins(config.get("pred_n_bins"))
+    if "variables" in config:
+        normalize_variables(config.get("variables"))
+
+    if strat == "system_load_bin" and config.get("system_load_n_bins") is None:
+        raise ValueError(
+            "system_load_n_bins is required when strat is 'system_load_bin'."
+        )
+    if strat == "pred_bins" and config.get("pred_n_bins") is None:
+        raise ValueError("pred_n_bins is required when strat is 'pred_bins'.")
+
+    calibration_fraction = config.get("calibration_fraction")
+    if calibration_fraction is not None:
+        try:
+            normalized_fraction = float(calibration_fraction)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "calibration_fraction must be numeric when provided."
+            ) from exc
+        if not 0.0 < normalized_fraction < 1.0:
+            raise ValueError("calibration_fraction must be strictly between 0 and 1.")
+
+    random_seed = config.get("random_seed")
+    if random_seed is not None:
+        try:
+            int(random_seed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("random_seed must be an integer when provided.") from exc
+
+    if "screen_bounds" in config and config.get("screen_bounds") is not None:
+        screen_bounds = config["screen_bounds"]
+        if not isinstance(screen_bounds, dict):
+            raise ValueError("screen_bounds must be a mapping when provided.")
+
+    if "save_figures" in config and config.get("save_figures") is not None:
+        _validate_boolean_option(config.get("save_figures"), option_name="save_figures")
 
 
 def coalesce_option(
@@ -196,9 +380,9 @@ def validate_strat(strat: str | None) -> str | None:
     if strat is None:
         return None
     normalized = str(strat).strip().lower()
-    if normalized not in {"n_outages", "outage_type", "system_load_bin"}:
+    if normalized not in {"n_outages", "outage_type", "system_load_bin", "pred_bins"}:
         raise ValueError(
-            f"Unsupported strat: {strat!r}. The current implementation supports only 'n_outages', 'outage_type', and 'system_load_bin'."
+            f"Unsupported strat: {strat!r}. The current implementation supports only 'n_outages', 'outage_type', 'system_load_bin', and 'pred_bins'."
         )
     return normalized
 
@@ -206,17 +390,29 @@ def validate_strat(strat: str | None) -> str | None:
 def validate_system_load_n_bins(value: Any) -> int | None:
     """Validate the requested percentile-bin count for system_load_bin."""
 
+    return _validate_bin_count(value, option_name="system_load_n_bins")
+
+
+def validate_pred_n_bins(value: Any) -> int | None:
+    """Validate the requested percentile-bin count for pred_bins."""
+
+    return _validate_bin_count(value, option_name="pred_n_bins")
+
+
+def _validate_bin_count(value: Any, *, option_name: str) -> int | None:
+    """Validate a requested percentile-bin count option."""
+
     if value is None:
         return None
     try:
         normalized = int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"system_load_n_bins must be an integer when provided; got {value!r}."
+            f"{option_name} must be an integer when provided; got {value!r}."
         ) from exc
     if normalized < 2:
         raise ValueError(
-            f"system_load_n_bins must be at least 2 when provided; got {normalized!r}."
+            f"{option_name} must be at least 2 when provided; got {normalized!r}."
         )
     return normalized
 
@@ -234,3 +430,26 @@ def _merge_mapping(
     for key, item in value.items():
         if key in allowed_keys:
             target[key] = item
+
+
+def _validate_mapping_keys(
+    container: dict[str, Any],
+    *,
+    key: str,
+    allowed_keys: set[str],
+    context: str = "top-level",
+) -> None:
+    mapping = container.get(key)
+    if mapping is None:
+        return
+    if not isinstance(mapping, dict):
+        raise ValueError(f"{context}.{key} must be a mapping when provided.")
+    unknown_keys = sorted(set(mapping).difference(allowed_keys))
+    if unknown_keys:
+        raise ValueError(f"Unsupported keys under {context}.{key}: {unknown_keys}.")
+
+
+def _validate_boolean_option(value: Any, *, option_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{option_name} must be a boolean when provided.")

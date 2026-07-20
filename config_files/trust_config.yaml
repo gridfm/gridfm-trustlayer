@@ -3,8 +3,9 @@ version: 1
 
 task_name: PowerFlow
 cp_type: element
-strat: outage_type
+strat: pred_bins
 alpha: 0.1
+pred_n_bins: 5
 calibration_fraction: null
 random_seed: 7
 # A single run can request voltage intervals and derived line-loading intervals
