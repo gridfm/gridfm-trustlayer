@@ -1,0 +1,66 @@
+# Kernel-weighted CP with a portable bandwidth
+#
+# Solves the bandwidth per test scenario to reach a target effective sample size
+# instead of fixing a neighbour count. Prefer this when the same config must work
+# across different embedding widths, stratum sizes, or networks: a good k_nn at one
+# embedding width can be effectively uniform at another, while n_eff transfers.
+#
+# Run:
+#   gridfm_trustlayer compute   --config examples/config/kernel_n_eff_pf.yaml
+#   gridfm_trustlayer calibrate --config examples/config/kernel_n_eff_pf.yaml
+#   gridfm_trustlayer screen    --config examples/config/kernel_n_eff_pf.yaml
+#
+# Replace every `path/to/...` with your own artifacts before running.
+
+version: 1
+
+task_name: PowerFlow
+cp_type: kernel
+strat: n_outages
+alpha: 0.1
+
+calibration_fraction: 0.3
+random_seed: 7
+
+embedding_pooling: mean
+distance: euclidean
+bandwidth: n_eff
+# Omit to default to 20/alpha (200 at alpha: 0.1). A (1 - alpha/2) quantile puts
+# roughly n_eff * alpha/2 effective observations in the tail, so 20/alpha leaves
+# about ten of them.
+n_eff_target: 200
+n_eff_min: 20
+
+variables:
+  - Vm
+  - Va
+  - line_loading
+
+screen_bounds:
+  Vm:
+    lower: 0.95
+    upper: 1.05
+  line_loading:
+    upper: 1.0
+
+inputs:
+  predictions: path/to/predictions.parquet
+  # Required for cp_type: kernel. Produced by
+  #   gridfm_graphkit predict --get_embeddings
+  embeddings: path/to/predictions/bus_embeddings.parquet
+  pf_node: path/to/raw/bus_data.parquet
+  pf_edge: path/to/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/kernel/n_eff_pf.trustlayer
+  calibrated_predictions_volt: trustlayer_outputs/kernel/n_eff_pf_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/kernel/n_eff_pf_line_loading_with_intervals.parquet
+  screen_dir: trustlayer_outputs/kernel/n_eff_pf_screen
+
+# `screen` defaults to the shared `variables` list, but Va has no natural
+# operating bound. Restrict screening to the variables that do.
+commands:
+  screen:
+    variables:
+      - Vm
+      - line_loading

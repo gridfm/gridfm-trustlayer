@@ -39,13 +39,26 @@ The current derived target is:
 
 Trustlayer computes line loading through the datakit-backed branch-power path and then calibrates the derived quantity in the same conformal framework.
 
-## Current method: `cp_type: element`
+## Current methods
 
-The current shipped method is exposed as:
+Two calibration families ship today:
 
-- `cp_type: element`
+- `cp_type: element`: stratified conformal prediction (SCP)
+- `cp_type: kernel`: kernel-weighted conformal prediction (KCP)
 
-This is the current residual-quantile conformal workflow used by the repository.
+They differ in *where the quantile comes from*, not in what is calibrated. Both consume the same residuals, both support the same target families, and both compose with `strat`.
+
+| | `element` | `kernel` |
+| --- | --- | --- |
+| What `compute` stores | a fixed residual-quantile table per entity (and per stratum) | the full calibration residual bank plus one embedding per calibration scenario |
+| What `calibrate` does | table lookup, then add the offset to the prediction | computes distances, bandwidth, and kernel weights, then evaluates a weighted quantile per test scenario |
+| Interval offset varies by | entity, and stratum if `strat` is set | entity, stratum, **and test scenario** |
+| Artifact encoding | JSON | compressed binary container |
+| Extra inputs | none | `inputs.embeddings` |
+
+## `cp_type: element`
+
+This is the residual-quantile conformal workflow used by the repository.
 
 Current characteristics:
 
@@ -56,7 +69,146 @@ Current characteristics:
 - optional stratification by `pred_bins`, which groups individual predictions by percentile bins of the model's own outputs and exposes variable-specific columns such as `pred_bins_vm`, `pred_bins_va`, or `pred_bins_line_loading`
 - mixed bus-level and branch-level runs supported through separate target families
 
-`element` is the canonical name used by the current workflow.
+`element` is the canonical name used by this workflow.
+
+## `cp_type: kernel`
+
+Kernel-weighted conformal prediction replaces the fixed quantile with one estimated per test scenario, weighting calibration residuals by how similar their scenario is to the scenario being evaluated.
+
+Current characteristics:
+
+- one scenario representation `z(x)` per scenario, pooled from a per-entity embeddings parquet
+- a choice of Euclidean or cosine distance over those representations
+- an adaptive bandwidth, selected either from the `k_nn`-th nearest-neighbour distance or by solving for a target effective sample size
+- a fallback to the stratum-wide quantile when the effective sample size drops below `n_eff_min`
+- composes with `n_outages`, `outage_type`, and `system_load_bin` stratification; incompatible with `pred_bins`
+- requires a non-null `calibration_fraction`
+
+### Scenario representation
+
+The model's per-entity embeddings are pooled to one vector per scenario. `embedding_pooling: mean` (the default) computes
+
+$$
+z_s = \frac{1}{|E|}\sum_{e \in E} h_{s,e},
+$$
+
+where $h_{s,e}$ is the model's embedding for entity $e$ in scenario $s$. `max`, `meanmax`, and `concat` are also available.
+
+During `compute`, trustlayer fits a per-dimension mean and standard deviation on the calibration embeddings and stores them in the artifact:
+
+$$
+\tilde{z}_s = \frac{z_s - \mu}{\sigma}.
+$$
+
+Both calibration and test embeddings are standardized with the same stored statistics. This matters because raw latent dimensions have no reason to share a scale, and a single high-variance dimension would otherwise dominate the distance.
+
+### Distances and weights
+
+For a test scenario with representation $\tilde{z}_\ast$ in stratum $g$, trustlayer computes squared distances to every calibration scenario **in the same stratum**:
+
+$$
+d_j^2 = \lVert \tilde{z}_\ast - \tilde{z}_j \rVert_2^2, \qquad j \in \mathcal{D}^{(g)}_{\mathrm{cal}}.
+$$
+
+Two metrics are available. `distance: euclidean` (the default) uses the standardized representations directly. `distance: cosine` projects them onto the unit sphere first, so that
+
+$$
+d_j^2 = 2 - 2\cos(\tilde{z}_\ast, \tilde{z}_j),
+$$
+
+which is the same formula evaluated on normalized inputs. Since standardization has already centered the representations, cosine compares the *direction* in which two scenarios deviate from the mean scenario and discards the magnitude of that deviation. Whether that is desirable is dataset-specific: on IEEE-24 line loading it produced wider intervals than both Euclidean and plain SCP, suggesting the deviation magnitude does carry error information there.
+
+Because both metrics are functions of the covariates only, the choice affects efficiency but never validity.
+
+Weights follow a Gaussian kernel with a per-test-point bandwidth $h^2$:
+
+$$
+u_j = \exp(-d_j^2 / h^2).
+$$
+
+### Bandwidth selection
+
+Two modes are implemented. Both produce a per-test-point $h^2$; everything downstream is identical.
+
+**`bandwidth: knn` (default).** The bandwidth is the distance to the $k_{\mathrm{nn}}$-th nearest neighbour within the stratum:
+
+$$
+h^2 = d^2_{(k_{\mathrm{nn}})}.
+$$
+
+This adapts to local density — tight in well-sampled regions, wider in sparse ones — and is the rule the paper specifies.
+
+Its limitation is that $k_{\mathrm{nn}}$ is not portable across representations. Squared Euclidean distances concentrate as dimension grows, so a fixed $k_{\mathrm{nn}}$ localizes very differently depending on embedding width. On synthetic data with about 1500 calibration scenarios per stratum, $k_{\mathrm{nn}} = 20$ produces a median $n_{\mathrm{eff}}$ of roughly 40 at 2 dimensions, 1045 at 16, and 1498 at 384. At the widest, $k_{\mathrm{nn}} = 20$ and $k_{\mathrm{nn}} = 50$ are indistinguishable: the knob no longer controls anything.
+
+**`bandwidth: n_eff`.** The bandwidth is instead solved, per test point, so the resulting weights reach a target effective sample size:
+
+$$
+h^2 : \quad n_{\mathrm{eff}}(h^2) = n^{\mathrm{target}}_{\mathrm{eff}}.
+$$
+
+$n_{\mathrm{eff}}$ increases monotonically from 1 (all weight on the nearest calibration scenario) to the stratum size (uniform weights), so this is a well-posed one-dimensional root find, solved by log-space bisection across a whole block of test points at once. Because $n_{\mathrm{eff}}$ is invariant to a common rescaling of the weights, the solve shifts the exponent by each row's minimum distance, which avoids underflow at small bandwidths without changing the result.
+
+This parameterization is invariant to embedding width and stratum size, and its default is derived from $\alpha$ rather than tuned: a $1-\alpha/2$ quantile places roughly $n_{\mathrm{eff}} \cdot \alpha/2$ effective observations in the tail, so $n^{\mathrm{target}}_{\mathrm{eff}} = 20/\alpha$ leaves about ten of them.
+
+Both remain hyperparameters. Selecting either by inspecting calibrated results on the set you intend to report on breaks the coverage guarantee; a disjoint tuning partition is required.
+
+### Effective sample size and fallback
+
+The effective sample size measures how many calibration scenarios actually contribute:
+
+$$
+n_{\mathrm{eff}} = \frac{\left(\sum_j u_j\right)^2}{\sum_j u_j^2}.
+$$
+
+It equals the stratum size under uniform weights and falls toward `1` when weight concentrates on a single neighbour. When $n_{\mathrm{eff}} <$ `n_eff_min`, trustlayer reverts that scenario to the stratum-wide quantile, which is exactly the `element` result, and flags it in `kcp_fallback`.
+
+Under `bandwidth: n_eff` this guard rarely binds, because the target is hit by construction; it only matters when a stratum is too small to reach the target at all.
+
+A second, subtler reachability constraint follows from the weighted quantile below. The unobserved test residual enters as a point mass of weight 1, since the test scenario sits at distance zero from itself. For the $1-\alpha/2$ level to be attainable the calibration weights must satisfy $\sum_j u_j \ge 2/\alpha - 1$, which is 19 at $\alpha = 0.1$. Because $u_j \le 1$ implies $\sum_j u_j \le n_{\mathrm{eff}}$, an $n_{\mathrm{eff}}$ of at least 19 is necessary but not sufficient. The default `n_eff_min` of 5 therefore never binds before unreachability does — a scenario in that regime falls back through the unreachable path instead. When no calibration scenario is close in the kernel's own metric, all $u_j \ll 1$, the point mass dominates, and the method declines to extrapolate. That is the guarantee working, not a defect.
+
+### Weighted quantile
+
+For each entity $e$, calibration residuals in the stratum are sorted and the weighted quantile is taken with a point mass at $+\infty$ representing the unobserved test residual, following Tibshirani et al. (2019):
+
+$$
+q^+_{\ast,e} = \inf\left\{ r : \sum_{j : r_{j,e} \le r} u_j \;\ge\; \left(1 - \tfrac{\alpha}{2}\right)\left(\textstyle\sum_j u_j + 1\right) \right\}.
+$$
+
+The `+1` in the denominator is that atom. Without it the estimator would always return a finite quantile and lose the finite-sample guarantee; with it, a scenario whose weighted mass cannot reach the target level falls back explicitly instead.
+
+The lower bound uses the mirrored tail, accumulating weight from the largest residual downward, so its atom sits at $-\infty$ — the conservative direction for a lower bound:
+
+$$
+q^-_{\ast,e} = \sup\left\{ r : \sum_{j : r_{j,e} \ge r} u_j \;\ge\; \left(1 - \tfrac{\alpha}{2}\right)\left(\textstyle\sum_j u_j + 1\right) \right\}.
+$$
+
+Masked or invalid calibration entries receive zero weight for that entity, so they never enter either sum.
+
+The interval is then formed exactly as in the `element` case, but with test-scenario-specific offsets:
+
+$$
+\ell_{\ast,e} = \hat{y}_{\ast,e} + q^-_{\ast,e}, \qquad
+u_{\ast,e} = \hat{y}_{\ast,e} + q^+_{\ast,e}.
+$$
+
+### Interaction with stratification
+
+Kernel weighting and stratification are nested, not alternatives. With `strat: n_outages`, a test scenario with two outages draws its neighbours, its bandwidth, and its quantile only from two-outage calibration scenarios. A zero-outage calibration scenario can never receive weight, regardless of embedding distance.
+
+This is why `pred_bins` is rejected for `cp_type: kernel`: prediction bins are assigned per element, while kernel localization is defined per scenario, so the two groupings do not nest.
+
+### Practical behavior
+
+The bandwidth controls how sharply the kernel localizes and is the main tuning knob:
+
+- a small bandwidth gives low `n_eff`, strongly conditional intervals, and a tendency to overshoot the nominal marginal coverage
+- a large bandwidth gives near-uniform weights, `n_eff` approaching the stratum size, and results converging to `cp_type: element`
+
+Under `bandwidth: knn` the lever is `k_nn`; under `bandwidth: n_eff` it is `n_eff_target`.
+
+Squared Euclidean distances concentrate as embedding width grows, which weakens localization for very wide representations. The `kcp_n_eff` column written by `calibrate` is the direct diagnostic: if it sits near the stratum size, the kernel is not localizing and the run is effectively `element`.
+
+Because KCP flattens conditional coverage, its *marginal* coverage can sit above `1 - alpha` on skewed difficulty distributions: the easy majority is already near full coverage, so raising coverage on the hard tail lifts the average. Raising `k_nn` is the correction.
 
 ## Implementation details
 
@@ -210,11 +362,14 @@ Inputs:
 - prediction parquet
 - bus ground-truth parquet
 - branch ground-truth parquet when derived loading is requested
+- scenario embeddings parquet when `cp_type: kernel`
 - conformal settings such as `alpha`, `cp_type`, `strat`, and `variables`
 
 Outputs:
 
 - one `.trustlayer` artifact containing one or more fitted calibrators
+
+For `cp_type: element` the artifact holds a quantile table. For `cp_type: kernel` it holds the calibration residual bank, the standardized calibration embeddings, the standardization statistics, the per-stratum fallback quantiles, and the kernel settings. `compute` also precomputes the per-entity residual sort order so the weighted quantile at application time is a permute-and-accumulate pass rather than a sort per test point.
 
 ### `calibrate`
 
@@ -227,6 +382,9 @@ Outputs:
 - trust-analysis CSVs
 - trust-summary CSVs
 - figures
+- for `cp_type: kernel`, the per-scenario diagnostics `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback`
+
+For `cp_type: kernel` this is also where the localization happens: the test embeddings are loaded and pooled, distances to the stored bank are computed within each stratum, and the weighted quantile is evaluated per test scenario.
 
 This step is intentionally split by target family because bus-level and branch-level results live on different entity axes.
 
@@ -280,3 +438,8 @@ Current task-aware behavior includes:
 - preservation of task-specific direct channels instead of forcing a PF-only interpretation
 
 This is why the repository keeps schema handling inside the I/O layer rather than in the conformal core.
+
+## References
+
+- V. Vovk, A. Gammerman, and G. Shafer. *Algorithmic Learning in a Random World*. Springer, 2005.
+- R. J. Tibshirani, R. F. Barber, E. Candes, and A. Ramdas. Conformal prediction under covariate shift. *Advances in Neural Information Processing Systems*, 32, 2019. (Weighted conformal inference, including the point mass used by the kernel quantile.)

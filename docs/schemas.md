@@ -17,7 +17,7 @@ This page does not define a long-term compatibility guarantee for every future t
 
 ## Artifact families
 
-Trustlayer currently works with four main artifact families.
+Trustlayer currently works with five main artifact families.
 
 ### Prediction artifacts
 
@@ -28,6 +28,14 @@ Examples:
 - PF-style bus parquet: `<grid>_predictions.parquet`
 - OPF bus parquet: `<grid>_predictions.parquet`
 - OPF generator parquet: `<grid>_gen_predictions.parquet`
+
+### Scenario embedding artifacts
+
+Consumed by `compute` and `calibrate` when `cp_type: kernel` is requested.
+
+Example:
+
+- `*_bus_embeddings.parquet`
 
 ### Ground-truth artifacts
 
@@ -135,6 +143,27 @@ Current OPF semantics documented in trustlayer:
 - generator `idx` is not assumed to be a stable cross-scenario physical generator identifier
 
 Trustlayer therefore preserves the OPF generator artifact as a first-class input instead of forcing it into a rectangular bus-only schema.
+
+## Scenario embedding artifacts
+
+Used only by `cp_type: kernel`, and read from `inputs.embeddings`.
+
+Required columns:
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `scenario` | integer | Scenario id, matching the predictions parquet. |
+| `bus` | integer | Entity id within the scenario. |
+| `emb_*` | float | Embedding dimensions. Any number of columns carrying the `emb_` prefix; they are read in sorted name order. |
+
+Graphkit produces this layout with `gridfm_graphkit predict --get_embeddings`, where the embedding width is the model's hidden size times its attention-head count.
+
+Requirements:
+
+- The table must be rectangular: every scenario must carry the same number of entities. A ragged table is rejected rather than silently pooled over differing entity counts.
+- It must cover every scenario present in the predictions parquet.
+
+Trustlayer reduces this to one vector per scenario using `embedding_pooling`, then standardizes it per dimension with statistics fitted on the calibration split, and finally projects onto the unit sphere when `distance: cosine` is requested. Only the pooled, standardized vectors are stored in the artifact; the source parquet is not embedded.
 
 ## Ground-truth artifacts
 
@@ -288,6 +317,15 @@ Contains:
 - one calibrator for line-loading targets, or
 - a bundle containing separate calibrators for each target family in a mixed run
 
+Two on-disk encodings exist, selected by `cp_type`. `load_interval_artifacts` detects the encoding from the file's magic bytes, so both are read through the same path and the file extension does not change.
+
+| `cp_type` | Encoding | Stored state |
+| --- | --- | --- |
+| `element` | JSON | per-entity residual quantiles, optional per-stratum quantiles, stratification metadata, bin edges, split scenario ids |
+| `kernel` | compressed binary container (`npz`) with a `__meta__` JSON entry | everything above plus the calibration residual bank, per-entity valid masks, standardized calibration embeddings, embedding standardization statistics, per-stratum fallback quantiles, and the kernel settings (`distance`, `bandwidth`, `k_nn`, `n_eff_target`, `n_eff_min`, `embedding_pooling`) |
+
+Kernel artifacts are therefore much larger than element artifacts, because they retain the calibration residuals and embeddings rather than reducing them to a quantile table.
+
 ### Calibrated voltage parquet
 
 Produced by `calibrate` when bus-level targets are present.
@@ -298,6 +336,7 @@ Typical columns include:
 - `Vm_pi_lower`, `Vm_pi_upper` when `Vm` is calibrated
 - `Va_pi_lower`, `Va_pi_upper` when `Va` is calibrated
 - optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, `system_load_bin_label`, `pred_bins_vm`, `pred_bins_vm_label`, `pred_bins_va`, and `pred_bins_va_label`
+- kernel diagnostic columns `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback` when `cp_type: kernel`
 
 ### Calibrated line-loading parquet
 
@@ -315,6 +354,7 @@ Typical columns include:
 - `line_loading_pi_lower`
 - `line_loading_pi_upper`
 - optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, `system_load_bin_label`, `pred_bins_line_loading`, and `pred_bins_line_loading_label`
+- kernel diagnostic columns `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback` when `cp_type: kernel`
 
 ### Analysis CSVs
 
@@ -353,5 +393,6 @@ Line side:
 ## Known limits
 
 - SE export documentation remains incomplete until a concrete graphkit artifact is available
+- kernel artifacts embed the calibration residual bank, so their size scales with the calibration split and the embedding width rather than staying constant like element artifacts
 - OPF generator identity is still scenario-local in the active real export
 - this page documents the currently implemented boundary, not every future schema variant

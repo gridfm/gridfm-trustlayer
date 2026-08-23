@@ -154,6 +154,18 @@ When strata are imbalanced (`n_scenarios_min` very small), these two can differ 
 
 ## Stratification semantics
 
+### Kernel diagnostics (`cp_type: kernel`)
+
+Kernel runs add three per-scenario columns to the calibrated parquet. They are diagnostics, not stratification keys, so they do not create analysis strata and no figures are generated from them.
+
+- `kcp_n_eff`: effective sample size of the kernel weights, $\left(\sum_j u_j\right)^2 / \sum_j u_j^2$. Near the stratum size means the kernel is barely localizing; near `1` means weight collapsed onto a few neighbours.
+- `kcp_bandwidth_sq`: the squared bandwidth used. Under `bandwidth: knn` this is the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum; under `bandwidth: n_eff` it is the solved value.
+- `kcp_fallback`: `True` when that scenario reverted to the stratum-wide quantile.
+
+Read these alongside the reliability CSV. If empirical coverage sits well above `1 - alpha` while `kcp_n_eff` is low, the kernel is localizing too aggressively and the bandwidth should be widened (raise `k_nn`, or raise `n_eff_target`). If `kcp_n_eff` is close to the stratum size, the run is effectively equivalent to `cp_type: element`.
+
+Under `bandwidth: n_eff`, `kcp_n_eff` is pinned to the target by construction and carries no information, so `kcp_bandwidth_sq` becomes the diagnostic worth reading: it shows where the embedding space is locally sparse. A rising `kcp_fallback` rate under that mode usually means the target is small enough that the solved bandwidth is driving the summed kernel weight below the level needed to express the `1 - alpha/2` quantile.
+
 ### Scenario-level stratification
 
 These assign one stratum per scenario:

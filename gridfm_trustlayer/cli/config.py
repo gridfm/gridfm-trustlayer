@@ -7,6 +7,12 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from gridfm_trustlayer.conformal.kernel import (
+    SUPPORTED_BANDWIDTHS,
+    SUPPORTED_DISTANCES,
+)
+from gridfm_trustlayer.io.embeddings import validate_pooling
+
 
 _ALLOWED_TOP_LEVEL_KEYS = {
     "version",
@@ -16,6 +22,12 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "strat",
     "system_load_n_bins",
     "pred_n_bins",
+    "k_nn",
+    "n_eff_min",
+    "bandwidth",
+    "n_eff_target",
+    "distance",
+    "embedding_pooling",
     "variables",
     "calibration_fraction",
     "random_seed",
@@ -35,6 +47,12 @@ _ALLOWED_COMMAND_OVERRIDE_KEYS = {
     "strat",
     "system_load_n_bins",
     "pred_n_bins",
+    "k_nn",
+    "n_eff_min",
+    "bandwidth",
+    "n_eff_target",
+    "distance",
+    "embedding_pooling",
     "variables",
     "output",
     "artifact",
@@ -79,6 +97,7 @@ def validate_config_schema(config: dict[str, Any]) -> None:
             "generator_predictions",
             "pf_node",
             "pf_edge",
+            "embeddings",
             "artifact",
             "analysis_pf_node",
             "analysis_pf_edge",
@@ -133,6 +152,7 @@ def validate_config_schema(config: dict[str, Any]) -> None:
                 "generator_predictions",
                 "pf_node",
                 "pf_edge",
+                "embeddings",
                 "artifact",
                 "analysis_pf_node",
                 "analysis_pf_edge",
@@ -170,6 +190,12 @@ def resolve_command_config(
         "strat",
         "system_load_n_bins",
         "pred_n_bins",
+        "k_nn",
+        "n_eff_min",
+        "bandwidth",
+        "n_eff_target",
+        "distance",
+        "embedding_pooling",
         "variables",
         "calibration_fraction",
         "random_seed",
@@ -187,6 +213,7 @@ def resolve_command_config(
             "generator_predictions",
             "pf_node",
             "pf_edge",
+            "embeddings",
             "artifact",
             "analysis_pf_node",
             "analysis_pf_edge",
@@ -222,6 +249,12 @@ def resolve_command_config(
         "strat",
         "system_load_n_bins",
         "pred_n_bins",
+        "k_nn",
+        "n_eff_min",
+        "bandwidth",
+        "n_eff_target",
+        "distance",
+        "embedding_pooling",
         "variables",
         "output",
         "artifact",
@@ -240,6 +273,7 @@ def resolve_command_config(
             "generator_predictions",
             "pf_node",
             "pf_edge",
+            "embeddings",
             "artifact",
             "analysis_pf_node",
             "analysis_pf_edge",
@@ -264,9 +298,42 @@ def resolve_command_config(
 def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
     """Validate resolved command-level config values with clear messages."""
 
-    if "cp_type" in config:
-        validate_cp_type(config.get("cp_type"))
+    cp_type = validate_cp_type(config.get("cp_type"))
     strat = validate_strat(config.get("strat"))
+    validate_k_nn(config.get("k_nn"))
+    validate_n_eff_min(config.get("n_eff_min"))
+    validate_distance(config.get("distance"))
+    bandwidth = validate_bandwidth(config.get("bandwidth"))
+    n_eff_target = validate_n_eff_target(config.get("n_eff_target"))
+    if bandwidth == "n_eff" and n_eff_target is not None:
+        n_eff_min = config.get("n_eff_min")
+        if n_eff_min is not None and n_eff_target < float(n_eff_min):
+            raise ValueError(
+                f"n_eff_target ({n_eff_target}) is below n_eff_min ({n_eff_min}), "
+                "so every scenario would immediately fall back to the stratum quantile.",
+            )
+    if "embedding_pooling" in config:
+        validate_pooling(config.get("embedding_pooling"))
+
+    if cp_type == "kernel":
+        if strat == "pred_bins":
+            raise ValueError(
+                "cp_type 'kernel' does not support strat 'pred_bins': prediction bins are "
+                "element-wise while kernel localization is scenario-wise.",
+            )
+        if command_name == "compute":
+            if config.get("embeddings") is None:
+                raise ValueError(
+                    "cp_type 'kernel' requires inputs.embeddings pointing at a scenario "
+                    "embeddings parquet.",
+                )
+            if config.get("calibration_fraction") is None:
+                raise ValueError(
+                    "cp_type 'kernel' requires a calibration_fraction. Without a split the "
+                    "kernel would weight every test scenario against itself at distance "
+                    "zero, which invalidates the coverage guarantee.",
+                )
+
     if "system_load_n_bins" in config:
         validate_system_load_n_bins(config.get("system_load_n_bins"))
     if "pred_n_bins" in config:
@@ -363,14 +430,84 @@ def normalize_variables(raw_value: Any) -> tuple[str, ...]:
     return deduplicated
 
 
+SUPPORTED_CP_TYPES = ("element", "kernel")
+
+
 def validate_cp_type(cp_type: str | None) -> str:
     """Validate the currently supported CP type selection."""
 
     normalized = "element" if cp_type is None else str(cp_type).strip().lower()
-    if normalized != "element":
+    if normalized not in SUPPORTED_CP_TYPES:
+        supported = ", ".join(repr(name) for name in SUPPORTED_CP_TYPES)
         raise ValueError(
-            f"Unsupported cp_type: {cp_type!r}. The current implementation supports 'element'.",
+            f"Unsupported cp_type: {cp_type!r}. The current implementation supports {supported}.",
         )
+    return normalized
+
+
+def validate_k_nn(value: Any) -> int | None:
+    """Validate the kernel nearest-neighbour count used to set the bandwidth."""
+
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("k_nn must be an integer when provided.") from exc
+    if normalized < 1:
+        raise ValueError(f"k_nn must be >= 1; got {value!r}.")
+    return normalized
+
+
+def validate_distance(value: str | None) -> str:
+    """Validate the kernel distance metric used over scenario representations."""
+
+    normalized = "euclidean" if value is None else str(value).strip().lower()
+    if normalized not in SUPPORTED_DISTANCES:
+        supported = ", ".join(repr(name) for name in SUPPORTED_DISTANCES)
+        raise ValueError(
+            f"Unsupported distance: {value!r}. Supported values: {supported}.",
+        )
+    return normalized
+
+
+def validate_bandwidth(value: str | None) -> str:
+    """Validate the kernel bandwidth-selection mode."""
+
+    normalized = "knn" if value is None else str(value).strip().lower()
+    if normalized not in SUPPORTED_BANDWIDTHS:
+        supported = ", ".join(repr(name) for name in SUPPORTED_BANDWIDTHS)
+        raise ValueError(
+            f"Unsupported bandwidth: {value!r}. Supported values: {supported}.",
+        )
+    return normalized
+
+
+def validate_n_eff_target(value: Any) -> float | None:
+    """Validate the target effective sample size for `bandwidth: n_eff`."""
+
+    if value is None:
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("n_eff_target must be numeric when provided.") from exc
+    if normalized < 1.0:
+        raise ValueError(f"n_eff_target must be >= 1; got {value!r}.")
+    return normalized
+
+
+def validate_n_eff_min(value: Any) -> float | None:
+    """Validate the minimum effective sample size before KCP falls back to SCP."""
+
+    if value is None:
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("n_eff_min must be numeric when provided.") from exc
+    if normalized < 1.0:
+        raise ValueError(f"n_eff_min must be >= 1; got {value!r}.")
     return normalized
 
 

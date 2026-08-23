@@ -1,0 +1,66 @@
+# Kernel-weighted CP with the paper's bandwidth rule
+#
+# KCP localizes the quantile to each test scenario using a scenario embedding, so
+# bounds adapt per scenario rather than per stratum. This is the reference setup:
+# Euclidean distance, bandwidth from the k_nn-th nearest neighbour.
+#
+# Run:
+#   gridfm_trustlayer compute   --config examples/config/kernel_knn_pf.yaml
+#   gridfm_trustlayer calibrate --config examples/config/kernel_knn_pf.yaml
+#   gridfm_trustlayer screen    --config examples/config/kernel_knn_pf.yaml
+#
+# Replace every `path/to/...` with your own artifacts before running.
+
+version: 1
+
+task_name: PowerFlow
+cp_type: kernel
+# Kernel weighting nests INSIDE stratification: a 2-outage test scenario draws
+# its neighbours only from 2-outage calibration scenarios.
+strat: n_outages
+alpha: 0.1
+
+# Mandatory for cp_type: kernel. Without a split every test scenario would sit
+# at distance zero from itself in the calibration bank.
+calibration_fraction: 0.3
+random_seed: 7
+
+embedding_pooling: mean
+distance: euclidean
+bandwidth: knn
+k_nn: 20
+n_eff_min: 5
+
+variables:
+  - Vm
+  - Va
+  - line_loading
+
+screen_bounds:
+  Vm:
+    lower: 0.95
+    upper: 1.05
+  line_loading:
+    upper: 1.0
+
+inputs:
+  predictions: path/to/predictions.parquet
+  # Required for cp_type: kernel. Produced by
+  #   gridfm_graphkit predict --get_embeddings
+  embeddings: path/to/predictions/bus_embeddings.parquet
+  pf_node: path/to/raw/bus_data.parquet
+  pf_edge: path/to/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/kernel/knn_pf.trustlayer
+  calibrated_predictions_volt: trustlayer_outputs/kernel/knn_pf_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/kernel/knn_pf_line_loading_with_intervals.parquet
+  screen_dir: trustlayer_outputs/kernel/knn_pf_screen
+
+# `screen` defaults to the shared `variables` list, but Va has no natural
+# operating bound. Restrict screening to the variables that do.
+commands:
+  screen:
+    variables:
+      - Vm
+      - line_loading

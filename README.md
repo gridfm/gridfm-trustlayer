@@ -19,11 +19,23 @@ This repository implements a post-hoc conformal prediction layer for continuous 
 
 ## Current Status
 
-The current implementation exposes one conformal method family:
+The current implementation exposes two conformal method families:
 
 - `cp_type: element`
+- `cp_type: kernel`
 
-`element` is the canonical label for the current residual-quantile interval workflow.
+`element` is the canonical label for the residual-quantile interval workflow: residuals are reduced to a fixed quantile table at `compute` time and looked up at `calibrate` time.
+
+`kernel` is kernel-weighted conformal prediction (KCP). Instead of a fixed table, the artifact stores the calibration residual bank plus a scenario representation `z(x)`, and the quantile is estimated per test scenario by weighting calibration residuals with a Gaussian kernel over embedding distance. This yields tighter, approximately conditional bounds at the cost of a larger artifact and a small amount of work at application time. See `docs/methodology.md` for the math and `docs/configuration.md` for the keys.
+
+The distance over scenario representations is `distance: euclidean` (default) or `distance: cosine`. Cosine is squared Euclidean distance on unit-norm vectors, so it keeps only the *direction* in which a scenario deviates from the mean scenario and discards the size of that deviation.
+
+The kernel bandwidth can be selected two ways:
+
+- `bandwidth: knn` (default): `h^2` is the squared distance to the `k_nn`-th nearest calibration scenario, as specified in the paper.
+- `bandwidth: n_eff`: `h^2` is solved per test scenario so the kernel weights reach a target effective sample size `n_eff_target`. This is invariant to embedding width and stratum size, which `k_nn` is not, and its default is derived from `alpha` rather than tuned.
+
+The two families compose with stratification rather than replacing it: with `cp_type: kernel` and `strat: n_outages`, the kernel localizes *within* each outage stratum.
 
 The current implementation also exposes optional residual-stratification modes:
 
@@ -51,6 +63,10 @@ The current implementation can run on:
 - direct voltage variables such as `Vm` and `Va`
 - derived branch loading via `line_loading`
 - mixed runs that request both voltage and loading variables from one YAML config
+
+### Kernel-weighted calibration inputs
+
+`cp_type: kernel` needs one scenario representation per scenario. Trustlayer reads a per-entity embeddings parquet (columns `scenario`, `bus`, and `emb_*`) such as the one graphkit writes with `predict --get_embeddings`, and pools it to one vector per scenario. `embedding_pooling` selects the strategy (`mean` by default, plus `max`, `meanmax`, and `concat`).
 
 ## Installation
 
@@ -103,11 +119,24 @@ For full option tables and command behavior, see:
 
 - `docs/cli.md`
 
-## Example Config
+## Example Configs
 
-The repository ships one generic example config at:
+The repository ships a matrix of runnable example configs, one per option combination:
 
-- `config_files/trust_config.yaml`
+- `examples/config/` — see [`examples/config/README.md`](examples/config/README.md) for the full table
+
+| Config | Demonstrates |
+| --- | --- |
+| `element_global_pf.yaml` | Smallest useful run: one global quantile table, no split |
+| `element_holdout_pf.yaml` | Adds `calibration_fraction` so coverage is measured honestly |
+| `element_n_outages_pf.yaml` | Canonical N-k screening, stratified by contingency severity |
+| `element_outage_type_pf.yaml` | Stratified by outage regime instead of count |
+| `element_system_load_bin_pf.yaml` | Stratified by percentile bins of total demand |
+| `element_pred_bins_pf.yaml` | Stratified by percentile bins of the model's own predictions |
+| `kernel_knn_pf.yaml` | Kernel-weighted CP with the paper's bandwidth rule |
+| `kernel_n_eff_pf.yaml` | Kernel-weighted CP with a dimension-portable bandwidth |
+| `kernel_cosine_pf.yaml` | Kernel-weighted CP with cosine distance |
+| `element_n_outages_opf.yaml` | OPF artifacts with near-limit screening bounds |
 
 The YAML carries:
 
@@ -125,15 +154,17 @@ For the full YAML reference, example structure, and mixed-run path rules, see:
 
 The current workflow produces:
 
-- `.trustlayer` artifacts from `compute`
+- `.trustlayer` artifacts from `compute` (JSON for `element`, a compressed binary container for `kernel`)
 - calibrated voltage and/or line-loading parquet outputs from `calibrate`
 - voltage and line analysis CSVs plus figures from `calibrate`
 - voltage and line screening CSVs plus figures from `screen`
 
 ## Current Limits
 
-- Only `cp_type: element` is implemented today.
+- Only `cp_type: element` and `cp_type: kernel` are implemented today.
 - Only `strat: n_outages`, `strat: outage_type`, `strat: system_load_bin`, and `strat: pred_bins` are implemented today when stratification is requested.
+- `cp_type: kernel` requires `inputs.embeddings` and a non-null `calibration_fraction`, and it does not support `strat: pred_bins` (prediction bins are element-wise while kernel localization is scenario-wise).
+- `bandwidth: knn` and `bandwidth: n_eff` are the two implemented bandwidth-selection modes. Selecting a good `k_nn` or `n_eff_target` for a given dataset still requires a tuning partition disjoint from the evaluation set.
 - Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
 
 ## Documentation

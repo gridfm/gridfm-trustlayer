@@ -1,0 +1,53 @@
+# Element CP, no stratification, voltages only
+#
+# The smallest useful trustlayer run and the right starting point. One residual
+# quantile per bus per variable, fitted on every calibration scenario together.
+# Use it to confirm the pipeline works end to end before adding stratification.
+#
+# Run:
+#   gridfm_trustlayer compute   --config examples/config/element_global_pf.yaml
+#   gridfm_trustlayer calibrate --config examples/config/element_global_pf.yaml
+#   gridfm_trustlayer screen    --config examples/config/element_global_pf.yaml
+#
+# Replace every `path/to/...` with your own artifacts before running.
+
+version: 1
+
+task_name: PowerFlow
+cp_type: element
+alpha: 0.1
+
+# No `strat` key at all: a single global quantile table.
+# No `calibration_fraction`: quantiles are fitted on every scenario in the
+# predictions parquet and applied to those same scenarios. Fine for a smoke
+# test, but the resulting coverage is optimistic -- see element_holdout_pf.yaml.
+
+variables:
+  - Vm
+  - Va
+
+screen_bounds:
+  Vm:
+    lower: 0.95
+    upper: 1.05
+
+inputs:
+  predictions: path/to/predictions.parquet
+  pf_node: path/to/raw/bus_data.parquet
+  pf_edge: path/to/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/element/global_pf.trustlayer
+  # This run asks for one target family (buses only), so the single
+  # `calibrated_predictions` key applies. Runs that mix voltages with
+  # line_loading must use calibrated_predictions_volt / _line instead,
+  # because the two families live on different entity axes.
+  calibrated_predictions: trustlayer_outputs/element/global_pf_vm_va_with_intervals.parquet
+  screen_dir: trustlayer_outputs/element/global_pf_screen
+
+# `screen` defaults to the shared `variables` list, but Va has no natural
+# operating bound. Restrict screening to the variables that do.
+commands:
+  screen:
+    variables:
+      - Vm

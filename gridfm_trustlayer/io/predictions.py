@@ -45,6 +45,9 @@ class PredictionSet:
     channels: dict[str, np.ndarray]
     bus_type_masks: dict[str, np.ndarray]
     generator_predictions: GeneratorPredictionSet | None = None
+    # Scenario-level representations z(x), attached by the CLI when
+    # cp_type 'kernel' is requested. Rows align with `scenario_ids`.
+    scenario_embeddings: np.ndarray | None = None
 
 
 def load_predictions(

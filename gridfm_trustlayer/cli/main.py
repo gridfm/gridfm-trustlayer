@@ -18,15 +18,32 @@ from gridfm_trustlayer.cli.config import (
     resolve_command_config,
     validate_command_config,
     validate_cp_type,
+    validate_bandwidth,
+    validate_distance,
+    validate_k_nn,
+    validate_n_eff_min,
+    validate_n_eff_target,
     validate_pred_n_bins,
     validate_system_load_n_bins,
     validate_strat,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
+from gridfm_trustlayer.conformal.kernel import (
+    DEFAULT_BANDWIDTH,
+    DEFAULT_DISTANCE,
+    DEFAULT_K_NN,
+    DEFAULT_N_EFF_MIN,
+    KernelIntervalCalibrator,
+)
 from gridfm_trustlayer.io import (
     compute_line_loading,
     load_ground_truth,
     load_predictions,
+)
+from gridfm_trustlayer.io.embeddings import (
+    DEFAULT_POOLING,
+    load_scenario_embeddings,
+    validate_pooling,
 )
 from gridfm_trustlayer.io.artifact import (
     load_interval_artifacts,
@@ -86,7 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--alpha", type=float, help="Miscoverage level for conformal intervals."
     )
     compute_parser.add_argument(
-        "--cp-type", help="Currently only 'element' is supported."
+        "--cp-type",
+        help="Calibration type: 'element' (stratified) or 'kernel' (kernel-weighted).",
     )
     compute_parser.add_argument(
         "--strat",
@@ -116,6 +134,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--random-seed", type=int, help="Random seed used with --calibration-fraction."
     )
     compute_parser.add_argument(
+        "--embeddings",
+        help="Scenario embeddings parquet (emb_* columns). Required for cp_type 'kernel'.",
+    )
+    compute_parser.add_argument(
+        "--embedding-pooling",
+        help="How per-entity embeddings are pooled into one vector per scenario: mean, max, meanmax, or concat.",
+    )
+    compute_parser.add_argument(
+        "--distance",
+        help="Distance over scenario representations: 'euclidean' (default) or 'cosine'.",
+    )
+    compute_parser.add_argument(
+        "--bandwidth",
+        help="How the kernel bandwidth is chosen: 'knn' (default, distance to the k_nn-th neighbour) or 'n_eff' (solve for a target effective sample size).",
+    )
+    compute_parser.add_argument(
+        "--k-nn",
+        type=int,
+        help="Nearest-neighbour rank whose distance sets the kernel bandwidth (--bandwidth knn).",
+    )
+    compute_parser.add_argument(
+        "--n-eff-target",
+        type=float,
+        help="Target effective sample size solved for per test scenario (--bandwidth n_eff). Defaults to 20/alpha.",
+    )
+    compute_parser.add_argument(
+        "--n-eff-min",
+        type=float,
+        help="Minimum effective sample size before kernel weights revert to uniform (cp_type 'kernel').",
+    )
+    compute_parser.add_argument(
         "--task-name", help="Task name used to interpret prediction schema."
     )
     compute_parser.add_argument(
@@ -143,7 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", help="Destination parquet for calibrated predictions."
     )
     calibrate_parser.add_argument(
-        "--cp-type", help="Currently only 'element' is supported."
+        "--cp-type",
+        help="Calibration type: 'element' (stratified) or 'kernel' (kernel-weighted).",
     )
     calibrate_parser.add_argument(
         "--strat",
@@ -156,6 +206,10 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_parser.add_argument(
         "--pf-edge",
         help="Ground-truth branch parquet; required for line_loading analysis when targets are not stored in predictions.",
+    )
+    calibrate_parser.add_argument(
+        "--embeddings",
+        help="Scenario embeddings parquet for the application scenarios. Required when the artifact is a kernel artifact.",
     )
     calibrate_parser.add_argument(
         "--task-name", help="Task name used to interpret prediction schema."
@@ -260,6 +314,24 @@ def _run_compute(args: argparse.Namespace) -> None:
         "calibration_fraction",
     )
     random_seed = coalesce_option(args.random_seed, config, "random_seed")
+    embedding_pooling = validate_pooling(
+        coalesce_option(args.embedding_pooling, config, "embedding_pooling")
+        or DEFAULT_POOLING
+    )
+    k_nn = validate_k_nn(coalesce_option(args.k_nn, config, "k_nn")) or DEFAULT_K_NN
+    distance = validate_distance(
+        coalesce_option(args.distance, config, "distance") or DEFAULT_DISTANCE
+    )
+    bandwidth = validate_bandwidth(
+        coalesce_option(args.bandwidth, config, "bandwidth") or DEFAULT_BANDWIDTH
+    )
+    n_eff_target = validate_n_eff_target(
+        coalesce_option(args.n_eff_target, config, "n_eff_target")
+    )
+    n_eff_min = (
+        validate_n_eff_min(coalesce_option(args.n_eff_min, config, "n_eff_min"))
+        or DEFAULT_N_EFF_MIN
+    )
     predictions_path = coalesce_option(
         args.predictions, config, "predictions", required=True
     )
@@ -272,6 +344,18 @@ def _run_compute(args: argparse.Namespace) -> None:
             "generator_predictions",
         ),
     )
+    if cp_type == "kernel":
+        if calibration_fraction is None:
+            raise ValueError(
+                "cp_type 'kernel' requires a calibration_fraction. Without a split every "
+                "test scenario would sit at distance zero from itself in the calibration "
+                "bank, which invalidates the coverage guarantee.",
+            )
+        predictions = _attach_scenario_embeddings(
+            predictions,
+            coalesce_option(args.embeddings, config, "embeddings", required=True),
+            pooling=embedding_pooling,
+        )
     ground_truth = load_ground_truth(
         coalesce_option(args.pf_node, config, "pf_node", required=True),
         coalesce_option(args.pf_edge, config, "pf_edge", required=True),
@@ -284,7 +368,7 @@ def _run_compute(args: argparse.Namespace) -> None:
             float(calibration_fraction),
             random_seed,
         )
-    calibrators: dict[str, NaiveIntervalCalibrator] = {}
+    calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator] = {}
     for target_kind, target_variables in variable_groups.items():
         working_predictions = predictions
         working_ground_truth = ground_truth
@@ -327,17 +411,37 @@ def _run_compute(args: argparse.Namespace) -> None:
             pred_n_bins=pred_n_bins,
             pred_bin_edges=pred_bin_edges,
         )
-        calibrator = NaiveIntervalCalibrator.fit(
-            calibration_predictions,
-            calibration_ground_truth,
-            alpha=float(coalesce_option(args.alpha, config, "alpha", required=True)),
-            channel_names=target_variables,
-            strat=strat,
-            system_load_n_bins=system_load_n_bins,
-            system_load_bin_edges=system_load_bin_edges,
-            pred_n_bins=pred_n_bins,
-            pred_bin_edges=pred_bin_edges,
-        )
+        alpha = float(coalesce_option(args.alpha, config, "alpha", required=True))
+        if cp_type == "kernel":
+            assert calibration_predictions.scenario_embeddings is not None
+            calibrator = KernelIntervalCalibrator.fit(
+                calibration_predictions,
+                calibration_ground_truth,
+                alpha=alpha,
+                channel_names=target_variables,
+                strat=strat,
+                embeddings=calibration_predictions.scenario_embeddings,
+                embedding_pooling=embedding_pooling,
+                k_nn=k_nn,
+                n_eff_min=n_eff_min,
+                bandwidth=bandwidth,
+                n_eff_target=n_eff_target,
+                distance=distance,
+                system_load_n_bins=system_load_n_bins,
+                system_load_bin_edges=system_load_bin_edges,
+            )
+        else:
+            calibrator = NaiveIntervalCalibrator.fit(
+                calibration_predictions,
+                calibration_ground_truth,
+                alpha=alpha,
+                channel_names=target_variables,
+                strat=strat,
+                system_load_n_bins=system_load_n_bins,
+                system_load_bin_edges=system_load_bin_edges,
+                pred_n_bins=pred_n_bins,
+                pred_bin_edges=pred_bin_edges,
+            )
         if split is not None and calibration_fraction is not None:
             _apply_split_metadata(
                 calibrator, float(calibration_fraction), random_seed, split
@@ -380,6 +484,22 @@ def _run_calibrate(args: argparse.Namespace) -> None:
             "generator_predictions",
         ),
     )
+    kernel_calibrators = [
+        calibrator
+        for calibrator in calibrators.values()
+        if isinstance(calibrator, KernelIntervalCalibrator)
+    ]
+    if kernel_calibrators:
+        poolings = {calibrator.embedding_pooling for calibrator in kernel_calibrators}
+        if len(poolings) != 1:
+            raise ValueError(
+                f"Kernel artifact mixes embedding_pooling strategies: {sorted(poolings)}."
+            )
+        predictions = _attach_scenario_embeddings(
+            predictions,
+            coalesce_option(args.embeddings, config, "embeddings", required=True),
+            pooling=next(iter(poolings)),
+        )
     original_frame = (
         None
         if not any(
@@ -477,6 +597,11 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                 validate="one_to_one",
             )
 
+        output_frame = _merge_kernel_diagnostics(
+            output_frame,
+            calibrator,
+            application_predictions.scenario_ids,
+        )
         output_path = _resolve_output_path(
             args,
             config,
@@ -627,7 +752,7 @@ def _partition_variables(
 
 
 def _apply_split_metadata(
-    calibrator: NaiveIntervalCalibrator,
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
     calibration_fraction: float,
     random_seed: int | None,
     split: dict[str, np.ndarray],
@@ -640,7 +765,7 @@ def _apply_split_metadata(
 
 
 def _resolve_application_scenario_ids(
-    calibrators: dict[str, NaiveIntervalCalibrator],
+    calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
     scenario_ids: np.ndarray,
 ) -> np.ndarray | None:
     application_ids: np.ndarray | None = None
@@ -1431,6 +1556,7 @@ def _build_bus_channel_set(
         scenario_columns={
             name: values.copy() for name, values in (scenario_columns or {}).items()
         },
+        scenario_embeddings=predictions.scenario_embeddings,
     )
 
 
@@ -1545,6 +1671,7 @@ def _build_line_loading_sets(
             scenario_columns={
                 name: values.copy() for name, values in (scenario_columns or {}).items()
             },
+            scenario_embeddings=predictions.scenario_embeddings,
         ),
         ChannelSet(
             scenario_ids=ground_truth.scenario_ids.copy(),
@@ -1556,6 +1683,7 @@ def _build_line_loading_sets(
             scenario_columns={
                 name: values.copy() for name, values in (scenario_columns or {}).items()
             },
+            scenario_embeddings=predictions.scenario_embeddings,
         ),
     )
 
@@ -1653,6 +1781,7 @@ def _with_scenario_columns(
         scenario_columns={
             name: values.copy() for name, values in scenario_columns.items()
         },
+        scenario_embeddings=channel_set.scenario_embeddings,
     )
 
 
@@ -1800,7 +1929,55 @@ def _subset_channel_set(
             name: values[scenario_mask].copy()
             for name, values in channel_set.scenario_columns.items()
         },
+        scenario_embeddings=None
+        if channel_set.scenario_embeddings is None
+        else channel_set.scenario_embeddings[scenario_mask].copy(),
     )
+
+
+def _merge_kernel_diagnostics(
+    frame: pd.DataFrame,
+    calibrator,
+    scenario_ids: np.ndarray,
+) -> pd.DataFrame:
+    """Attach per-scenario KCP diagnostics so localization can be audited.
+
+    `n_eff` near the calibration-set size means the kernel is not localizing;
+    `kernel_fallback` marks scenarios that reverted to the stratum-wide
+    (SCP) quantile.
+    """
+
+    if not isinstance(calibrator, KernelIntervalCalibrator):
+        return frame
+    diagnostics = calibrator.diagnostics
+    if not diagnostics:
+        return frame
+    diagnostic_frame = pd.DataFrame(
+        {
+            "scenario": np.asarray(scenario_ids, dtype=np.int64),
+            "kcp_n_eff": diagnostics["n_eff"],
+            "kcp_bandwidth_sq": diagnostics["kernel_bandwidth_sq"],
+            "kcp_fallback": diagnostics["kernel_fallback"],
+        }
+    )
+    return frame.merge(diagnostic_frame, on="scenario", how="left")
+
+
+def _attach_scenario_embeddings(
+    predictions,
+    embeddings_path: str,
+    *,
+    pooling: str,
+):
+    """Load, pool, and align scenario embeddings onto a prediction set."""
+
+    embedding_set = load_scenario_embeddings(
+        embeddings_path,
+        pooling=pooling,
+        scenario_ids=predictions.scenario_ids,
+    )
+    predictions.scenario_embeddings = embedding_set.align_to(predictions.scenario_ids)
+    return predictions
 
 
 def _split_calibration_scenarios(
@@ -1840,7 +2017,7 @@ def _split_calibration_scenarios(
 
 
 def _should_use_application_subset(
-    calibrator: NaiveIntervalCalibrator,
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
     scenario_ids: np.ndarray,
 ) -> bool:
     if (
@@ -1896,6 +2073,9 @@ def _subset_prediction_set(
             for name, values in predictions.bus_type_masks.items()
         },
         generator_predictions=generator_predictions,
+        scenario_embeddings=None
+        if predictions.scenario_embeddings is None
+        else predictions.scenario_embeddings[scenario_mask].copy(),
     )
 
 

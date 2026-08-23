@@ -1,5 +1,4 @@
-data_out_pf/
-data_out_opf/
+data_out*
 logs/
 site/
 .julia/
@@ -31,7 +30,4 @@ checklist.md
 conformal_layer_int*
 notes*
 
-# Keep one generic example config under version control, but ignore local run configs.
-config_files/*
-!config_files/
-!config_files/trust_config.yaml
+config_files

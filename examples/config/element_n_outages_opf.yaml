@@ -1,0 +1,56 @@
+# Element CP on OPF artifacts
+#
+# OPF solutions are usually feasible by construction, so screening against the solver's
+# own limits finds few true violations. Tighter operational margins turn the screen
+# into a near-limit risk alarm, which is the informative reading for OPF.
+#
+# Run:
+#   gridfm_trustlayer compute   --config examples/config/element_n_outages_opf.yaml
+#   gridfm_trustlayer calibrate --config examples/config/element_n_outages_opf.yaml
+#   gridfm_trustlayer screen    --config examples/config/element_n_outages_opf.yaml
+#
+# Replace every `path/to/...` with your own artifacts before running.
+
+version: 1
+
+task_name: OptimalPowerFlow
+cp_type: element
+strat: n_outages
+alpha: 0.1
+
+calibration_fraction: 0.3
+random_seed: 7
+
+variables:
+  - Vm
+  - Va
+  - line_loading
+
+# Deliberately tighter than the physical limits; see docs/configuration.md.
+screen_bounds:
+  Vm:
+    lower: 0.97
+    upper: 1.03
+  line_loading:
+    upper: 0.95
+
+inputs:
+  predictions: path/to/predictions.parquet
+  # OPF exports carry a separate generator artifact alongside the bus parquet.
+  generator_predictions: path/to/predictions_gen.parquet
+  pf_node: path/to/raw/bus_data.parquet
+  pf_edge: path/to/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/optimalpowerflow/n_outages_opf.trustlayer
+  calibrated_predictions_volt: trustlayer_outputs/optimalpowerflow/n_outages_opf_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/optimalpowerflow/n_outages_opf_line_loading_with_intervals.parquet
+  screen_dir: trustlayer_outputs/optimalpowerflow/n_outages_opf_screen
+
+# `screen` defaults to the shared `variables` list, but Va has no natural
+# operating bound. Restrict screening to the variables that do.
+commands:
+  screen:
+    variables:
+      - Vm
+      - line_loading

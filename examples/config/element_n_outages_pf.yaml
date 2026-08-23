@@ -1,0 +1,53 @@
+# Element CP stratified by contingency severity
+#
+# The canonical N-k screening setup: separate residual quantiles per number of
+# simultaneous outages, so bounds widen with severity instead of averaging over it.
+# `n_outages` counts both out-of-service branches and out-of-service generators.
+#
+# Run:
+#   gridfm_trustlayer compute   --config examples/config/element_n_outages_pf.yaml
+#   gridfm_trustlayer calibrate --config examples/config/element_n_outages_pf.yaml
+#   gridfm_trustlayer screen    --config examples/config/element_n_outages_pf.yaml
+#
+# Replace every `path/to/...` with your own artifacts before running.
+
+version: 1
+
+task_name: PowerFlow
+cp_type: element
+strat: n_outages
+alpha: 0.1
+
+calibration_fraction: 0.3
+random_seed: 7
+
+variables:
+  - Vm
+  - Va
+  - line_loading
+
+screen_bounds:
+  Vm:
+    lower: 0.95
+    upper: 1.05
+  line_loading:
+    upper: 1.0
+
+inputs:
+  predictions: path/to/predictions.parquet
+  pf_node: path/to/raw/bus_data.parquet
+  pf_edge: path/to/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/element/n_outages_pf.trustlayer
+  calibrated_predictions_volt: trustlayer_outputs/element/n_outages_pf_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/element/n_outages_pf_line_loading_with_intervals.parquet
+  screen_dir: trustlayer_outputs/element/n_outages_pf_screen
+
+# `screen` defaults to the shared `variables` list, but Va has no natural
+# operating bound. Restrict screening to the variables that do.
+commands:
+  screen:
+    variables:
+      - Vm
+      - line_loading

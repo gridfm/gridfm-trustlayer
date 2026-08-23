@@ -1,0 +1,49 @@
+# Example trustlayer configs
+
+Each file is a complete, runnable config that demonstrates one combination of options.
+They all point at `path/to/...` placeholders — substitute your own artifacts, then:
+
+```bash
+gridfm_trustlayer compute   --config examples/config/<file>.yaml
+gridfm_trustlayer calibrate --config examples/config/<file>.yaml
+gridfm_trustlayer screen    --config examples/config/<file>.yaml
+```
+
+## What each one shows
+
+| Config | `cp_type` | `strat` | Demonstrates |
+| --- | --- | --- | --- |
+| `element_global_pf.yaml` | element | none | Smallest useful run. One global quantile per bus, single target family, no split. Start here. |
+| `element_holdout_pf.yaml` | element | none | Adds `calibration_fraction`, so coverage is measured on scenarios the quantiles never saw. |
+| `element_n_outages_pf.yaml` | element | `n_outages` | The canonical N-k screening setup: bounds widen with contingency severity. |
+| `element_outage_type_pf.yaml` | element | `outage_type` | Groups by outage regime (`none`, `branch_only`, `gen_only`, `mixed`) rather than count. |
+| `element_system_load_bin_pf.yaml` | element | `system_load_bin` | Percentile bins of total active demand, with `system_load_n_bins`. |
+| `element_pred_bins_pf.yaml` | element | `pred_bins` | Bins individual predictions rather than whole scenarios, with `pred_n_bins`. |
+| `kernel_knn_pf.yaml` | kernel | `n_outages` | Kernel-weighted CP with the paper's bandwidth rule (`bandwidth: knn`). |
+| `kernel_n_eff_pf.yaml` | kernel | `n_outages` | Kernel-weighted CP with a portable bandwidth (`bandwidth: n_eff`). |
+| `kernel_cosine_pf.yaml` | kernel | `n_outages` | Kernel-weighted CP with `distance: cosine`. |
+| `element_n_outages_opf.yaml` | element | `n_outages` | OPF artifacts: generator predictions plus tighter near-limit screening bounds. |
+
+## Choosing a starting point
+
+- **New to the tool** — `element_global_pf.yaml`, then `element_holdout_pf.yaml`.
+- **N-k contingency screening** — `element_n_outages_pf.yaml`, then `kernel_knn_pf.yaml` to compare.
+- **Kernel calibration on a new network or embedding width** — `kernel_n_eff_pf.yaml`, since
+  `n_eff_target` transfers where a fixed `k_nn` does not.
+- **OPF** — `element_n_outages_opf.yaml`.
+
+## Two conventions worth knowing
+
+**`commands.screen.variables`.** Every example restricts screening to the variables that have
+operating bounds. `screen` otherwise defaults to the shared `variables` list, which includes `Va`,
+and voltage angle has no natural limit to screen against.
+
+**Output keys depend on how many target families you request.** A run covering one family
+(voltages only, or `line_loading` only) uses `outputs.calibrated_predictions`. A mixed run must use
+`outputs.calibrated_predictions_volt` and `outputs.calibrated_predictions_line`, because bus-level
+and branch-level results live on different entity axes and cannot share a parquet.
+
+## Reference
+
+Full key-by-key documentation is in [`docs/configuration.md`](../../docs/configuration.md);
+the CLI flags that override them are in [`docs/cli.md`](../../docs/cli.md).

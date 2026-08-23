@@ -25,6 +25,9 @@ class ChannelSet:
     valid_masks: dict[str, np.ndarray] = field(default_factory=dict)
     entity_columns: dict[str, np.ndarray] = field(default_factory=dict)
     scenario_columns: dict[str, np.ndarray] = field(default_factory=dict)
+    # Scenario-level representations z(x) used by kernel-weighted calibration.
+    # None for every cp_type other than 'kernel'.
+    scenario_embeddings: np.ndarray | None = None
 
     @property
     def bus_ids(self) -> np.ndarray:
