@@ -38,7 +38,7 @@ def main() -> int:
     interval_columns = [
         column
         for column in frame.columns
-        if column.endswith("_pi_lower") or column.endswith("_pi_upper")
+        if column.endswith(("_pi_lower", "_pi_upper"))
     ]
     if interval_columns:
         print(f"interval_columns: {interval_columns}")
