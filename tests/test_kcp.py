@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -16,7 +18,6 @@ from gridfm_trustlayer.io.embeddings import (
     load_scenario_embeddings,
     validate_pooling,
 )
-
 
 N_ELEMENTS = 4
 EMBEDDING_DIM = 3
@@ -58,7 +59,9 @@ def _make_sets(n: int = 400, seed: int = 0):
     )
 
 
-def _fit(alpha: float = 0.1, **kwargs) -> tuple[KernelIntervalCalibrator, ChannelSet]:
+def _fit(
+    alpha: float = 0.1, **kwargs: Any
+) -> tuple[KernelIntervalCalibrator, ChannelSet]:
     predictions, ground_truth, embeddings = _make_sets()
     calibrator = KernelIntervalCalibrator.fit(
         predictions,
@@ -265,7 +268,7 @@ def test_n_eff_bandwidth_hits_its_target() -> None:
 def test_n_eff_bandwidth_is_invariant_to_embedding_width() -> None:
     """The point of `bandwidth: n_eff`: k_nn drifts with dimension, n_eff does not."""
 
-    spreads = {}
+    spreads: dict[str, list[float]] = {}
     for dim in (2, 64):
         rng = np.random.default_rng(0)
         n = 400
@@ -276,10 +279,11 @@ def test_n_eff_bandwidth_is_invariant_to_embedding_width() -> None:
         targets = preds + (rng.normal(size=(n, N_ELEMENTS)) * scale).astype(np.float32)
         prediction_set = _channel_set(preds, embeddings, strata)
         truth_set = _channel_set(targets, embeddings, strata)
-        for mode, kwargs in (
+        modes: list[tuple[str, dict[str, Any]]] = [
             ("knn", {"bandwidth": "knn", "k_nn": 20}),
             ("n_eff", {"bandwidth": "n_eff", "n_eff_target": 100.0}),
-        ):
+        ]
+        for mode, kwargs in modes:
             calibrator = KernelIntervalCalibrator.fit(
                 prediction_set,
                 truth_set,
@@ -336,6 +340,7 @@ def test_bandwidth_survives_artifact_roundtrip(tmp_path) -> None:
     save_interval_artifacts({"volt": calibrator}, str(artifact_path))
     loaded = load_interval_artifacts(str(artifact_path))["volt"]
 
+    assert isinstance(loaded, KernelIntervalCalibrator)
     assert loaded.bandwidth == "n_eff"
     assert loaded.n_eff_target == 150.0
     actual = loaded.predict_intervals(predictions)["Vm"]
@@ -425,6 +430,7 @@ def test_distance_survives_artifact_roundtrip(tmp_path) -> None:
     save_interval_artifacts({"volt": calibrator}, str(artifact_path))
     loaded = load_interval_artifacts(str(artifact_path))["volt"]
 
+    assert isinstance(loaded, KernelIntervalCalibrator)
     assert loaded.distance == "cosine"
     actual = loaded.predict_intervals(predictions)["Vm"]
     np.testing.assert_allclose(actual[0], expected[0])

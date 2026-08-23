@@ -16,11 +16,12 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import Any, cast
+
 import numpy as np
 
 from gridfm_trustlayer.conformal.calibrator import NaiveIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import KernelIntervalCalibrator
-
 
 BUNDLE_VERSION = "trustlayer_interval_bundle_v1"
 KERNEL_BUNDLE_VERSION = "trustlayer_kernel_bundle_v1"
@@ -133,7 +134,9 @@ def _save_kernel_artifacts(
         json.dumps(meta, sort_keys=True).encode("utf-8"), dtype=np.uint8
     )
     with path.open("wb") as handle:
-        np.savez_compressed(handle, **arrays)
+        # The numpy stub types the second positional as `allow_pickle`, so the
+        # **kwargs array payload has to be passed through explicitly typed.
+        np.savez_compressed(handle, **cast(dict[str, Any], arrays))
 
 
 def _load_kernel_artifacts(raw: bytes) -> dict[str, IntervalCalibrator]:

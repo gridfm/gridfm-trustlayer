@@ -16,16 +16,16 @@ from gridfm_trustlayer.cli.config import (
     load_cli_config,
     normalize_variables,
     resolve_command_config,
+    validate_bandwidth,
     validate_command_config,
     validate_cp_type,
-    validate_bandwidth,
     validate_distance,
     validate_k_nn,
     validate_n_eff_min,
     validate_n_eff_target,
     validate_pred_n_bins,
-    validate_system_load_n_bins,
     validate_strat,
+    validate_system_load_n_bins,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import (
@@ -40,16 +40,15 @@ from gridfm_trustlayer.io import (
     load_ground_truth,
     load_predictions,
 )
+from gridfm_trustlayer.io.artifact import (
+    load_interval_artifacts,
+    save_interval_artifacts,
+)
 from gridfm_trustlayer.io.embeddings import (
     DEFAULT_POOLING,
     load_scenario_embeddings,
     validate_pooling,
 )
-from gridfm_trustlayer.io.artifact import (
-    load_interval_artifacts,
-    save_interval_artifacts,
-)
-
 
 SCREEN_BOUND_TOLERANCE = 1e-6
 BASE_ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type", "system_load_bin")
@@ -412,6 +411,7 @@ def _run_compute(args: argparse.Namespace) -> None:
             pred_bin_edges=pred_bin_edges,
         )
         alpha = float(coalesce_option(args.alpha, config, "alpha", required=True))
+        calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator
         if cp_type == "kernel":
             assert calibration_predictions.scenario_embeddings is not None
             calibrator = KernelIntervalCalibrator.fit(
@@ -1269,7 +1269,7 @@ def _build_grouped_screen_summary(
             "n_entities": int(group["bus"].nunique())
             if "bus" in group.columns
             else int(group["branch"].nunique()),
-            "n_samples": int(len(group)),
+            "n_samples": len(group),
         }
         if len(group_columns) > 1:
             record[group_value_column] = group_key[1]
@@ -3249,7 +3249,7 @@ def _format_stratum_label(stratification: str, stratum_value: object) -> str:
         if stratification.startswith("pred_bins_"):
             return f"{stratification}={_format_system_load_bin_value(normalized_value)}"
         return f"{stratification}={normalized_value}"
-    return f"{stratification}={str(stratum_value)}"
+    return f"{stratification}={stratum_value!s}"
 
 
 def _format_outage_type_value(value: int) -> str:
@@ -3270,8 +3270,8 @@ def _format_system_load_bin_value(
 ) -> str:
     if total_bins is None or edges is None:
         return f"bin_{int(value)}"
-    lower_pct = int(round((100.0 * int(value)) / total_bins))
-    upper_pct = int(round((100.0 * (int(value) + 1)) / total_bins))
+    lower_pct = round((100.0 * int(value)) / total_bins)
+    upper_pct = round((100.0 * (int(value) + 1)) / total_bins)
     edges_array = np.asarray(edges, dtype=np.float32)
     label = f"p{lower_pct:02d}-p{upper_pct:02d}"
     if edges_array.size == 0:
@@ -3404,7 +3404,7 @@ def _style_axes(ax: plt.Axes, axis: Literal["both", "x", "y"] = "both") -> None:
 
 
 def _place_legend(ax: plt.Axes, *, outside: bool = False) -> None:
-    handles, labels = ax.get_legend_handles_labels()
+    handles, _labels = ax.get_legend_handles_labels()
     if not handles:
         return
     if outside:

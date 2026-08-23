@@ -21,9 +21,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-graphkit = ["gridfm-graphkit>=0.0.6", "gridfm-datakit>=1.0.2"]
+# gridfm-datakit imports `run_julia` from juliapkg, which juliapkg 0.1.26
+# removed. Cap it until datakit adopts the replacement API.
+graphkit = ["gridfm-graphkit>=0.0.6", "gridfm-datakit>=1.0.2", "juliapkg<0.1.26"]
 dev = ["ruff", "mypy", "pre-commit", "build", "mkdocs", "mkdocs-material"]
-test = ["pytest", "pytest-cov", "gridfm-datakit>=1.0.2"]
+test = ["pytest", "pytest-cov", "gridfm-datakit>=1.0.2", "juliapkg<0.1.26"]
 
 [project.scripts]
 gridfm_trustlayer = "gridfm_trustlayer.cli:main"
@@ -38,7 +40,20 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py310"
 
+[tool.ruff.lint]
+ignore = [
+  # TRY004 assumes an isinstance check guards against a caller bug, so it wants
+  # TypeError. Every occurrence here validates the shape of untrusted file
+  # content (a YAML config, a JSON artifact) and reports it to the user, where
+  # ValueError is the correct semantics and the documented behaviour.
+  "TRY004",
+]
+
 [tool.mypy]
-python_version = "3.10"
+# numpy's stubs use PEP 695 `type` statements, which mypy refuses to parse when
+# targeting < 3.12 -- it aborts on the stub before checking any project code.
+# Type-check against 3.12; the >=3.10 floor stays enforced by ruff's
+# target-version and by the 3.10/3.11/3.12 pytest matrix in CI.
+python_version = "3.12"
 files = ["gridfm_trustlayer", "tests"]
 warn_unused_configs = true

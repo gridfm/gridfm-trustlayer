@@ -15,9 +15,10 @@ an explicit fallback rather than silently returning an over-optimistic bound.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Iterable, cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -26,8 +27,8 @@ from gridfm_trustlayer.conformal.calibrator import (
     _combine_valid_masks,
     _get_entity_ids,
     _get_entity_name,
-    _get_prediction_channel,
     _get_ground_truth_channel,
+    _get_prediction_channel,
     _get_scenario_column,
     _get_valid_mask,
     _masked_column_quantile,
@@ -36,7 +37,6 @@ from gridfm_trustlayer.conformal.calibrator import (
 )
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 from gridfm_trustlayer.io.predictions import PredictionSet
-
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 INT32_DTYPE = np.dtype(np.int32)
@@ -159,7 +159,7 @@ class KernelIntervalCalibrator:
         distance: str = DEFAULT_DISTANCE,
         system_load_n_bins: int | None = None,
         system_load_bin_edges: np.ndarray | None = None,
-    ) -> "KernelIntervalCalibrator":
+    ) -> KernelIntervalCalibrator:
         """Build the calibration bank used for kernel-weighted interval estimation."""
 
         _validate_alpha(alpha)
@@ -615,7 +615,7 @@ class KernelIntervalCalibrator:
         cls,
         data: dict[str, object],
         arrays: dict[str, np.ndarray],
-    ) -> "KernelIntervalCalibrator":
+    ) -> KernelIntervalCalibrator:
         """Rebuild a calibrator from its metadata mapping and array payload."""
 
         version = data.get("version")
@@ -682,7 +682,7 @@ class KernelIntervalCalibrator:
             pred_n_bins=_optional_int(data.get("pred_n_bins")),
             pred_bin_edges={
                 str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
-                for key, values in (data.get("pred_bin_edges") or {}).items()
+                for key, values in cast(dict, data.get("pred_bin_edges") or {}).items()
             },
             calibration_fraction=_optional_float(data.get("calibration_fraction")),
             random_seed=_optional_int(data.get("random_seed")),

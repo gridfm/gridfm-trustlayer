@@ -13,7 +13,6 @@ from gridfm_trustlayer.conformal.kernel import (
 )
 from gridfm_trustlayer.io.embeddings import validate_pooling
 
-
 _ALLOWED_TOP_LEVEL_KEYS = {
     "version",
     "task_name",

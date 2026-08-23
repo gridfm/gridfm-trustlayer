@@ -9,12 +9,11 @@ without touching the calibration code.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
-
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 
@@ -36,7 +35,7 @@ class ScenarioEmbeddingSet:
 
         return int(self.embeddings.shape[1])
 
-    def subset(self, scenario_ids: Iterable[int]) -> "ScenarioEmbeddingSet":
+    def subset(self, scenario_ids: Iterable[int]) -> ScenarioEmbeddingSet:
         """Return the rows matching `scenario_ids`, preserving stored order."""
 
         wanted = np.asarray(list(scenario_ids), dtype=np.int64)

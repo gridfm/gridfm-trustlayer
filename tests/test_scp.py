@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
-from gridfm_trustlayer.io.predictions import PredictionSet
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
+from gridfm_trustlayer.io.predictions import PredictionSet
 
 
 def test_naive_interval_fit_and_predict() -> None:

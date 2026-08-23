@@ -10,7 +10,6 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.io.task_adapters import BusPredictionBundle, resolve_task_adapter
 
-
 FLOAT32_DTYPE = np.dtype(np.float32)
 
 

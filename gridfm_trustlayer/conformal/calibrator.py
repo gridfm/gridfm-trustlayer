@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable, cast
+from typing import Any, cast
 
 import numpy as np
 
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 from gridfm_trustlayer.io.predictions import PredictionSet
-
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 
@@ -83,7 +83,7 @@ class NaiveIntervalCalibrator:
         system_load_bin_edges: np.ndarray | None = None,
         pred_n_bins: int | None = None,
         pred_bin_edges: dict[str, np.ndarray] | None = None,
-    ) -> "NaiveIntervalCalibrator":
+    ) -> NaiveIntervalCalibrator:
         """Fit naive residual-quantile intervals from aligned predictions and targets."""
 
         _validate_alpha(alpha)
@@ -366,7 +366,7 @@ class NaiveIntervalCalibrator:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> "NaiveIntervalCalibrator":
+    def from_dict(cls, data: dict[str, object]) -> NaiveIntervalCalibrator:
         """Deserialize a calibrator previously produced by :meth:`to_dict`."""
 
         version = data.get("version")

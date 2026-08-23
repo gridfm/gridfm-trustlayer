@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import textwrap
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 import pytest
 
 from gridfm_trustlayer.cli import main
-from gridfm_trustlayer.cli.main import _format_figure_stratum_label
 from gridfm_trustlayer.cli.config import load_cli_config, normalize_variables
+from gridfm_trustlayer.cli.main import _format_figure_stratum_label
 from gridfm_trustlayer.io import (
     compute_line_loading,
     load_ground_truth,
@@ -1220,16 +1221,15 @@ def test_cli_requires_config_flag() -> None:
 def test_load_cli_config_rejects_unknown_top_level_keys(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
     config_path.write_text(
-        "\n".join(
-            [
-                "version: 1",
-                "task_name: StateEstimation",
-                "cp_type: element",
-                "alpha: 0.2",
-                "variables:",
-                "  - Vm",
-                "mystery_key: value",
-            ]
+        textwrap.dedent(
+            """\
+            version: 1
+            task_name: StateEstimation
+            cp_type: element
+            alpha: 0.2
+            variables:
+              - Vm
+            mystery_key: value"""
         ),
         encoding="utf-8",
     )

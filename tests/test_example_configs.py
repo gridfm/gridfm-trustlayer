@@ -13,7 +13,6 @@ from gridfm_trustlayer.cli.config import (
     validate_command_config,
 )
 
-
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples" / "config"
 EXAMPLE_CONFIGS = sorted(EXAMPLES_DIR.glob("*.yaml"))
 

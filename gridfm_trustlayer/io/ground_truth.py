@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
-
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 OUTAGE_TYPE_NONE = np.int32(0)
