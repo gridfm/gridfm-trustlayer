@@ -220,6 +220,8 @@ class KernelIntervalCalibrator:
             embeddings, embedding_mean, embedding_scale, distance
         )
 
+        strata: np.ndarray
+        stratification_values: np.ndarray
         if strat is None:
             strata = np.zeros(len(predictions.scenario_ids), dtype=np.int64)
             stratification_values = np.zeros(1, dtype=np.int64)
@@ -326,6 +328,7 @@ class KernelIntervalCalibrator:
         )
 
         n_test = standardized_test.shape[0]
+        test_strata: np.ndarray
         if self.strat is None:
             test_strata = np.zeros(n_test, dtype=np.int64)
         else:
