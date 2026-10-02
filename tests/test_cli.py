@@ -17,6 +17,7 @@ from gridfm_trustlayer.io import (
     load_ground_truth,
     load_predictions,
 )
+from tests.conformal_reference import conformal_quantile
 
 
 def test_format_figure_stratum_label_strips_prefix() -> None:
@@ -46,8 +47,12 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
-    _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
+    _write_cli_config(
+        config_path, predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+    )
 
     assert (
         main(
@@ -62,7 +67,7 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
                 "--pf-edge",
                 str(pf_edge_path),
                 "--alpha",
-                "0.2",
+                "0.5",
                 "--output",
                 str(artifact_path),
                 "--task-name",
@@ -83,7 +88,7 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
                 "--config",
                 str(config_path),
                 "--predictions",
-                str(predictions_path),
+                str(test_predictions_path),
                 "--artifact",
                 str(artifact_path),
                 "--output",
@@ -103,21 +108,27 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
         "Va_pi_upper",
     }.issubset(output_frame.columns)
 
-    original_frame = pd.read_parquet(predictions_path).sort_values(["scenario", "bus"])
+    calibration_frame = pd.read_parquet(predictions_path).sort_values(
+        ["scenario", "bus"]
+    )
+    test_frame = pd.read_parquet(test_predictions_path).sort_values(["scenario", "bus"])
     vm_residuals = (
         pd.read_parquet(pf_node_path).sort_values(["scenario", "bus"])["Vm"].to_numpy()
-        - original_frame["Vm_pred"].to_numpy()
+        - calibration_frame["Vm_pred"].to_numpy()
     ).reshape(4, 2)
-    expected_vm_lower = np.quantile(vm_residuals, 0.1, axis=0).astype(np.float32)
-    expected_vm_upper = np.quantile(vm_residuals, 0.9, axis=0).astype(np.float32)
-    expected_rows = original_frame["Vm_pred"].to_numpy().reshape(4, 2)
+    # Four calibration scenarios at alpha = 0.5: finite split-conformal ranks.
+    expected_vm_lower = conformal_quantile(vm_residuals, 0.25)
+    expected_vm_upper = conformal_quantile(vm_residuals, 0.75)
+    expected_rows = test_frame["Vm_pred"].to_numpy().reshape(4, 2)
     np.testing.assert_allclose(
         output_frame["Vm_pi_lower"].to_numpy().reshape(4, 2),
         expected_rows + expected_vm_lower[None, :],
+        rtol=1e-6,  # float32 parquet output against a float64 expectation
     )
     np.testing.assert_allclose(
         output_frame["Vm_pi_upper"].to_numpy().reshape(4, 2),
         expected_rows + expected_vm_upper[None, :],
+        rtol=1e-6,  # float32 parquet output against a float64 expectation
     )
     analysis_path = tmp_path / "trust_analysis_volt.csv"
     summary_path = tmp_path / "trust_summary_volt.csv"
@@ -181,7 +192,7 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
     }.issubset(reliability_frame.columns)
     np.testing.assert_allclose(
         reliability_frame["target_coverage"].to_numpy(),
-        np.full(len(reliability_frame), 0.8),
+        np.full(len(reliability_frame), 0.5),
     )
     assert figures_dir.joinpath("vm_width_summary.png").exists()
     assert figures_dir.joinpath("vm_coverage_summary.png").exists()
@@ -200,8 +211,12 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
-    _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
+    _write_cli_config(
+        config_path, predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+    )
     monkeypatch.chdir(tmp_path)
 
     assert (
@@ -236,7 +251,7 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
                 "--config",
                 str(config_path),
                 "--predictions",
-                str(predictions_path),
+                str(test_predictions_path),
                 "--artifact",
                 str(artifact_path),
                 "--task-name",
@@ -246,7 +261,7 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
         == 0
     )
 
-    output_path = output_dir / "predictions_vm_va_with_intervals.parquet"
+    output_path = output_dir / "test_predictions_vm_va_with_intervals.parquet"
     assert output_path.exists()
     assert (output_dir / "trust_analysis_volt.csv").exists()
     assert (output_dir / "trust_summary_volt.csv").exists()
@@ -265,8 +280,12 @@ def test_calibrate_no_figures_skips_figure_outputs(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
-    _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
+    _write_cli_config(
+        config_path, predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+    )
 
     assert (
         main(
@@ -312,6 +331,8 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     config_path.write_text(
         "\n".join(
@@ -323,10 +344,9 @@ def test_config_driven_compute_and_calibrate(tmp_path) -> None:
                 "variables:",
                 "  - Vm",
                 "  - Va",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
                 "outputs:",
                 f"  artifact: {artifact_path}",
                 f"  calibrated_predictions: {output_path}",
@@ -356,6 +376,8 @@ def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     _write_generator_status_fixture(
         tmp_path / "gen_data.parquet",
@@ -364,8 +386,10 @@ def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
     _write_cli_config(
         config_path,
         predictions_path,
+        test_predictions_path,
         pf_node_path,
         pf_edge_path,
+        alpha=0.9,
         strat="n_outages",
     )
 
@@ -395,10 +419,10 @@ def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
     output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
     outage_one = output_frame[output_frame["scenario"].eq(3)].reset_index(drop=True)
     outage_zero = output_frame[output_frame["scenario"].eq(0)].reset_index(drop=True)
-    assert not np.allclose(
-        outage_one["Vm_pi_upper"].to_numpy(),
-        outage_zero["Vm_pi_upper"].to_numpy(),
-    )
+    # N-0 holds three calibration scenarios (finite bounds at alpha = 0.9); N-1
+    # holds one, which cannot support a finite bound, so it must not borrow N-0's.
+    assert np.all(np.isfinite(outage_zero["Vm_pi_upper"].to_numpy()))
+    assert np.all(np.isposinf(outage_one["Vm_pi_upper"].to_numpy()))
     analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
     summary_frame = pd.read_csv(output_path.parent / "trust_summary_volt.csv")
     assert {
@@ -445,6 +469,8 @@ def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> Non
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     branch_frame = pd.read_parquet(pf_edge_path)
     branch_frame["br_status"] = [1.0, 0.0, 1.0, 0.0]
@@ -456,6 +482,7 @@ def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> Non
     _write_cli_config(
         config_path,
         predictions_path,
+        test_predictions_path,
         pf_node_path,
         pf_edge_path,
         strat="outage_type",
@@ -487,10 +514,10 @@ def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> Non
     output_frame = pd.read_parquet(output_path).sort_values(["scenario", "bus"])
     mixed = output_frame[output_frame["scenario"].eq(3)].reset_index(drop=True)
     no_outage = output_frame[output_frame["scenario"].eq(0)].reset_index(drop=True)
-    assert not np.allclose(
-        mixed["Vm_pi_upper"].to_numpy(),
-        no_outage["Vm_pi_upper"].to_numpy(),
-    )
+    # Each outage type holds a single calibration scenario, so no finite bound
+    # exists; the pipeline must still run end to end and report it as infinite.
+    assert np.all(np.isposinf(mixed["Vm_pi_upper"].to_numpy()))
+    assert np.all(np.isposinf(no_outage["Vm_pi_upper"].to_numpy()))
     assert {"outage_type", "outage_type_label"}.issubset(output_frame.columns)
     assert set(output_frame["outage_type_label"].unique().tolist()) == {
         "none",
@@ -527,12 +554,16 @@ def test_compute_then_calibrate_with_system_load_bin_stratification(tmp_path) ->
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     _write_cli_config(
         config_path,
         predictions_path,
+        test_predictions_path,
         pf_node_path,
         pf_edge_path,
+        alpha=0.9,
         strat="system_load_bin",
     )
     config_path.write_text(
@@ -597,10 +628,13 @@ def test_compute_then_calibrate_with_pred_bins_stratification(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     _write_cli_config(
         config_path,
         predictions_path,
+        test_predictions_path,
         pf_node_path,
         pf_edge_path,
         strat="pred_bins",
@@ -667,8 +701,12 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
-    _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
+    _write_cli_config(
+        config_path, predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+    )
 
     assert (
         main(
@@ -683,7 +721,7 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
                 "--pf-edge",
                 str(pf_edge_path),
                 "--alpha",
-                "0.2",
+                "0.5",
                 "--variables",
                 "line_loading",
                 "--output",
@@ -702,7 +740,7 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
                 "--config",
                 str(config_path),
                 "--predictions",
-                str(predictions_path),
+                str(test_predictions_path),
                 "--artifact",
                 str(artifact_path),
                 "--output",
@@ -740,8 +778,8 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
         ground_truth.Vm, ground_truth.Va, ground_truth
     )
     residuals = target_loading - predicted_loading
-    expected_lower = np.quantile(residuals[:, 0], 0.1).astype(np.float32)
-    expected_upper = np.quantile(residuals[:, 0], 0.9).astype(np.float32)
+    expected_lower = conformal_quantile(residuals[:, :1], 0.25)[0]
+    expected_upper = conformal_quantile(residuals[:, :1], 0.75)[0]
     np.testing.assert_allclose(
         output_frame["line_loading_pi_lower"].to_numpy(),
         output_frame["line_loading_pred"].to_numpy() + expected_lower,
@@ -789,7 +827,7 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
     }.issubset(reliability_frame.columns)
     np.testing.assert_allclose(
         reliability_frame["target_coverage"].to_numpy(),
-        np.full(len(reliability_frame), 0.8),
+        np.full(len(reliability_frame), 0.5),
     )
     assert (tmp_path / "figures" / "line_loading_width_summary.png").exists()
     assert (tmp_path / "figures" / "line_loading_coverage_density.png").exists()
@@ -806,6 +844,8 @@ def test_compute_then_calibrate_line_loading_with_pred_bins_stratification(
     config_path = tmp_path / "trust_config_line.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     config_path.write_text(
         "\n".join(
@@ -818,10 +858,9 @@ def test_compute_then_calibrate_line_loading_with_pred_bins_stratification(
                 "pred_n_bins: 2",
                 "variables:",
                 "  - line_loading",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
                 "outputs:",
                 f"  artifact: {artifact_path}",
                 f"  calibrated_predictions: {output_path}",
@@ -853,6 +892,8 @@ def test_config_driven_line_loading_compute_and_calibrate(tmp_path) -> None:
     config_path = tmp_path / "trust_config_line.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     config_path.write_text(
         "\n".join(
@@ -863,10 +904,9 @@ def test_config_driven_line_loading_compute_and_calibrate(tmp_path) -> None:
                 "alpha: 0.2",
                 "variables:",
                 "  - line_loading",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
                 "outputs:",
                 f"  artifact: {artifact_path}",
                 f"  calibrated_predictions: {output_path}",
@@ -904,6 +944,8 @@ def test_config_driven_mixed_compute_and_calibrate(tmp_path) -> None:
     config_path = tmp_path / "trust_config_mixed.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     config_path.write_text(
         "\n".join(
@@ -916,10 +958,9 @@ def test_config_driven_mixed_compute_and_calibrate(tmp_path) -> None:
                 "  - Vm",
                 "  - Va",
                 "  - line_loading",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
                 "outputs:",
                 f"  artifact: {artifact_path}",
                 f"  calibrated_predictions_volt: {volt_output_path}",
@@ -962,6 +1003,8 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     config_path = tmp_path / "trust_config_screen.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     config_path.write_text(
         "\n".join(
@@ -980,10 +1023,9 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
                 "    upper: 1.05",
                 "  line_loading:",
                 "    upper: 1.0",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
                 "outputs:",
                 f"  artifact: {artifact_path}",
                 f"  calibrated_predictions_volt: {volt_output_path}",
@@ -1093,6 +1135,8 @@ def test_cli_flags_override_config(tmp_path) -> None:
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
     config_path.write_text(
         "\n".join(
@@ -1101,10 +1145,9 @@ def test_cli_flags_override_config(tmp_path) -> None:
                 "alpha: 0.2",
                 "variables:",
                 "  - Vm",
-                "inputs:",
-                f"  predictions: {predictions_path}",
-                f"  pf_node: {pf_node_path}",
-                f"  pf_edge: {pf_edge_path}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
                 "outputs:",
                 f"  artifact: {config_artifact_path}",
             ],
@@ -1134,81 +1177,74 @@ def test_cli_flags_override_config(tmp_path) -> None:
     assert artifact["channel_names"] == ["Vm", "Va"]
 
 
-def test_compute_with_calibration_fraction_then_calibrate_same_pool_uses_holdout_only(
-    tmp_path,
-) -> None:
+def test_calibrate_refuses_the_calibration_data_under_another_name(tmp_path) -> None:
+    # A copy of the calibration predictions passes any path check, but applying the
+    # layer to it would still measure coverage in-sample. The artifact's fingerprint
+    # of the calibration predictions catches it.
     predictions_path = tmp_path / "predictions.parquet"
+    copy_path = tmp_path / "renamed_copy.parquet"
     pf_node_path = tmp_path / "pf_node.parquet"
     pf_edge_path = tmp_path / "pf_edge.parquet"
-    artifact_path = tmp_path / "split_intervals.trustlayer"
-    output_path = tmp_path / "holdout_predictions_with_intervals.parquet"
+    artifact_path = tmp_path / "intervals.trustlayer"
     config_path = tmp_path / "trust_config.yaml"
 
     _write_prediction_fixture(predictions_path)
+    copy_path.write_bytes(predictions_path.read_bytes())
     _write_ground_truth_fixture(pf_node_path, pf_edge_path)
-    _write_cli_config(config_path, predictions_path, pf_node_path, pf_edge_path)
-
-    assert (
-        main(
-            [
-                "compute",
-                "--config",
-                str(config_path),
-                "--predictions",
-                str(predictions_path),
-                "--pf-node",
-                str(pf_node_path),
-                "--pf-edge",
-                str(pf_edge_path),
-                "--alpha",
-                "0.2",
-                "--calibration-fraction",
-                "0.5",
-                "--random-seed",
-                "7",
-                "--output",
-                str(artifact_path),
-                "--task-name",
-                "StateEstimation",
-            ],
-        )
-        == 0
+    _write_cli_config(
+        config_path, predictions_path, copy_path, pf_node_path, pf_edge_path
     )
 
-    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    calibration_scenarios = set(artifact["calibration_scenario_ids"])
-    application_scenarios = set(artifact["application_scenario_ids"])
-    assert calibration_scenarios
-    assert application_scenarios
-    assert calibration_scenarios.isdisjoint(application_scenarios)
-
     assert (
+        main(["compute", "--config", str(config_path), "--output", str(artifact_path)])
+        == 0
+    )
+    with pytest.raises(ValueError, match="identical to the calibration predictions"):
         main(
             [
                 "calibrate",
                 "--config",
                 str(config_path),
-                "--predictions",
-                str(predictions_path),
                 "--artifact",
                 str(artifact_path),
-                "--output",
-                str(output_path),
-                "--pf-node",
-                str(pf_node_path),
-                "--pf-edge",
-                str(pf_edge_path),
-                "--task-name",
-                "StateEstimation",
-            ],
+            ]
         )
-        == 0
-    )
 
-    output_frame = pd.read_parquet(output_path)
-    output_scenarios = set(output_frame["scenario"].unique().tolist())
-    assert output_scenarios == application_scenarios
-    assert output_scenarios.isdisjoint(calibration_scenarios)
+
+def test_config_rejects_the_same_file_for_calibration_and_test(tmp_path) -> None:
+    config_path = tmp_path / "trust_config.yaml"
+    predictions = tmp_path / "predictions.parquet"
+    _write_cli_config(
+        config_path,
+        predictions,
+        tmp_path / "." / "predictions.parquet",
+        tmp_path / "pf_node.parquet",
+        tmp_path / "pf_edge.parquet",
+    )
+    with pytest.raises(ValueError, match="point to the same file"):
+        load_cli_config(str(config_path))
+
+
+def test_config_rejects_a_single_shared_inputs_block(tmp_path) -> None:
+    config_path = tmp_path / "trust_config.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """\
+            version: 1
+            task_name: PowerFlow
+            cp_type: element
+            alpha: 0.1
+            variables:
+              - Vm
+            inputs:
+              predictions: predictions.parquet
+              pf_node: bus_data.parquet
+              pf_edge: branch_data.parquet"""
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must be separate datasets"):
+        load_cli_config(str(config_path))
 
 
 def test_cli_requires_config_flag() -> None:
@@ -1242,6 +1278,7 @@ def test_load_cli_config_rejects_unknown_top_level_keys(tmp_path) -> None:
 def _write_cli_config(
     config_path,
     predictions_path,
+    test_predictions_path,
     pf_node_path,
     pf_edge_path,
     *,
@@ -1262,10 +1299,9 @@ def _write_cli_config(
             "variables:",
             "  - Vm",
             "  - Va",
-            "inputs:",
-            f"  predictions: {predictions_path}",
-            f"  pf_node: {pf_node_path}",
-            f"  pf_edge: {pf_edge_path}",
+            *_inputs_yaml(
+                predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+            ),
         ]
     )
     config_path.write_text(
@@ -1274,17 +1310,41 @@ def _write_cli_config(
     )
 
 
-def _write_prediction_fixture(path) -> None:
+def _inputs_yaml(
+    calibration_predictions, test_predictions, pf_node_path, pf_edge_path
+) -> list[str]:
+    """YAML lines for separate calibration and test datasets sharing the topology."""
+
+    return [
+        "inputs:",
+        "  calibration:",
+        f"    predictions: {calibration_predictions}",
+        f"    pf_node: {pf_node_path}",
+        f"    pf_edge: {pf_edge_path}",
+        "  test:",
+        f"    predictions: {test_predictions}",
+        f"    pf_node: {pf_node_path}",
+        f"    pf_edge: {pf_edge_path}",
+    ]
+
+
+def _write_prediction_fixture(path, *, shift: float = 0.0) -> None:
+    """Predictions for four scenarios; `shift` offsets every predicted value so the
+    test set differs from the calibration set while sharing the ground truth."""
     frame = pd.DataFrame(
         {
             "scenario": [0, 0, 1, 1, 2, 2, 3, 3],
             "bus": [0, 1, 0, 1, 0, 1, 0, 1],
             "Vm_target": [1.05, 0.85, 1.12, 0.97, 1.0, 1.08, 1.0, 1.0],
             "Va_target": [0.02, 0.12, 0.16, -0.05, -0.1, 0.25, 0.08, -0.02],
-            "Vm_pred": [1.0, 0.9, 1.1, 1.0, 0.95, 1.05, 1.05, 0.98],
-            "Va_pred": [0.0, 0.1, 0.2, -0.1, -0.2, 0.3, 0.1, 0.0],
+            "Vm_pred": [
+                v + shift for v in [1.0, 0.9, 1.1, 1.0, 0.95, 1.05, 1.05, 0.98]
+            ],
+            "Va_pred": [v + shift for v in [0.0, 0.1, 0.2, -0.1, -0.2, 0.3, 0.1, 0.0]],
             "P_inj_target": [2.0, -2.0, 2.1, -2.1, 1.9, -1.9, 2.0, -2.0],
-            "P_inj_pred": [1.8, -1.8, 2.0, -2.0, 1.8, -1.8, 1.9, -1.9],
+            "P_inj_pred": [
+                v + shift for v in [1.8, -1.8, 2.0, -2.0, 1.8, -1.8, 1.9, -1.9]
+            ],
             "PQ": [0, 1, 0, 1, 0, 1, 0, 1],
             "PV": [1, 0, 1, 0, 1, 0, 1, 0],
             "REF": [0] * 8,

@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 from gridfm_trustlayer.io.predictions import PredictionSet
+from tests.conformal_reference import conformal_quantile
 
 
 def test_naive_interval_fit_and_predict() -> None:
     predictions, ground_truth = _make_aligned_sets()
 
+    # Four calibration scenarios: alpha = 0.5 is the smallest round value whose
+    # split-conformal ranks stay within 1..4, so both tails are finite.
     calibrator = NaiveIntervalCalibrator.fit(
         predictions,
         ground_truth,
-        alpha=0.2,
+        alpha=0.5,
         channel_names=("Vm", "Va"),
     )
 
@@ -23,19 +28,19 @@ def test_naive_interval_fit_and_predict() -> None:
     va_residuals = ground_truth.Va - predictions.Va
     np.testing.assert_allclose(
         calibrator.lower_residual_quantiles["Vm"],
-        np.quantile(vm_residuals, 0.1, axis=0).astype(np.float32),
+        conformal_quantile(vm_residuals, 0.25),
     )
     np.testing.assert_allclose(
         calibrator.upper_residual_quantiles["Vm"],
-        np.quantile(vm_residuals, 0.9, axis=0).astype(np.float32),
+        conformal_quantile(vm_residuals, 0.75),
     )
     np.testing.assert_allclose(
         calibrator.lower_residual_quantiles["Va"],
-        np.quantile(va_residuals, 0.1, axis=0).astype(np.float32),
+        conformal_quantile(va_residuals, 0.25),
     )
     np.testing.assert_allclose(
         calibrator.upper_residual_quantiles["Va"],
-        np.quantile(va_residuals, 0.9, axis=0).astype(np.float32),
+        conformal_quantile(va_residuals, 0.75),
     )
 
     intervals = calibrator.predict_intervals(predictions)
@@ -100,10 +105,11 @@ def test_naive_interval_stratified_by_n_outages() -> None:
         scenario_columns=scenario_columns,
     )
 
+    # Two calibration scenarios per stratum: alpha = 0.9 keeps both tails finite.
     calibrator = NaiveIntervalCalibrator.fit(
         predictions,
         ground_truth,
-        alpha=0.2,
+        alpha=0.9,
         channel_names=("Vm",),
         strat="n_outages",
     )
@@ -115,15 +121,15 @@ def test_naive_interval_stratified_by_n_outages() -> None:
     )
     np.testing.assert_allclose(
         calibrator.stratified_lower_residual_quantiles["Vm"][0],
-        np.quantile(
-            np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32), 0.1, axis=0
+        conformal_quantile(
+            np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32), 0.45
         ),
         atol=1e-6,
     )
     np.testing.assert_allclose(
         calibrator.stratified_upper_residual_quantiles["Vm"][1],
-        np.quantile(
-            np.array([[0.5, -0.5], [0.6, -0.6]], dtype=np.float32), 0.9, axis=0
+        conformal_quantile(
+            np.array([[0.5, -0.5], [0.6, -0.6]], dtype=np.float32), 0.55
         ),
         atol=1e-6,
     )
@@ -189,13 +195,12 @@ def test_naive_interval_stratified_by_outage_type() -> None:
         np.array([0, 1, 2, 3], dtype=np.int64),
     )
 
+    # Each outage type holds a single calibration scenario. One residual cannot
+    # support a 1 - alpha/2 = 0.9 bound, so every bound is infinite rather than a
+    # zero-width band around that one residual.
     intervals = calibrator.predict_intervals(predictions)
-    np.testing.assert_allclose(
-        intervals["Vm"][0][0], np.array([1.0, 1.0], dtype=np.float32)
-    )
-    np.testing.assert_allclose(
-        intervals["Vm"][1][3], np.array([1.3, 0.7], dtype=np.float32)
-    )
+    assert np.all(np.isneginf(intervals["Vm"][0]))
+    assert np.all(np.isposinf(intervals["Vm"][1]))
 
     loaded = NaiveIntervalCalibrator.from_dict(calibrator.to_dict())
     assert loaded.strat == "outage_type"
@@ -287,7 +292,7 @@ def test_naive_interval_stratified_by_pred_bins_roundtrip() -> None:
     calibrator = NaiveIntervalCalibrator.fit(
         predictions,
         ground_truth,
-        alpha=0.2,
+        alpha=0.9,
         channel_names=("Vm",),
         strat="pred_bins",
         pred_n_bins=2,
@@ -301,17 +306,19 @@ def test_naive_interval_stratified_by_pred_bins_roundtrip() -> None:
         np.array([1.025], dtype=np.float32),
     )
     intervals = calibrator.predict_intervals(predictions)
+    # Bin 0 holds two residuals for bus 0 (finite bounds at alpha = 0.9) but a
+    # single residual for bus 1 (infinite bounds).
     expected_lower_bin0 = np.array(
         [
-            0.90 + np.quantile(np.array([0.05, 0.02], dtype=np.float32), 0.1),
-            1.00 + np.quantile(np.array([0.02], dtype=np.float32), 0.1),
+            0.90 + conformal_quantile(np.array([[0.05], [0.02]]), 0.45)[0],
+            1.00 + conformal_quantile(np.array([[0.02]]), 0.45)[0],
         ],
         dtype=np.float32,
     )
     expected_upper_bin0 = np.array(
         [
-            0.90 + np.quantile(np.array([0.05, 0.02], dtype=np.float32), 0.9),
-            1.00 + np.quantile(np.array([0.02], dtype=np.float32), 0.9),
+            0.90 + conformal_quantile(np.array([[0.05], [0.02]]), 0.55)[0],
+            1.00 + conformal_quantile(np.array([[0.02]]), 0.55)[0],
         ],
         dtype=np.float32,
     )
@@ -331,6 +338,74 @@ def test_naive_interval_stratified_by_pred_bins_roundtrip() -> None:
         loaded.pred_bin_edges["Vm"],
         np.array([1.025], dtype=np.float32),
     )
+
+
+def _single_entity_sets(residuals: np.ndarray) -> tuple[ChannelSet, ChannelSet]:
+    """Zero predictions and targets equal to `residuals`, shape (scenarios, entities)."""
+
+    residuals = np.asarray(residuals, dtype=np.float32)
+    if residuals.ndim == 1:
+        residuals = residuals[:, None]
+    n_scenarios, n_entities = residuals.shape
+    common: dict[str, Any] = {
+        "scenario_ids": np.arange(n_scenarios, dtype=np.int64),
+        "entity_ids": np.arange(n_entities, dtype=np.int64),
+        "entity_name": "bus",
+    }
+    predictions = ChannelSet(channels={"Vm": np.zeros_like(residuals)}, **common)
+    targets = ChannelSet(channels={"Vm": residuals}, **common)
+    return predictions, targets
+
+
+def test_split_conformal_quantile_is_the_corrected_order_statistic() -> None:
+    # Residuals 1..19 in shuffled order. At alpha = 0.2 each tail is at level 0.1,
+    # so the bounds are the ceil(20 * 0.9) = 18th and floor(20 * 0.1) = 2nd
+    # smallest residuals. The plain empirical quantile would interpolate to
+    # 17.2 and 2.8 instead, which is what made the old intervals too narrow.
+    residuals = np.random.default_rng(0).permutation(np.arange(1, 20))
+    calibrator = NaiveIntervalCalibrator.fit(
+        *_single_entity_sets(residuals), alpha=0.2, channel_names=("Vm",)
+    )
+
+    assert calibrator.upper_residual_quantiles["Vm"][0] == 18.0
+    assert calibrator.lower_residual_quantiles["Vm"][0] == 2.0
+
+
+def test_too_few_calibration_samples_give_infinite_bounds() -> None:
+    # The upper rank ceil((n + 1) * 0.9) first fits within n at n = 9.
+    short = NaiveIntervalCalibrator.fit(
+        *_single_entity_sets(np.arange(1, 9)), alpha=0.2, channel_names=("Vm",)
+    )
+    enough = NaiveIntervalCalibrator.fit(
+        *_single_entity_sets(np.arange(1, 10)), alpha=0.2, channel_names=("Vm",)
+    )
+
+    assert np.isposinf(short.upper_residual_quantiles["Vm"][0])
+    assert np.isneginf(short.lower_residual_quantiles["Vm"][0])
+    assert enough.upper_residual_quantiles["Vm"][0] == 9.0
+    assert enough.lower_residual_quantiles["Vm"][0] == 1.0
+
+
+def test_intervals_reach_finite_sample_coverage() -> None:
+    # Each of the 4,000 entities is an independent replication: 19 calibration
+    # residuals and one test residual from the same distribution. For continuous
+    # residuals the two-sided coverage is exactly (18 - 2) / 20 = 0.8 = 1 - alpha.
+    # The uncorrected empirical quantile gives about 0.72 here, so this test
+    # fails if the finite-sample correction is ever lost.
+    rng = np.random.default_rng(42)
+    n_calibration, n_replications, alpha = 19, 4000, 0.2
+    calibration = rng.standard_normal((n_calibration, n_replications))
+    test_residual = rng.standard_normal(n_replications).astype(np.float32)
+
+    calibrator = NaiveIntervalCalibrator.fit(
+        *_single_entity_sets(calibration), alpha=alpha, channel_names=("Vm",)
+    )
+    test_predictions, _ = _single_entity_sets(np.zeros((1, n_replications)))
+    lower, upper = calibrator.predict_intervals(test_predictions)["Vm"]
+    covered = (lower[0] <= test_residual) & (test_residual <= upper[0])
+
+    # Standard error at 4,000 replications is about 0.0063.
+    assert abs(covered.mean() - (1.0 - alpha)) < 0.025
 
 
 def _make_aligned_sets() -> tuple[PredictionSet, GroundTruthSet]:

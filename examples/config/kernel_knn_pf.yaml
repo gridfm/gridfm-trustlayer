@@ -20,11 +20,6 @@ cp_type: kernel
 strat: n_outages
 alpha: 0.1
 
-# Mandatory for cp_type: kernel. Without a split every test scenario would sit
-# at distance zero from itself in the calibration bank.
-calibration_fraction: 0.3
-random_seed: 7
-
 embedding_pooling: mean
 distance: euclidean
 bandwidth: knn
@@ -43,13 +38,22 @@ screen_bounds:
   line_loading:
     upper: 1.0
 
+# Two separately generated datasets: `compute` fits the layer on the
+# calibration set, `calibrate` and `screen` apply and evaluate it on the test set.
+# They must be different data (e.g. datakit runs with different seeds).
+# Embeddings are required for cp_type: kernel; produce them with
+#   gridfm_graphkit predict --get_embeddings
 inputs:
-  predictions: path/to/predictions.parquet
-  # Required for cp_type: kernel. Produced by
-  #   gridfm_graphkit predict --get_embeddings
-  embeddings: path/to/predictions/bus_embeddings.parquet
-  pf_node: path/to/raw/bus_data.parquet
-  pf_edge: path/to/raw/branch_data.parquet
+  calibration:  # read by `compute`
+    predictions: path/to/calibration/predictions.parquet
+    embeddings: path/to/calibration/bus_embeddings.parquet
+    pf_node: path/to/calibration/raw/bus_data.parquet
+    pf_edge: path/to/calibration/raw/branch_data.parquet
+  test:  # read by `calibrate` and `screen`
+    predictions: path/to/test/predictions.parquet
+    embeddings: path/to/test/bus_embeddings.parquet
+    pf_node: path/to/test/raw/bus_data.parquet
+    pf_edge: path/to/test/raw/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/kernel/knn_pf.trustlayer

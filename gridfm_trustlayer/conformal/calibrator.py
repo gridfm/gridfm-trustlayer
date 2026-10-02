@@ -36,14 +36,20 @@ class ChannelSet:
         return self.entity_ids
 
 
+# (n + 1) * q is computed in floating point; absorb rounding so that an exact
+# integer rank (e.g. n = 9, q = 0.9) is not pushed to the next order statistic.
+_RANK_TOLERANCE = 1e-9
+
+
 @dataclass
 class NaiveIntervalCalibrator:
     """Per-entity residual-quantile intervals for aligned prediction channels.
 
-    This initial Phase 3 implementation is intentionally simple: it calibrates
-    each requested variable independently per entity index, ignoring contingency
-    structure and using empirical residual quantiles at `alpha / 2` and
-    `1 - alpha / 2`.
+    Each requested variable is calibrated independently per entity (and per
+    stratum when `strat` is set). Each tail uses the split-conformal order
+    statistic at level `alpha / 2` (see `_masked_column_quantile`), so the
+    interval has finite-sample coverage of at least `1 - alpha` under
+    exchangeability of calibration and test residuals.
     """
 
     alpha: float
@@ -64,11 +70,9 @@ class NaiveIntervalCalibrator:
     system_load_bin_edges: np.ndarray | None = None
     pred_n_bins: int | None = None
     pred_bin_edges: dict[str, np.ndarray] = field(default_factory=dict)
-    calibration_fraction: float | None = None
-    random_seed: int | None = None
-    split_pool_scenario_ids: np.ndarray | None = None
-    calibration_scenario_ids: np.ndarray | None = None
-    application_scenario_ids: np.ndarray | None = None
+    # SHA-256 of the calibration predictions, so that applying the artifact to the
+    # very same data (in-sample evaluation) can be detected and refused.
+    calibration_fingerprint: str | None = None
 
     @classmethod
     def fit(
@@ -328,17 +332,7 @@ class NaiveIntervalCalibrator:
             "stratification_values": None
             if self.stratification_values is None
             else self.stratification_values.tolist(),
-            "calibration_fraction": self.calibration_fraction,
-            "random_seed": self.random_seed,
-            "split_pool_scenario_ids": None
-            if self.split_pool_scenario_ids is None
-            else self.split_pool_scenario_ids.tolist(),
-            "calibration_scenario_ids": None
-            if self.calibration_scenario_ids is None
-            else self.calibration_scenario_ids.tolist(),
-            "application_scenario_ids": None
-            if self.application_scenario_ids is None
-            else self.application_scenario_ids.tolist(),
+            "calibration_fingerprint": self.calibration_fingerprint,
             "lower_residual_quantiles": {
                 key: values.tolist()
                 for key, values in self.lower_residual_quantiles.items()
@@ -451,17 +445,7 @@ class NaiveIntervalCalibrator:
             ),
             pred_n_bins=_optional_int(data.get("pred_n_bins")),
             pred_bin_edges=pred_bin_edges,
-            calibration_fraction=_optional_float(data.get("calibration_fraction")),
-            random_seed=_optional_int(data.get("random_seed")),
-            split_pool_scenario_ids=_optional_int_array(
-                data.get("split_pool_scenario_ids")
-            ),
-            calibration_scenario_ids=_optional_int_array(
-                data.get("calibration_scenario_ids")
-            ),
-            application_scenario_ids=_optional_int_array(
-                data.get("application_scenario_ids")
-            ),
+            calibration_fingerprint=_optional_str(data.get("calibration_fingerprint")),
         )
 
     @property
@@ -577,19 +561,38 @@ def _masked_column_quantile(
     valid_mask: np.ndarray | None,
     quantile: float,
 ) -> np.ndarray:
-    if valid_mask is None:
-        return np.quantile(residuals, quantile, axis=0).astype(
-            FLOAT32_DTYPE, copy=False
-        )
+    """Per-column split-conformal residual quantile over the valid entries.
 
-    output = np.zeros(residuals.shape[1], dtype=FLOAT32_DTYPE)
+    With `n` valid residuals in a column, an upper level `q >= 0.5` returns the
+    `ceil((n + 1) q)`-th smallest residual and a lower level `q < 0.5` the
+    `floor((n + 1) q)`-th smallest. This is the finite-sample correction of
+    split conformal prediction: each tail then holds with probability at least
+    its nominal level under exchangeability, which the plain empirical quantile
+    does not guarantee. When the rank falls outside `1..n` (too few residuals
+    for the requested level, including `n = 0`) the bound is `+inf` or `-inf`:
+    without enough calibration data no finite margin is valid.
+    """
+
+    upper_tail = quantile >= 0.5
+    output = np.empty(residuals.shape[1], dtype=FLOAT32_DTYPE)
     for index in range(residuals.shape[1]):
-        column_mask = valid_mask[:, index]
-        if np.any(column_mask):
-            output[index] = np.quantile(residuals[column_mask, index], quantile)
+        column = residuals[:, index]
+        if valid_mask is not None:
+            column = column[valid_mask[:, index]]
+        n = column.size
+        if upper_tail:
+            rank = int(np.ceil((n + 1) * quantile - _RANK_TOLERANCE))
+            in_range = rank <= n
+            fallback = np.inf
         else:
-            output[index] = np.float32(0.0)
-    return output.astype(FLOAT32_DTYPE, copy=False)
+            rank = int(np.floor((n + 1) * quantile + _RANK_TOLERANCE))
+            in_range = rank >= 1
+            fallback = -np.inf
+        if in_range:
+            output[index] = np.partition(column, rank - 1)[rank - 1]
+        else:
+            output[index] = fallback
+    return output
 
 
 def _assign_prediction_bins(
@@ -626,10 +629,8 @@ def _optional_int_array(value: object | None) -> np.ndarray | None:
     return np.asarray(value, dtype=np.int64)
 
 
-def _optional_float(value: object | None) -> float | None:
-    if value is None:
-        return None
-    return float(cast(Any, value))
+def _optional_str(value: object | None) -> str | None:
+    return None if value is None else str(value)
 
 
 def _optional_float_array(value: object | None) -> np.ndarray | None:

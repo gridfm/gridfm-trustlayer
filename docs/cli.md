@@ -52,9 +52,9 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | Option | Type | Description |
 | --- | --- | --- |
 | `--config` | `str` | Required YAML config. |
-| `--predictions` | `str` | Predictions parquet with `*_pred` columns. |
-| `--pf-node` | `str` | Ground-truth bus parquet used during fitting. |
-| `--pf-edge` | `str` | Ground-truth branch parquet used during fitting and loading computation. |
+| `--predictions` | `str` | Calibration predictions parquet with `*_pred` columns (overrides `inputs.calibration.predictions`). |
+| `--pf-node` | `str` | Calibration bus ground truth (overrides `inputs.calibration.pf_node`). |
+| `--pf-edge` | `str` | Calibration branch ground truth, also used for loading computation (overrides `inputs.calibration.pf_edge`). |
 | `--output` | `str` | Artifact output path. |
 | `--alpha` | `float` | Miscoverage level. |
 | `--cp-type` | `str` | `element` or `kernel`. |
@@ -62,8 +62,6 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | `--system-load-n-bins` | `int` | Requested number of percentile bins when `--strat system_load_bin` is used. |
 | `--pred-n-bins` | `int` | Requested number of percentile bins when `--strat pred_bins` is used. |
 | `--variables` | `list[str]` | Any subset of `Vm`, `Va`, `line_loading`. |
-| `--calibration-fraction` | `float` | Reserve a scenario fraction for fitting and apply the learned intervals on the remaining holdout scenarios. Required for `--cp-type kernel`. |
-| `--random-seed` | `int` | Random seed used for the calibration/holdout split. |
 | `--embeddings` | `str` | Scenario embeddings parquet with `emb_*` columns. Required for `--cp-type kernel`. |
 | `--embedding-pooling` | `str` | How per-entity embeddings are pooled into one vector per scenario: `mean` (default), `max`, `meanmax`, or `concat`. |
 | `--distance` | `str` | Distance over scenario representations: `euclidean` (default) or `cosine`. |
@@ -76,6 +74,7 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 
 Notes:
 
+- `compute` fits on every scenario of the calibration dataset; trustlayer never splits a dataset internally. Evaluate the result with `calibrate` on a separate test dataset (see [configuration.md](configuration.md#inputs)).
 - A mixed run such as `variables: [Vm, Va, line_loading]` still writes one artifact bundle.
 - The saved artifact may contain one calibrator or multiple calibrators keyed by target family.
 - With `--strat n_outages`, residual quantiles are fitted separately per scenario outage count.
@@ -85,7 +84,7 @@ Notes:
 
 Kernel-specific notes:
 
-- `--cp-type kernel` requires `--embeddings` and a non-null `--calibration-fraction`. Without a split, every test scenario would sit at distance zero from itself in the calibration bank, which invalidates the coverage guarantee, so the CLI rejects it rather than producing an optimistic result.
+- `--cp-type kernel` requires `--embeddings` for the calibration dataset at `compute` time and for the test dataset at `calibrate` time.
 - `--cp-type kernel` is incompatible with `--strat pred_bins`; use `n_outages`, `outage_type`, `system_load_bin`, or omit `strat`.
 - Kernel and stratification compose. With `--cp-type kernel --strat n_outages`, the nearest-neighbour search, the bandwidth, and the weighted quantile are all restricted to calibration scenarios in the same outage stratum.
 - Kernel artifacts store the calibration residual bank and scenario embeddings, so they are substantially larger than `element` artifacts and are written as a compressed binary container rather than JSON. Both encodings load through the same `--artifact` path.
@@ -123,14 +122,14 @@ gridfm_trustlayer calibrate --config path/to/trust_config.yaml
 | Option | Type | Description |
 | --- | --- | --- |
 | `--config` | `str` | Required YAML config. |
-| `--predictions` | `str` | Input predictions parquet. |
+| `--predictions` | `str` | Test predictions parquet (overrides `inputs.test.predictions`). Rejected if identical to the calibration predictions the artifact was fitted on. |
 | `--artifact` | `str` | Saved `.trustlayer` artifact from `compute`. |
 | `--output` | `str` | Output parquet path for a single target family, or output directory for mixed voltage + loading runs. |
 | `--cp-type` | `str` | `element` or `kernel`. |
 | `--strat` | `str` | Optional stratification override. When provided, it must match the saved artifact. |
-| `--pf-node` | `str` | Bus ground truth used for analysis or target reconstruction when needed. |
-| `--pf-edge` | `str` | Branch ground truth used for line-loading analysis or target reconstruction when needed. |
-| `--embeddings` | `str` | Scenario embeddings parquet for the application scenarios. Required when the artifact is a kernel artifact. |
+| `--pf-node` | `str` | Test bus ground truth, used for analysis or target reconstruction (overrides `inputs.test.pf_node`). |
+| `--pf-edge` | `str` | Test branch ground truth, used for line loading and its analysis (overrides `inputs.test.pf_edge`). |
+| `--embeddings` | `str` | Scenario embeddings parquet for the test scenarios. Required when the artifact is a kernel artifact. |
 | `--task-name` | `str` | Task adapter name used while loading predictions. |
 | `--generator-predictions` | `str` | Optional OPF generator prediction parquet. |
 | `--no-figures` | flag | Skip analysis figure generation and write only calibrated parquet plus CSV outputs. |
@@ -162,7 +161,7 @@ Kernel diagnostic columns:
 | --- | --- |
 | `kcp_n_eff` | Effective sample size of the kernel weights for that scenario. Close to the stratum size means the kernel is barely localizing (behaving like `element`); close to `1` means weight has collapsed onto a handful of neighbours. |
 | `kcp_bandwidth_sq` | The squared bandwidth used. Under `bandwidth: knn` this is the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum; under `bandwidth: n_eff` it is the solved value, and becomes the interesting diagnostic since `kcp_n_eff` is then near-constant by construction. |
-| `kcp_fallback` | `True` when the scenario reverted to the stratum-wide quantile, either because `kcp_n_eff` fell below `n_eff_min` or because the weighted quantile could not reach its target level. |
+| `kcp_fallback` | `True` when the scenario reverted to the stratum-wide quantile, either because `kcp_n_eff` fell below `n_eff_min` or because the weighted quantile could not reach its target level. Elements with no valid calibration residual in the stratum (e.g. a branch out of service in every calibration scenario) always use the fallback bound and do not set this flag. |
 
 A high fallback rate or an `kcp_n_eff` near the stratum size means the kernel is not adding value at the current `k_nn`; lowering `k_nn` localizes harder, raising it moves behavior toward `element`. Under `bandwidth: n_eff`, `kcp_n_eff` is pinned to the target, so read `kcp_bandwidth_sq` and `kcp_fallback` instead.
 

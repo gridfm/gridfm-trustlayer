@@ -160,7 +160,9 @@ Kernel runs add three per-scenario columns to the calibrated parquet. They are d
 
 - `kcp_n_eff`: effective sample size of the kernel weights, $\left(\sum_j u_j\right)^2 / \sum_j u_j^2$. Near the stratum size means the kernel is barely localizing; near `1` means weight collapsed onto a few neighbours.
 - `kcp_bandwidth_sq`: the squared bandwidth used. Under `bandwidth: knn` this is the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum; under `bandwidth: n_eff` it is the solved value.
-- `kcp_fallback`: `True` when that scenario reverted to the stratum-wide quantile.
+- `kcp_fallback`: `True` when that scenario reverted to the stratum-wide quantile for at least one element that has calibration data in its stratum. Elements without any valid calibration residual always use the fallback bound and are not counted.
+
+Width figures plot only finite widths: an entity or stratum with too few calibration samples has infinite bounds (see `methodology.md`), which remain in the CSV outputs.
 
 Read these alongside the reliability CSV. If empirical coverage sits well above `1 - alpha` while `kcp_n_eff` is low, the kernel is localizing too aggressively and the bandwidth should be widened (raise `k_nn`, or raise `n_eff_target`). If `kcp_n_eff` is close to the stratum size, the run is effectively equivalent to `cp_type: element`.
 

@@ -18,9 +18,6 @@ cp_type: element
 alpha: 0.1
 
 # No `strat` key at all: a single global quantile table.
-# No `calibration_fraction`: quantiles are fitted on every scenario in the
-# predictions parquet and applied to those same scenarios. Fine for a smoke
-# test, but the resulting coverage is optimistic -- see element_holdout_pf.yaml.
 
 variables:
   - Vm
@@ -31,10 +28,18 @@ screen_bounds:
     lower: 0.95
     upper: 1.05
 
+# Two separately generated datasets: `compute` fits the layer on the
+# calibration set, `calibrate` and `screen` apply and evaluate it on the test set.
+# They must be different data (e.g. datakit runs with different seeds).
 inputs:
-  predictions: path/to/predictions.parquet
-  pf_node: path/to/raw/bus_data.parquet
-  pf_edge: path/to/raw/branch_data.parquet
+  calibration:  # read by `compute`
+    predictions: path/to/calibration/predictions.parquet
+    pf_node: path/to/calibration/raw/bus_data.parquet
+    pf_edge: path/to/calibration/raw/branch_data.parquet
+  test:  # read by `calibrate` and `screen`
+    predictions: path/to/test/predictions.parquet
+    pf_node: path/to/test/raw/bus_data.parquet
+    pf_edge: path/to/test/raw/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/element/global_pf.trustlayer

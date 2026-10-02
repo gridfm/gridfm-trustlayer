@@ -63,5 +63,14 @@ def test_kernel_examples_declare_their_required_inputs(path: Path) -> None:
     config = yaml.safe_load(path.read_text(encoding="utf-8"))
     if config.get("cp_type") != "kernel":
         pytest.skip("not a kernel example")
-    assert config.get("calibration_fraction") is not None
-    assert (config.get("inputs") or {}).get("embeddings") is not None
+    inputs = config.get("inputs") or {}
+    for dataset in ("calibration", "test"):
+        assert (inputs.get(dataset) or {}).get("embeddings") is not None, dataset
+
+
+@pytest.mark.parametrize("path", EXAMPLE_CONFIGS, ids=lambda p: p.name)
+def test_examples_use_separate_calibration_and_test_datasets(path: Path) -> None:
+    inputs = yaml.safe_load(path.read_text(encoding="utf-8")).get("inputs") or {}
+    calibration = (inputs.get("calibration") or {}).get("predictions")
+    test = (inputs.get("test") or {}).get("predictions")
+    assert calibration and test and calibration != test
