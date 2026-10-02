@@ -93,6 +93,8 @@ class _StratumBank:
     sorted_valid: np.ndarray
     fallback_lower: np.ndarray
     fallback_upper: np.ndarray
+    # Per element: whether the stratum holds at least one valid residual.
+    has_data: np.ndarray
 
 
 @dataclass
@@ -126,11 +128,9 @@ class KernelIntervalCalibrator:
     system_load_bin_edges: np.ndarray | None = None
     pred_n_bins: int | None = None
     pred_bin_edges: dict[str, np.ndarray] = field(default_factory=dict)
-    calibration_fraction: float | None = None
-    random_seed: int | None = None
-    split_pool_scenario_ids: np.ndarray | None = None
-    calibration_scenario_ids: np.ndarray | None = None
-    application_scenario_ids: np.ndarray | None = None
+    # SHA-256 of the calibration predictions, so that applying the artifact to the
+    # very same data (in-sample evaluation) can be detected and refused.
+    calibration_fingerprint: str | None = None
     n_jobs: int | None = None
     _banks: dict[str, list[_StratumBank]] = field(
         default_factory=dict, repr=False, compare=False
@@ -439,6 +439,7 @@ class KernelIntervalCalibrator:
                         sorted_residuals=np.ascontiguousarray(sorted_residuals),
                         sort_order=np.ascontiguousarray(order),
                         sorted_valid=np.ascontiguousarray(sorted_valid),
+                        has_data=np.asarray(stratum_valid, dtype=bool).any(axis=0),
                         fallback_lower=self.fallback_lower_quantiles[channel_name][
                             index
                         ],
@@ -536,7 +537,12 @@ class KernelIntervalCalibrator:
             unusable = (total <= 0.0) | degenerate[:, None]
             block_upper = np.where(unusable, bank.fallback_upper, block_upper)
             block_lower = np.where(unusable, bank.fallback_lower, block_lower)
-            fallback_out[block_rows] |= ~(upper_reached & lower_reached).all(axis=1)
+            # An element with no valid calibration residual in this stratum (e.g. a
+            # branch that is out of service in every calibration scenario) always
+            # takes the fallback bound. That is a property of the data, not of the
+            # kernel, so it must not flag every test scenario as a fallback.
+            reached = (upper_reached & lower_reached) | ~bank.has_data[None, :]
+            fallback_out[block_rows] |= ~reached.all(axis=1)
 
             lower_offsets[block_rows] = block_lower
             upper_offsets[block_rows] = block_upper
@@ -578,17 +584,7 @@ class KernelIntervalCalibrator:
             "pred_bin_edges": {
                 key: values.tolist() for key, values in self.pred_bin_edges.items()
             },
-            "calibration_fraction": self.calibration_fraction,
-            "random_seed": self.random_seed,
-            "split_pool_scenario_ids": None
-            if self.split_pool_scenario_ids is None
-            else self.split_pool_scenario_ids.tolist(),
-            "calibration_scenario_ids": None
-            if self.calibration_scenario_ids is None
-            else self.calibration_scenario_ids.tolist(),
-            "application_scenario_ids": None
-            if self.application_scenario_ids is None
-            else self.application_scenario_ids.tolist(),
+            "calibration_fingerprint": self.calibration_fingerprint,
         }
 
     def array_payload(self) -> dict[str, np.ndarray]:
@@ -687,17 +683,7 @@ class KernelIntervalCalibrator:
                 str(key): np.asarray(values, dtype=FLOAT32_DTYPE)
                 for key, values in cast(dict, data.get("pred_bin_edges") or {}).items()
             },
-            calibration_fraction=_optional_float(data.get("calibration_fraction")),
-            random_seed=_optional_int(data.get("random_seed")),
-            split_pool_scenario_ids=_optional_int_array(
-                data.get("split_pool_scenario_ids")
-            ),
-            calibration_scenario_ids=_optional_int_array(
-                data.get("calibration_scenario_ids")
-            ),
-            application_scenario_ids=_optional_int_array(
-                data.get("application_scenario_ids")
-            ),
+            calibration_fingerprint=_optional_str(data.get("calibration_fingerprint")),
         )
 
     @property
@@ -822,22 +808,14 @@ def _require_scenario_embeddings(
     return np.asarray(embeddings, dtype=FLOAT32_DTYPE)
 
 
-def _optional_int_array(value: object | None) -> np.ndarray | None:
-    if value is None:
-        return None
-    return np.asarray(value, dtype=np.int64)
-
-
 def _optional_float_array(value: object | None) -> np.ndarray | None:
     if value is None:
         return None
     return np.asarray(value, dtype=FLOAT32_DTYPE)
 
 
-def _optional_float(value: object | None) -> float | None:
-    if value is None:
-        return None
-    return float(cast(Any, value))
+def _optional_str(value: object | None) -> str | None:
+    return None if value is None else str(value)
 
 
 def _optional_int(value: object | None) -> int | None:

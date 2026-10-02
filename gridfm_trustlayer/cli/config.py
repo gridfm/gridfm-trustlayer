@@ -28,8 +28,6 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "distance",
     "embedding_pooling",
     "variables",
-    "calibration_fraction",
-    "random_seed",
     "screen_bounds",
     "save_figures",
     "inputs",
@@ -55,12 +53,32 @@ _ALLOWED_COMMAND_OVERRIDE_KEYS = {
     "variables",
     "output",
     "artifact",
-    "calibration_fraction",
-    "random_seed",
     "screen_bounds",
     "save_figures",
-    "inputs",
     "outputs",
+}
+
+# Keys of one dataset block, `inputs.calibration` or `inputs.test`.
+_DATASET_KEYS = {
+    "predictions",
+    "generator_predictions",
+    "pf_node",
+    "pf_edge",
+    "embeddings",
+}
+
+# `compute` fits the layer on the calibration data; `calibrate` and `screen`
+# apply and evaluate it on the test data. The two are always distinct datasets.
+_COMMAND_DATASET = {"compute": "calibration", "calibrate": "test", "screen": "test"}
+
+_OUTPUT_KEYS = {
+    "output",
+    "artifact",
+    "calibrated_predictions",
+    "calibrated_predictions_volt",
+    "calibrated_predictions_line",
+    "screen_dir",
+    "screened_predictions",
 }
 
 
@@ -88,33 +106,8 @@ def validate_config_schema(config: dict[str, Any]) -> None:
             f"Unsupported top-level trustlayer config keys: {unknown_top_level}."
         )
 
-    _validate_mapping_keys(
-        config,
-        key="inputs",
-        allowed_keys={
-            "predictions",
-            "generator_predictions",
-            "pf_node",
-            "pf_edge",
-            "embeddings",
-            "artifact",
-            "analysis_pf_node",
-            "analysis_pf_edge",
-        },
-    )
-    _validate_mapping_keys(
-        config,
-        key="outputs",
-        allowed_keys={
-            "output",
-            "artifact",
-            "calibrated_predictions",
-            "calibrated_predictions_volt",
-            "calibrated_predictions_line",
-            "screen_dir",
-            "screened_predictions",
-        },
-    )
+    _validate_inputs(config.get("inputs"))
+    _validate_mapping_keys(config, key="outputs", allowed_keys=_OUTPUT_KEYS)
 
     commands = config.get("commands")
     if commands is None:
@@ -145,33 +138,57 @@ def validate_config_schema(config: dict[str, Any]) -> None:
             )
         _validate_mapping_keys(
             overrides,
-            key="inputs",
-            allowed_keys={
-                "predictions",
-                "generator_predictions",
-                "pf_node",
-                "pf_edge",
-                "embeddings",
-                "artifact",
-                "analysis_pf_node",
-                "analysis_pf_edge",
-            },
-            context=f"commands.{command_name}",
-        )
-        _validate_mapping_keys(
-            overrides,
             key="outputs",
-            allowed_keys={
-                "output",
-                "artifact",
-                "calibrated_predictions",
-                "calibrated_predictions_volt",
-                "calibrated_predictions_line",
-                "screen_dir",
-                "screened_predictions",
-            },
+            allowed_keys=_OUTPUT_KEYS,
             context=f"commands.{command_name}",
         )
+
+
+def _validate_inputs(inputs: Any) -> None:
+    """Check that `inputs` holds separate calibration and test datasets."""
+
+    if inputs is None:
+        return
+    if not isinstance(inputs, dict):
+        raise ValueError("inputs must be a mapping when provided.")
+    flat_keys = sorted(set(inputs).intersection(_DATASET_KEYS))
+    if flat_keys:
+        raise ValueError(
+            f"inputs.{flat_keys[0]} is no longer supported: the calibration and test "
+            "data must be separate datasets. Put the data the layer is fitted on under "
+            "inputs.calibration and the data it is applied to under inputs.test, each "
+            "with its own predictions, pf_node, pf_edge (and embeddings for "
+            "cp_type: kernel). See CHANGELOG.md for the 0.1.0 migration.",
+        )
+    unknown = sorted(set(inputs).difference({"calibration", "test", "artifact"}))
+    if unknown:
+        raise ValueError(
+            f"Unsupported keys under inputs: {unknown}. Expected 'calibration', "
+            "'test' and optionally 'artifact'.",
+        )
+    for block in ("calibration", "test"):
+        _validate_mapping_keys(
+            inputs, key=block, allowed_keys=_DATASET_KEYS, context="inputs"
+        )
+    calibration_predictions = (inputs.get("calibration") or {}).get("predictions")
+    test_predictions = (inputs.get("test") or {}).get("predictions")
+    if (
+        calibration_predictions is not None
+        and test_predictions is not None
+        and _same_path(calibration_predictions, test_predictions)
+    ):
+        raise ValueError(
+            "inputs.calibration.predictions and inputs.test.predictions point to the "
+            "same file. Coverage must be evaluated on data the layer was not fitted "
+            "on: use a separately generated test set.",
+        )
+
+
+def _same_path(first: Any, second: Any) -> bool:
+    return (
+        Path(str(first)).expanduser().resolve()
+        == Path(str(second)).expanduser().resolve()
+    )
 
 
 def resolve_command_config(
@@ -196,41 +213,20 @@ def resolve_command_config(
         "distance",
         "embedding_pooling",
         "variables",
-        "calibration_fraction",
-        "random_seed",
         "screen_bounds",
         "save_figures",
     ):
         if key in config:
             resolved[key] = config[key]
 
+    inputs = config.get("inputs") or {}
     _merge_mapping(
         resolved,
-        config.get("inputs"),
-        allowed_keys={
-            "predictions",
-            "generator_predictions",
-            "pf_node",
-            "pf_edge",
-            "embeddings",
-            "artifact",
-            "analysis_pf_node",
-            "analysis_pf_edge",
-        },
+        inputs.get(_COMMAND_DATASET[command_name]),
+        allowed_keys=_DATASET_KEYS,
     )
-    _merge_mapping(
-        resolved,
-        config.get("outputs"),
-        allowed_keys={
-            "output",
-            "artifact",
-            "calibrated_predictions",
-            "calibrated_predictions_volt",
-            "calibrated_predictions_line",
-            "screen_dir",
-            "screened_predictions",
-        },
-    )
+    _merge_mapping(resolved, inputs, allowed_keys={"artifact"})
+    _merge_mapping(resolved, config.get("outputs"), allowed_keys=_OUTPUT_KEYS)
 
     command_overrides = {}
     commands = config.get("commands")
@@ -257,39 +253,13 @@ def resolve_command_config(
         "variables",
         "output",
         "artifact",
-        "calibration_fraction",
-        "random_seed",
         "screen_bounds",
         "save_figures",
     ):
         if key in command_overrides:
             resolved[key] = command_overrides[key]
     _merge_mapping(
-        resolved,
-        command_overrides.get("inputs"),
-        allowed_keys={
-            "predictions",
-            "generator_predictions",
-            "pf_node",
-            "pf_edge",
-            "embeddings",
-            "artifact",
-            "analysis_pf_node",
-            "analysis_pf_edge",
-        },
-    )
-    _merge_mapping(
-        resolved,
-        command_overrides.get("outputs"),
-        allowed_keys={
-            "output",
-            "artifact",
-            "calibrated_predictions",
-            "calibrated_predictions_volt",
-            "calibrated_predictions_line",
-            "screen_dir",
-            "screened_predictions",
-        },
+        resolved, command_overrides.get("outputs"), allowed_keys=_OUTPUT_KEYS
     )
     return resolved
 
@@ -320,18 +290,11 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
                 "cp_type 'kernel' does not support strat 'pred_bins': prediction bins are "
                 "element-wise while kernel localization is scenario-wise.",
             )
-        if command_name == "compute":
-            if config.get("embeddings") is None:
-                raise ValueError(
-                    "cp_type 'kernel' requires inputs.embeddings pointing at a scenario "
-                    "embeddings parquet.",
-                )
-            if config.get("calibration_fraction") is None:
-                raise ValueError(
-                    "cp_type 'kernel' requires a calibration_fraction. Without a split the "
-                    "kernel would weight every test scenario against itself at distance "
-                    "zero, which invalidates the coverage guarantee.",
-                )
+        if command_name == "compute" and config.get("embeddings") is None:
+            raise ValueError(
+                "cp_type 'kernel' requires inputs.calibration.embeddings pointing at a "
+                "scenario embeddings parquet.",
+            )
 
     if "system_load_n_bins" in config:
         validate_system_load_n_bins(config.get("system_load_n_bins"))
@@ -346,24 +309,6 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
         )
     if strat == "pred_bins" and config.get("pred_n_bins") is None:
         raise ValueError("pred_n_bins is required when strat is 'pred_bins'.")
-
-    calibration_fraction = config.get("calibration_fraction")
-    if calibration_fraction is not None:
-        try:
-            normalized_fraction = float(calibration_fraction)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "calibration_fraction must be numeric when provided."
-            ) from exc
-        if not 0.0 < normalized_fraction < 1.0:
-            raise ValueError("calibration_fraction must be strictly between 0 and 1.")
-
-    random_seed = config.get("random_seed")
-    if random_seed is not None:
-        try:
-            int(random_seed)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("random_seed must be an integer when provided.") from exc
 
     if "screen_bounds" in config and config.get("screen_bounds") is not None:
         screen_bounds = config["screen_bounds"]

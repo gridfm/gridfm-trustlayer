@@ -146,7 +146,7 @@ Trustlayer therefore preserves the OPF generator artifact as a first-class input
 
 ## Scenario embedding artifacts
 
-Used only by `cp_type: kernel`, and read from `inputs.embeddings`.
+Used only by `cp_type: kernel`, and read from `inputs.calibration.embeddings` (`compute`) and `inputs.test.embeddings` (`calibrate`).
 
 Required columns:
 
@@ -321,7 +321,7 @@ Two on-disk encodings exist, selected by `cp_type`. `load_interval_artifacts` de
 
 | `cp_type` | Encoding | Stored state |
 | --- | --- | --- |
-| `element` | JSON | per-entity residual quantiles, optional per-stratum quantiles, stratification metadata, bin edges, split scenario ids |
+| `element` | JSON | per-entity residual quantiles, optional per-stratum quantiles, stratification metadata, bin edges, fingerprint of the calibration predictions |
 | `kernel` | compressed binary container (`npz`) with a `__meta__` JSON entry | everything above plus the calibration residual bank, per-entity valid masks, standardized calibration embeddings, embedding standardization statistics, per-stratum fallback quantiles, and the kernel settings (`distance`, `bandwidth`, `k_nn`, `n_eff_target`, `n_eff_min`, `embedding_pooling`) |
 
 Kernel artifacts are therefore much larger than element artifacts, because they retain the calibration residuals and embeddings rather than reducing them to a quantile table.

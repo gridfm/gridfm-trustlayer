@@ -8,10 +8,10 @@ This page summarizes the current trustlayer workflow.
 
 The core idea is:
 
-1. start from model predictions and matching ground truth
-2. measure calibration residuals on a held-out calibration set
-3. convert those residuals into conformal interval adjustments
-4. apply the resulting intervals to new predictions
+1. start from model predictions and matching ground truth on a calibration dataset
+2. measure the calibration residuals
+3. convert those residuals into conformal interval adjustments (`compute`)
+4. apply the resulting intervals to a separate test dataset, where coverage is measured (`calibrate`)
 5. optionally screen those intervals against operating limits
 
 The repository is intentionally post-hoc and model-agnostic: it does not train GridFM models and it does not depend on Lightning or GPU-specific runtime in the statistical core.
@@ -54,7 +54,7 @@ They differ in *where the quantile comes from*, not in what is calibrated. Both 
 | What `calibrate` does | table lookup, then add the offset to the prediction | computes distances, bandwidth, and kernel weights, then evaluates a weighted quantile per test scenario |
 | Interval offset varies by | entity, and stratum if `strat` is set | entity, stratum, **and test scenario** |
 | Artifact encoding | JSON | compressed binary container |
-| Extra inputs | none | `inputs.embeddings` |
+| Extra inputs | none | `embeddings` in `inputs.calibration` and `inputs.test` |
 
 ## `cp_type: element`
 
@@ -82,7 +82,6 @@ Current characteristics:
 - an adaptive bandwidth, selected either from the `k_nn`-th nearest-neighbour distance or by solving for a target effective sample size
 - a fallback to the stratum-wide quantile when the effective sample size drops below `n_eff_min`
 - composes with `n_outages`, `outage_type`, and `system_load_bin` stratification; incompatible with `pred_bins`
-- requires a non-null `calibration_fraction`
 
 ### Scenario representation
 
@@ -227,7 +226,7 @@ Trustlayer calibrates each variable independently and, within a variable, each e
 
 ### Residuals used during `compute`
 
-For every aligned scenario-entity pair in the calibration slice, trustlayer computes the signed residual
+For every aligned scenario-entity pair in the calibration dataset, trustlayer computes the signed residual
 
 $$
 r_{s,e} = y_{s,e} - \hat{y}_{s,e}.
@@ -235,25 +234,29 @@ $$
 
 The sign matters. A positive residual means the model underpredicted the target, and a negative residual means it overpredicted it.
 
-For each entity $e$, trustlayer then stores two empirical residual quantiles:
+For each entity $e$, with $n_e$ valid calibration residuals sorted as $r_{(1),e} \le \dots \le r_{(n_e),e}$, trustlayer stores the split-conformal residual quantiles
 
 $$
-q^-_e = Q_{\alpha/2}(\{r_{s,e}\}_s), \qquad
-q^+_e = Q_{1-\alpha/2}(\{r_{s,e}\}_s).
+q^-_e = r_{(\lfloor (n_e+1)\,\alpha/2 \rfloor),\,e}, \qquad
+q^+_e = r_{(\lceil (n_e+1)(1-\alpha/2) \rceil),\,e},
 $$
 
-So with `alpha = 0.1`, the implementation uses the empirical 5th and 95th percentiles of the residuals for each entity.
+with $q^-_e = -\infty$ if the lower rank is below 1 and $q^+_e = +\infty$ if the upper rank exceeds $n_e$. The $+1$ is the finite-sample correction of split conformal prediction: if the calibration and test residuals of an entity are exchangeable, the interval $[\hat{y} + q^-_e,\ \hat{y} + q^+_e]$ contains the true value with probability at least $1-\alpha$ (and each one-sided bound with probability at least $1-\alpha/2$), for any number of calibration samples. The plain empirical quantile does not carry this guarantee.
 
-This is why the current method is described in the code as a naive residual-quantile method rather than a more elaborate conformal variant.
+A finite bound therefore needs $n_e \ge \lceil 2/\alpha \rceil - 1$ valid residuals, i.e. 19 at `alpha = 0.1`. With fewer, the bound is infinite rather than a falsely narrow interval. For large $n_e$ the correction is negligible: with `alpha = 0.1` and a few thousand residuals, the bounds are within one order statistic of the empirical 5th and 95th percentiles.
+
+The class implementing this is still named `NaiveIntervalCalibrator`, for historical reasons; it is the stratified split-conformal method of the paper.
 
 ### Stratified residual quantiles
 
 If `strat` is enabled, trustlayer first assigns each scenario to a stratum $g_s$ and then fits separate quantiles inside each stratum:
 
 $$
-q^-_{e,g} = Q_{\alpha/2}(\{r_{s,e} : g_s = g\}), \qquad
-q^+_{e,g} = Q_{1-\alpha/2}(\{r_{s,e} : g_s = g\}).
+q^-_{e,g} = Q^{\mathrm{CP}}_{\alpha/2}(\{r_{s,e} : g_s = g\}), \qquad
+q^+_{e,g} = Q^{\mathrm{CP}}_{1-\alpha/2}(\{r_{s,e} : g_s = g\}),
 $$
+
+where $Q^{\mathrm{CP}}$ denotes the corrected order statistic above, computed over the $n_{e,g}$ residuals of the stratum. The guarantee then holds within each stratum (Mondrian conformal prediction), provided calibration and test scenarios are exchangeable within it.
 
 The currently supported strata are:
 
@@ -288,7 +291,7 @@ $$
 
 In practical terms:
 
-- `compute` learns the load-bin edges from the calibration slice
+- `compute` learns the load-bin edges from the calibration dataset
 - `calibrate` reuses those same edges to assign new scenarios to bins
 - the human-readable labels such as `p20-p40 [1450, 1620)` are derived from those stored percentile edges
 

@@ -20,9 +20,6 @@ strat: system_load_bin
 system_load_n_bins: 5
 alpha: 0.1
 
-calibration_fraction: 0.3
-random_seed: 7
-
 variables:
   - Vm
   - Va
@@ -35,10 +32,18 @@ screen_bounds:
   line_loading:
     upper: 1.0
 
+# Two separately generated datasets: `compute` fits the layer on the
+# calibration set, `calibrate` and `screen` apply and evaluate it on the test set.
+# They must be different data (e.g. datakit runs with different seeds).
 inputs:
-  predictions: path/to/predictions.parquet
-  pf_node: path/to/raw/bus_data.parquet
-  pf_edge: path/to/raw/branch_data.parquet
+  calibration:  # read by `compute`
+    predictions: path/to/calibration/predictions.parquet
+    pf_node: path/to/calibration/raw/bus_data.parquet
+    pf_edge: path/to/calibration/raw/branch_data.parquet
+  test:  # read by `calibrate` and `screen`
+    predictions: path/to/test/predictions.parquet
+    pf_node: path/to/test/raw/bus_data.parquet
+    pf_edge: path/to/test/raw/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/element/system_load_bin_pf.trustlayer

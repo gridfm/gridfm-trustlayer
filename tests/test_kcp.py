@@ -170,6 +170,37 @@ def test_invalid_entries_carry_no_kernel_weight() -> None:
     assert np.abs(upper[:, 1:] - predictions.channels["Vm"][:, 1:]).max() < 10.0
 
 
+def test_element_without_calibration_data_does_not_flag_fallback() -> None:
+    # An element that is never valid in calibration (e.g. a branch out of service
+    # in every scenario) always takes the fallback bound. That must not mark every
+    # test scenario as a kernel fallback: the flags should match a fit in which
+    # all elements are valid.
+    predictions, ground_truth, embeddings = _make_sets()
+    strata = predictions.scenario_columns["n_outages"]
+
+    def fallback_flags(valid: np.ndarray | None) -> np.ndarray:
+        calibrator = KernelIntervalCalibrator.fit(
+            _channel_set(predictions.channels["Vm"], embeddings, strata, valid=valid),
+            _channel_set(ground_truth.channels["Vm"], embeddings, strata, valid=valid),
+            alpha=0.1,
+            channel_names=("Vm",),
+            strat="n_outages",
+            embeddings=embeddings,
+            embedding_pooling="mean",
+        )
+        calibrator.predict_intervals(
+            _channel_set(predictions.channels["Vm"], embeddings, strata, valid=valid)
+        )
+        return calibrator.diagnostics["kernel_fallback"]
+
+    never_valid = np.ones(predictions.channels["Vm"].shape, dtype=bool)
+    never_valid[:, 0] = False
+
+    reference = fallback_flags(None)
+    assert not reference.all()
+    np.testing.assert_array_equal(fallback_flags(never_valid), reference)
+
+
 def test_chunking_does_not_change_results() -> None:
     calibrator, predictions = _fit()
     single_threaded = calibrator.predict_intervals(predictions)["Vm"]

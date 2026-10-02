@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -36,6 +37,7 @@ from gridfm_trustlayer.conformal.kernel import (
     KernelIntervalCalibrator,
 )
 from gridfm_trustlayer.io import (
+    PredictionSet,
     compute_line_loading,
     load_ground_truth,
     load_predictions,
@@ -123,14 +125,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--variables",
         nargs="+",
         help="Variables to calibrate: any subset of Vm, Va, and line_loading.",
-    )
-    compute_parser.add_argument(
-        "--calibration-fraction",
-        type=float,
-        help="Optional scenario fraction reserved for calibration when fitting on a pool and applying on holdout scenarios.",
-    )
-    compute_parser.add_argument(
-        "--random-seed", type=int, help="Random seed used with --calibration-fraction."
     )
     compute_parser.add_argument(
         "--embeddings",
@@ -307,12 +301,6 @@ def _run_compute(args: argparse.Namespace) -> None:
         coalesce_option(args.variables, config, "variables")
     )
     variable_groups = _partition_variables(variables)
-    calibration_fraction = coalesce_option(
-        args.calibration_fraction,
-        config,
-        "calibration_fraction",
-    )
-    random_seed = coalesce_option(args.random_seed, config, "random_seed")
     embedding_pooling = validate_pooling(
         coalesce_option(args.embedding_pooling, config, "embedding_pooling")
         or DEFAULT_POOLING
@@ -344,12 +332,6 @@ def _run_compute(args: argparse.Namespace) -> None:
         ),
     )
     if cp_type == "kernel":
-        if calibration_fraction is None:
-            raise ValueError(
-                "cp_type 'kernel' requires a calibration_fraction. Without a split every "
-                "test scenario would sit at distance zero from itself in the calibration "
-                "bank, which invalidates the coverage guarantee.",
-            )
         predictions = _attach_scenario_embeddings(
             predictions,
             coalesce_option(args.embeddings, config, "embeddings", required=True),
@@ -360,27 +342,13 @@ def _run_compute(args: argparse.Namespace) -> None:
         coalesce_option(args.pf_edge, config, "pf_edge", required=True),
         scenario_ids=predictions.scenario_ids,
     )
-    split = None
-    if calibration_fraction is not None:
-        split = _split_calibration_scenarios(
-            predictions.scenario_ids,
-            float(calibration_fraction),
-            random_seed,
-        )
+    # Every scenario of the calibration dataset is used for fitting; the layer is
+    # evaluated by `calibrate` on a separate test dataset.
+    fingerprint = _prediction_fingerprint(predictions)
     calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator] = {}
     for target_kind, target_variables in variable_groups.items():
         working_predictions = predictions
         working_ground_truth = ground_truth
-        if split is not None:
-            working_predictions = _subset_prediction_set(
-                predictions,
-                split["calibration_scenario_ids"],
-            )
-            working_ground_truth = _subset_ground_truth_set(
-                ground_truth,
-                split["calibration_scenario_ids"],
-            )
-
         base_predictions, _ = _build_target_channel_sets(
             working_predictions,
             working_ground_truth,
@@ -442,10 +410,7 @@ def _run_compute(args: argparse.Namespace) -> None:
                 pred_n_bins=pred_n_bins,
                 pred_bin_edges=pred_bin_edges,
             )
-        if split is not None and calibration_fraction is not None:
-            _apply_split_metadata(
-                calibrator, float(calibration_fraction), random_seed, split
-            )
+        calibrator.calibration_fingerprint = fingerprint
         calibrators[target_kind] = calibrator
     artifact_path = coalesce_option(args.output, config, "artifact")
     if artifact_path is None:
@@ -507,15 +472,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         )
         else pd.read_parquet(predictions_path)
     )
-    application_scenario_ids = _resolve_application_scenario_ids(
-        calibrators, predictions.scenario_ids
-    )
-    if application_scenario_ids is not None:
-        predictions = _subset_prediction_set(predictions, application_scenario_ids)
-        if original_frame is not None:
-            original_frame = original_frame[
-                original_frame["scenario"].isin(application_scenario_ids.tolist())
-            ].copy()
+    _refuse_calibration_data(calibrators, predictions)
 
     analysis_ground_truth = None
     if any(calibrator.strat is not None for calibrator in calibrators.values()):
@@ -751,45 +708,45 @@ def _partition_variables(
     return {target_kind: tuple(names) for target_kind, names in grouped.items()}
 
 
-def _apply_split_metadata(
-    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
-    calibration_fraction: float,
-    random_seed: int | None,
-    split: dict[str, np.ndarray],
-) -> None:
-    calibrator.calibration_fraction = calibration_fraction
-    calibrator.random_seed = None if random_seed is None else int(random_seed)
-    calibrator.split_pool_scenario_ids = split["split_pool_scenario_ids"]
-    calibrator.calibration_scenario_ids = split["calibration_scenario_ids"]
-    calibrator.application_scenario_ids = split["application_scenario_ids"]
+def _prediction_fingerprint(predictions: PredictionSet) -> str:
+    """SHA-256 over the predicted values and their scenario/bus alignment."""
+
+    digest = hashlib.sha256()
+    for array in (
+        predictions.scenario_ids,
+        predictions.bus_ids,
+        predictions.Vm,
+        predictions.Va,
+    ):
+        digest.update(np.ascontiguousarray(array).tobytes())
+    for name in sorted(predictions.channels):
+        digest.update(name.encode("utf-8"))
+        digest.update(np.ascontiguousarray(predictions.channels[name]).tobytes())
+    return digest.hexdigest()
 
 
-def _resolve_application_scenario_ids(
+def _refuse_calibration_data(
     calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
-    scenario_ids: np.ndarray,
-) -> np.ndarray | None:
-    application_ids: np.ndarray | None = None
-    for calibrator in calibrators.values():
-        should_subset = _should_use_application_subset(calibrator, scenario_ids)
-        if not should_subset:
-            if application_ids is not None:
-                raise ValueError(
-                    "All calibrators in a mixed artifact must agree on the application-scenario subset."
-                )
-            continue
-        assert calibrator.application_scenario_ids is not None
-        candidate = calibrator.application_scenario_ids.astype(np.int64, copy=False)
-        if application_ids is None:
-            application_ids = candidate
-            continue
-        if not np.array_equal(
-            np.sort(application_ids.astype(np.int64, copy=False)),
-            np.sort(candidate.astype(np.int64, copy=False)),
-        ):
-            raise ValueError(
-                "All calibrators in a mixed artifact must share the same application-scenario subset."
-            )
-    return None if application_ids is None else application_ids.copy()
+    predictions: PredictionSet,
+) -> None:
+    """Refuse to apply an artifact to the predictions it was fitted on.
+
+    Coverage measured on the calibration data is in-sample and says nothing about
+    new scenarios, so `calibrate` requires a test dataset distinct from the one
+    `compute` used.
+    """
+
+    fingerprints = {
+        calibrator.calibration_fingerprint
+        for calibrator in calibrators.values()
+        if calibrator.calibration_fingerprint is not None
+    }
+    if _prediction_fingerprint(predictions) in fingerprints:
+        raise ValueError(
+            "The test predictions are identical to the calibration predictions this "
+            "artifact was fitted on. Apply the layer to a separate test dataset "
+            "(inputs.test) so that coverage is measured on unseen scenarios.",
+        )
 
 
 def _resolve_output_path(
@@ -1978,140 +1935,6 @@ def _attach_scenario_embeddings(
     )
     predictions.scenario_embeddings = embedding_set.align_to(predictions.scenario_ids)
     return predictions
-
-
-def _split_calibration_scenarios(
-    scenario_ids: np.ndarray,
-    calibration_fraction: float,
-    random_seed: int | None,
-) -> dict[str, np.ndarray]:
-    if not 0.0 < calibration_fraction < 1.0:
-        raise ValueError(
-            "calibration_fraction must be strictly between 0 and 1 when provided.",
-        )
-    if len(scenario_ids) < 2:
-        raise ValueError(
-            "calibration_fraction requires at least two scenarios so one can remain for application.",
-        )
-    n_calibration = int(np.floor(len(scenario_ids) * calibration_fraction))
-    n_calibration = min(max(n_calibration, 1), len(scenario_ids) - 1)
-    rng = np.random.default_rng(None if random_seed is None else int(random_seed))
-    calibration_ids = np.sort(
-        rng.choice(scenario_ids, size=n_calibration, replace=False).astype(
-            np.int64, copy=False
-        ),
-    )
-    application_ids = np.array(
-        [
-            scenario_id
-            for scenario_id in scenario_ids
-            if scenario_id not in set(calibration_ids.tolist())
-        ],
-        dtype=np.int64,
-    )
-    return {
-        "split_pool_scenario_ids": scenario_ids.copy(),
-        "calibration_scenario_ids": calibration_ids,
-        "application_scenario_ids": application_ids,
-    }
-
-
-def _should_use_application_subset(
-    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
-    scenario_ids: np.ndarray,
-) -> bool:
-    if (
-        calibrator.split_pool_scenario_ids is None
-        or calibrator.application_scenario_ids is None
-    ):
-        return False
-    return np.array_equal(
-        np.sort(scenario_ids.astype(np.int64, copy=False)),
-        np.sort(calibrator.split_pool_scenario_ids.astype(np.int64, copy=False)),
-    )
-
-
-def _subset_prediction_set(
-    predictions,
-    scenario_ids: np.ndarray,
-):
-    scenario_mask = np.isin(predictions.scenario_ids, scenario_ids)
-    generator_predictions = predictions.generator_predictions
-    if generator_predictions is not None:
-        generator_mask = np.isin(generator_predictions.scenario_ids, scenario_ids)
-        generator_predictions = type(generator_predictions)(
-            channel_names=generator_predictions.channel_names,
-            scenario_ids=generator_predictions.scenario_ids[generator_mask].copy(),
-            generator_ids=generator_predictions.generator_ids[generator_mask].copy(),
-            bus_ids=generator_predictions.bus_ids[generator_mask].copy(),
-            channels={
-                name: values[generator_mask].copy()
-                for name, values in generator_predictions.channels.items()
-            },
-            target_channels={
-                name: values[generator_mask].copy()
-                for name, values in generator_predictions.target_channels.items()
-            },
-            static_columns={
-                name: values[generator_mask].copy()
-                for name, values in generator_predictions.static_columns.items()
-            },
-        )
-    return type(predictions)(
-        task_name=predictions.task_name,
-        channel_names=predictions.channel_names,
-        scenario_ids=predictions.scenario_ids[scenario_mask].copy(),
-        bus_ids=predictions.bus_ids.copy(),
-        Vm=predictions.Vm[scenario_mask].copy(),
-        Va=predictions.Va[scenario_mask].copy(),
-        channels={
-            name: values[scenario_mask].copy()
-            for name, values in predictions.channels.items()
-        },
-        bus_type_masks={
-            name: values[scenario_mask].copy()
-            for name, values in predictions.bus_type_masks.items()
-        },
-        generator_predictions=generator_predictions,
-        scenario_embeddings=None
-        if predictions.scenario_embeddings is None
-        else predictions.scenario_embeddings[scenario_mask].copy(),
-    )
-
-
-def _subset_ground_truth_set(
-    ground_truth,
-    scenario_ids: np.ndarray,
-):
-    scenario_mask = np.isin(ground_truth.scenario_ids, scenario_ids)
-    return type(ground_truth)(
-        scenario_ids=ground_truth.scenario_ids[scenario_mask].copy(),
-        bus_ids=ground_truth.bus_ids.copy(),
-        branch_ids=ground_truth.branch_ids.copy(),
-        n_outages=ground_truth.n_outages[scenario_mask].copy(),
-        outage_type=ground_truth.outage_type[scenario_mask].copy(),
-        system_load=ground_truth.system_load[scenario_mask].copy(),
-        removed_mask=ground_truth.removed_mask[scenario_mask].copy(),
-        Vm=ground_truth.Vm[scenario_mask].copy(),
-        Va=ground_truth.Va[scenario_mask].copy(),
-        channels={
-            name: values[scenario_mask].copy()
-            for name, values in ground_truth.channels.items()
-        },
-        admittances={
-            name: values[scenario_mask].copy()
-            for name, values in ground_truth.admittances.items()
-        },
-        f_bus=ground_truth.f_bus.copy(),
-        t_bus=ground_truth.t_bus.copy(),
-        rate_a=ground_truth.rate_a.copy(),
-        base_kv=ground_truth.base_kv.copy(),
-        sn_mva=ground_truth.sn_mva,
-        bus_type_masks={
-            name: values[scenario_mask].copy()
-            for name, values in ground_truth.bus_type_masks.items()
-        },
-    )
 
 
 def _default_output_dir(task_name: str, cp_type: str) -> Path:
@@ -3449,6 +3272,10 @@ def _horizontal_boxplot(
     positions: np.ndarray,
     meanprops: dict[str, object],
 ):
+    # A stratum with too few calibration samples has infinite bounds (and so
+    # infinite widths), which a box plot cannot draw: its percentiles turn into
+    # NaN. Plot the finite values; the CSV outputs keep the infinite entries.
+    data = [np.asarray(values)[np.isfinite(values)] for values in data]
     try:
         return ax.boxplot(
             data,
@@ -3538,15 +3365,12 @@ def _load_analysis_ground_truth(
     config: dict[str, object],
     scenario_ids: np.ndarray,
 ):
-    analysis_pf_node = coalesce_option(args.pf_node, config, "analysis_pf_node")
-    if analysis_pf_node is None:
-        analysis_pf_node = coalesce_option(args.pf_node, config, "pf_node")
-    analysis_pf_edge = coalesce_option(args.pf_edge, config, "analysis_pf_edge")
-    if analysis_pf_edge is None:
-        analysis_pf_edge = coalesce_option(args.pf_edge, config, "pf_edge")
+    analysis_pf_node = coalesce_option(args.pf_node, config, "pf_node")
+    analysis_pf_edge = coalesce_option(args.pf_edge, config, "pf_edge")
     if analysis_pf_node is None or analysis_pf_edge is None:
         raise ValueError(
-            "calibrate requires analysis ground-truth inputs via --pf-node/--pf-edge when direct targets are not available in the predictions parquet.",
+            "calibrate requires the test ground truth via inputs.test.pf_node and "
+            "inputs.test.pf_edge (or --pf-node / --pf-edge).",
         )
     return load_ground_truth(
         analysis_pf_node,

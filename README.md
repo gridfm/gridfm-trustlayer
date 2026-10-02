@@ -2,12 +2,12 @@
 
 Conformal trustworthiness layer for GridFM foundation models.
 
-This repository implements a post-hoc conformal prediction layer for continuous grid-state predictions and derived physical quantities. It is intended to provide statistically valid uncertainty sets for direct model outputs such as `Vm` and `Va`, and for computed metrics such as `line_loading`.
+**Statistically valid error bars on grid-state predictions, without retraining the model.** Give it a model's predictions on held-out scenarios with a known AC solution, and it returns calibrated bounds on bus voltages and line loadings that contain the true value with a chosen probability, for example 90%. It works on top of any trained model, including contingencies the model never saw in training. In N-k screening, a line is flagged when its upper bound exceeds its rating, which turns a point prediction into a conservative screen with a controlled miss rate.
 
-> [!WARNING]
-> This project is under active development.
-> Do not rely on it yet for production use, operational decisions, published benchmarks, or stable downstream integrations.
-> Interfaces, file formats, and implementation details may change without notice while the package is being built out and validated. ⚠️
+The layer offers two methods: stratified split-conformal prediction (`cp_type: element`), with a finite-sample coverage guarantee under exchangeability of calibration and test scenarios, and kernel-weighted conformal prediction (`cp_type: kernel`), which adapts the margin to each scenario and whose coverage is verified empirically. See [`docs/methodology.md`](docs/methodology.md) and the paper listed under [Reference](#reference).
+
+> [!NOTE]
+> This is a pre-1.0 release. The statistical core is tested, but the Python API, configuration keys and artifact formats may still change between minor versions; check [`CHANGELOG.md`](CHANGELOG.md) before upgrading.
 
 ## Scope
 
@@ -70,7 +70,13 @@ The current implementation can run on:
 
 ## Installation
 
-Create or activate a Python 3.10-3.12 environment, then install the package in editable mode:
+Requires Python 3.10-3.12. To use the package:
+
+```bash
+python -m pip install "git+https://github.com/gridfm/gridfm-trustlayer"
+```
+
+For development, clone the repository and install it in editable mode:
 
 ```bash
 python -m pip install --upgrade pip
@@ -95,11 +101,98 @@ gridfm_trustlayer calibrate --config path/to/trust_config.yaml
 gridfm_trustlayer screen --config path/to/trust_config.yaml
 ```
 
+The layer is always fitted on one dataset and evaluated on another, so the config names two:
+
+```yaml
+inputs:
+  calibration:          # fitted on by `compute`
+    predictions: path/to/calibration/predictions.parquet
+    pf_node: path/to/calibration/raw/bus_data.parquet
+    pf_edge: path/to/calibration/raw/branch_data.parquet
+  test:                 # applied to and evaluated on by `calibrate` and `screen`
+    predictions: path/to/test/predictions.parquet
+    pf_node: path/to/test/raw/bus_data.parquet
+    pf_edge: path/to/test/raw/branch_data.parquet
+```
+
+Generate them independently, for example two GridFM-datakit runs with different seeds. Trustlayer never splits one dataset internally, and it refuses to evaluate on the data it was fitted on, because coverage measured there says nothing about new scenarios.
+
 Typical run structure:
 
-1. `compute` reads raw prediction and ground-truth artifacts and fits one or more interval calibrators.
-2. `calibrate` loads the saved `.trustlayer` artifact and appends interval columns to bus-level predictions or builds branch-level loading outputs.
-3. `screen` evaluates calibrated intervals against operating bounds such as `Vm in [0.95, 1.05]` or `line_loading <= 1.0`.
+1. `compute` reads the calibration predictions and ground truth and fits one or more interval calibrators.
+2. `calibrate` loads the saved `.trustlayer` artifact, applies it to the test predictions, and reports coverage against the test ground truth.
+3. `screen` evaluates the calibrated test intervals against operating bounds such as `Vm in [0.95, 1.05]` or `line_loading <= 1.0`.
+
+### Building the config interactively
+
+The config has many options, and which ones apply depends on earlier choices (kernel options, bin counts, screening bounds, OPF generator files). A Jupyter form builds it for you:
+
+```bash
+python -m pip install "gridfm-trustlayer[interactive]"
+```
+
+```python
+from gridfm_trustlayer.interactive import config_builder
+
+config_builder()
+```
+
+It is also available as [`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb). Options appear only when they apply, each choice has a one-line explanation, a live preview shows the YAML, and the config is checked with the CLI's own validation before it can be saved. The same logic is available without Jupyter as `gridfm_trustlayer.interactive.build_config(...)`.
+
+## Python API
+
+The calibrators can also be used directly from Python, with any model's predictions arranged as (scenario x entity) arrays:
+
+```python
+import numpy as np
+from gridfm_trustlayer import ChannelSet, NaiveIntervalCalibrator
+
+# Synthetic stand-in for model outputs: 2,000 contingency scenarios x 50 lines,
+# with prediction errors that grow with the contingency level k = 1..5.
+rng = np.random.default_rng(0)
+n_scenarios, n_lines = 2000, 50
+k = rng.integers(1, 6, n_scenarios)
+predicted = rng.uniform(0.2, 1.2, (n_scenarios, n_lines))
+true = predicted + rng.normal(0.0, 0.01 * k[:, None], predicted.shape)
+
+
+def channel_set(values, rows):
+    return ChannelSet(
+        scenario_ids=np.flatnonzero(rows),
+        entity_ids=np.arange(n_lines),
+        entity_name="branch",
+        channels={"line_loading": values[rows]},
+        scenario_columns={"n_outages": k[rows]},
+    )
+
+
+# Independent synthetic draws, so halving them is a valid calibration/test split.
+# With real data, use separately generated datasets (see Quick Start).
+calibration = np.arange(n_scenarios) < 1000
+calibrator = NaiveIntervalCalibrator.fit(
+    channel_set(predicted, calibration),
+    channel_set(true, calibration),
+    alpha=0.1,  # two-sided: 90% intervals, 5% per tail
+    channel_names=("line_loading",),
+    strat="n_outages",  # one quantile per (contingency level, line)
+)
+test_predictions = channel_set(predicted, ~calibration)
+lower, upper = calibrator.predict_intervals(test_predictions)["line_loading"]
+
+test_true = true[~calibration]
+coverage = ((lower <= test_true) & (test_true <= upper)).mean()
+print(f"coverage: {coverage:.3f}")  # about 0.90
+
+# Conservative screen: flag a line if its upper bound exceeds its rating.
+overloaded = upper > 1.0
+```
+
+Two conventions worth knowing:
+
+- **`alpha` is two-sided.** Each tail gets `alpha / 2`, so `alpha=0.1` gives 90% intervals whose upper bound alone holds with probability at least 95%. For a one-sided screen at level `1 - a` (for example, an upper bound on line loading), pass `alpha = 2 * a` and use only the upper bound.
+- **Too few calibration samples give infinite bounds.** A stratum needs at least `ceil(1 / (alpha / 2)) - 1` valid residuals (19 at `alpha=0.1`) for a finite bound. With fewer, the bound is `+inf` / `-inf` rather than a falsely narrow interval; merge strata or add calibration scenarios if that happens.
+
+`load_predictions`, `load_ground_truth`, `load_scenario_embeddings` and `compute_line_loading` read GridFM parquet artifacts into these arrays (`compute_line_loading` uses datakit's branch-flow routine and needs the `graphkit` extra), and `save_interval_artifact` / `load_interval_artifact` persist a fitted calibrator.
 
 ## CLI Summary
 
@@ -127,8 +220,7 @@ The repository ships a matrix of runnable example configs, one per option combin
 
 | Config | Demonstrates |
 | --- | --- |
-| `element_global_pf.yaml` | Smallest useful run: one global quantile table, no split |
-| `element_holdout_pf.yaml` | Adds `calibration_fraction` so coverage is measured honestly |
+| `element_global_pf.yaml` | Smallest useful run: one global quantile table |
 | `element_n_outages_pf.yaml` | Canonical N-k screening, stratified by contingency severity |
 | `element_outage_type_pf.yaml` | Stratified by outage regime instead of count |
 | `element_system_load_bin_pf.yaml` | Stratified by percentile bins of total demand |
@@ -163,7 +255,7 @@ The current workflow produces:
 
 - Only `cp_type: element` and `cp_type: kernel` are implemented today.
 - Only `strat: n_outages`, `strat: outage_type`, `strat: system_load_bin`, and `strat: pred_bins` are implemented today when stratification is requested.
-- `cp_type: kernel` requires `inputs.embeddings` and a non-null `calibration_fraction`, and it does not support `strat: pred_bins` (prediction bins are element-wise while kernel localization is scenario-wise).
+- `cp_type: kernel` requires `embeddings` in both datasets, and it does not support `strat: pred_bins` (prediction bins are element-wise while kernel localization is scenario-wise).
 - `bandwidth: knn` and `bandwidth: n_eff` are the two implemented bandwidth-selection modes. Selecting a good `k_nn` or `n_eff_target` for a given dataset still requires a tuning partition disjoint from the evaluation set.
 - Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
 
@@ -178,3 +270,4 @@ The current workflow produces:
 ## Reference
 
 - Paper: https://arxiv.org/pdf/2602.07995
+- If you use this software, please cite it as described in [`CITATION.cff`](CITATION.cff).

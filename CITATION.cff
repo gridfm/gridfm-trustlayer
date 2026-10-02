@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it, and the paper below, as follows."
+title: "gridfm-trustlayer: Conformal trustworthiness layer for GridFM foundation models"
+type: software
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/gridfm/gridfm-trustlayer"
+authors:
+  - family-names: "Alcántara"
+    given-names: "Antonio"
+    affiliation: "CUNEF Universidad"
+    email: "antonio.alcantara@cunef.edu"
+keywords:
+  - conformal prediction
+  - uncertainty quantification
+  - foundation models
+  - power systems
+  - contingency screening
+preferred-citation:
+  type: article
+  title: "Trustworthiness Layer for Foundation Models in Power Systems: Application to N-k Contingency Screening"
+  authors:
+    - family-names: "Alcántara"
+      given-names: "Antonio"
+      affiliation: "CUNEF Universidad"
+    - family-names: "Chatzivasileiadis"
+      given-names: "Spyros"
+  year: 2026
+  url: "https://arxiv.org/abs/2602.07995"
+  identifiers:
+    - type: other
+      value: "arXiv:2602.07995"
+      description: "arXiv preprint"

@@ -2,12 +2,14 @@
 
 This page documents the current trustlayer YAML structure used by `compute`, `calibrate`, and `screen`.
 
+To build a config without editing YAML by hand, use the Jupyter form `gridfm_trustlayer.interactive.config_builder()` (`pip install "gridfm-trustlayer[interactive]"`, or open `examples/notebooks/config_builder.ipynb`). It shows only the options that apply to your choices and validates the result before saving.
+
 ## Config resolution order
 
 The CLI resolves values in this order:
 
 1. shared top-level config values
-2. shared `inputs` and `outputs`
+2. the command's dataset under `inputs` (`inputs.calibration` for `compute`, `inputs.test` for `calibrate` and `screen`) and the shared `outputs`
 3. command-specific overrides under `commands.<verb>`
 4. explicit CLI flags
 
@@ -23,8 +25,6 @@ cp_type: element
 strat: pred_bins
 pred_n_bins: 5
 alpha: 0.1
-calibration_fraction: 0.25
-random_seed: 7
 variables:
   - Vm
   - Va
@@ -38,12 +38,14 @@ screen_bounds:
     upper: 1.0
 
 inputs:
-  predictions: path/to/predictions.parquet
-  generator_predictions: null
-  pf_node: path/to/bus_data.parquet
-  pf_edge: path/to/branch_data.parquet
-  analysis_pf_node: null
-  analysis_pf_edge: null
+  calibration:            # fits the layer (`compute`)
+    predictions: path/to/calibration/predictions.parquet
+    pf_node: path/to/calibration/bus_data.parquet
+    pf_edge: path/to/calibration/branch_data.parquet
+  test:                   # applies and evaluates it (`calibrate`, `screen`)
+    predictions: path/to/test/predictions.parquet
+    pf_node: path/to/test/bus_data.parquet
+    pf_edge: path/to/test/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/powerflow/element/grid_predictions_vm_va_line_loading.trustlayer
@@ -60,7 +62,7 @@ commands:
 
 ## Example kernel config
 
-`cp_type: kernel` adds an embeddings input and three kernel knobs, and requires a non-null `calibration_fraction`:
+`cp_type: kernel` adds an embeddings input to each dataset and three kernel knobs:
 
 ```yaml
 version: 1
@@ -69,10 +71,6 @@ task_name: PowerFlow
 cp_type: kernel
 strat: n_outages
 alpha: 0.1
-# Required for cp_type: kernel. Without a split, each test scenario would sit at
-# distance zero from itself in the calibration bank.
-calibration_fraction: 0.3
-random_seed: 7
 
 # Kernel knobs
 embedding_pooling: mean
@@ -95,10 +93,16 @@ screen_bounds:
     upper: 1.0
 
 inputs:
-  predictions: path/to/predictions.parquet
-  embeddings: path/to/bus_embeddings.parquet
-  pf_node: path/to/bus_data.parquet
-  pf_edge: path/to/branch_data.parquet
+  calibration:
+    predictions: path/to/calibration/predictions.parquet
+    embeddings: path/to/calibration/bus_embeddings.parquet
+    pf_node: path/to/calibration/bus_data.parquet
+    pf_edge: path/to/calibration/branch_data.parquet
+  test:
+    predictions: path/to/test/predictions.parquet
+    embeddings: path/to/test/bus_embeddings.parquet
+    pf_node: path/to/test/bus_data.parquet
+    pf_edge: path/to/test/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/powerflow/kernel/predictions_vm_va_line_loading.trustlayer
@@ -118,8 +122,6 @@ outputs:
 | `system_load_n_bins`   | `int or null`   | Required when`strat: system_load_bin`          | Requested number of percentile bins learned from per-scenario total active load.                                |
 | `pred_n_bins`          | `int or null`   | Required when`strat: pred_bins`                | Requested number of percentile bins learned from the calibration predictions for each calibrated variable. |
 | `alpha`                | `float`         | Required for`compute`                          | Miscoverage level used while fitting intervals.                                                                 |
-| `calibration_fraction` | `float or null` | Required for`cp_type: kernel`                  | Fraction of scenarios reserved for fitting before applying on holdout scenarios. Optional for `element`, mandatory for `kernel`. |
-| `random_seed`          | `int or null`   | No                                               | Random seed used with`calibration_fraction`.                                                                  |
 | `embedding_pooling`    | `str or null`   | No (kernel only)                                 | How per-entity embeddings are pooled into one vector per scenario:`mean` (default), `max`, `meanmax`, `concat`. Stored in the artifact; `compute` and `calibrate` must agree. |
 | `distance`             | `str or null`   | No (kernel only)                                 | Distance over scenario representations:`euclidean` (default) or `cosine`.                                     |
 | `bandwidth`            | `str or null`   | No (kernel only)                                 | How the kernel bandwidth is chosen:`knn` (default) or `n_eff`.                                                |
@@ -148,15 +150,26 @@ The produced label columns and summary labels use percentile-range notation with
 
 ## `inputs`
 
-| Key                       | Type            | Used by                                                        | Description                                                                                                            |
-| ------------------------- | --------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `predictions`           | `str`         | `compute`, `calibrate`, default `screen` path resolution | Main bus-level prediction parquet.                                                                                     |
-| `embeddings`            | `str or null` | `compute`, `calibrate`                                     | Per-entity embeddings parquet with `scenario`, `bus`, and `emb_*` columns. Required for `cp_type: kernel`, ignored otherwise. |
-| `generator_predictions` | `str or null` | `compute`, `calibrate`                                     | Optional OPF generator prediction parquet.                                                                             |
-| `pf_node`               | `str`         | `compute`, `calibrate`, `screen`                         | Raw bus ground truth.                                                                                                  |
-| `pf_edge`               | `str`         | `compute`, `calibrate`, `screen`                         | Raw branch ground truth.                                                                                               |
-| `analysis_pf_node`      | `str or null` | `calibrate`                                                  | Optional alternate bus ground truth for analysis when the prediction artifact does not already contain target columns. |
-| `analysis_pf_edge`      | `str or null` | `calibrate`                                                  | Optional alternate branch ground truth for line-loading analysis when needed.                                          |
+The layer is always fitted and evaluated on two separate datasets, and `inputs` holds one block for each:
+
+- `inputs.calibration`: the data `compute` fits the layer on.
+- `inputs.test`: the data `calibrate` applies the layer to and `screen` evaluates it on.
+
+Coverage is a statement about new data, so it is only meaningful on scenarios the layer was not fitted on. Trustlayer therefore never splits one dataset internally. Generate the two sets independently, for example two GridFM-datakit runs with the same settings and different seeds. If your data has structure, for example several topologies per load profile, keep related scenarios on the same side, or near-duplicate scenarios will make coverage and kernel localization look better than they are.
+
+Two checks enforce the separation. The config is rejected if both blocks point at the same `predictions` file. In addition, the artifact stores a fingerprint of the calibration predictions, and `calibrate` refuses test predictions identical to them, for instance a renamed copy.
+
+Each block accepts:
+
+| Key                       | Type            | Description                                                                                                            |
+| ------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `predictions`           | `str`         | Bus-level prediction parquet. The test block also sets the default output names of `calibrate` and `screen`.         |
+| `pf_node`               | `str`         | Raw bus ground truth of that dataset.                                                                                  |
+| `pf_edge`               | `str`         | Raw branch ground truth of that dataset (also provides the branch parameters for `line_loading`).                    |
+| `embeddings`            | `str or null` | Per-entity embeddings parquet with `scenario`, `bus`, and `emb_*` columns. Required in both blocks for `cp_type: kernel`, ignored otherwise. |
+| `generator_predictions` | `str or null` | Optional OPF generator prediction parquet.                                                                             |
+
+`inputs.artifact` may also be set at the top of `inputs` (next to the two blocks) as an alternative to `outputs.artifact` for the path `calibrate` reads.
 
 ## `outputs`
 
@@ -210,12 +223,11 @@ Supported override keys:
 - `variables`
 - `output`
 - `artifact`
-- `calibration_fraction`
-- `random_seed`
 - `screen_bounds`
 - `save_figures` (calibrate only)
-- nested `inputs`
 - nested `outputs`
+
+Inputs are not overridden per command: each command already reads its own dataset block.
 
 Example:
 
@@ -227,6 +239,7 @@ commands:
       - line_loading
     outputs:
       screen_dir: trustlayer_outputs/powerflow/element/screen
+```
 
 You can also override stratification per command, for example:
 
