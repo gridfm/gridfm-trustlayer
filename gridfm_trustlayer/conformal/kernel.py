@@ -439,7 +439,9 @@ class KernelIntervalCalibrator:
                         sorted_residuals=np.ascontiguousarray(sorted_residuals),
                         sort_order=np.ascontiguousarray(order),
                         sorted_valid=np.ascontiguousarray(sorted_valid),
-                        has_data=np.asarray(stratum_valid, dtype=bool).any(axis=0),
+                        has_data=np.asarray(
+                            np.asarray(stratum_valid, dtype=bool).any(axis=0)
+                        ),
                         fallback_lower=self.fallback_lower_quantiles[channel_name][
                             index
                         ],
