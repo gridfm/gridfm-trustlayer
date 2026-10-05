@@ -422,6 +422,6 @@ def test_form_preselects_and_lists_the_default_bandwidth_first() -> None:
     bandwidth = field("Bandwidth")
 
     assert bandwidth.value == "n_eff"
-    assert list(bandwidth.options)[0] == "n_eff"
+    assert next(iter(bandwidth.options)) == "n_eff"
     preview = " ".join(str(getattr(x, "value", "")) for x in widgets)
     assert "n_eff_target: 600.0" in preview

@@ -75,7 +75,7 @@ ignore = [
 # numpy's stubs use PEP 695 `type` statements, which mypy refuses to parse when
 # targeting < 3.12 -- it aborts on the stub before checking any project code.
 # Type-check against 3.12; the >=3.10 floor stays enforced by ruff's
-# target-version and by the 3.10/3.11/3.12 pytest matrix in CI.
+# target-version and by the Python 3.10 test job in CI.
 python_version = "3.12"
 files = ["gridfm_trustlayer", "tests"]
 warn_unused_configs = true
