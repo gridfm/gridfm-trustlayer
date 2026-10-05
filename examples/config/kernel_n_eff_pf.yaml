@@ -22,10 +22,9 @@ alpha: 0.1
 embedding_pooling: mean
 distance: euclidean
 bandwidth: n_eff
-# Omit to default to 20/alpha (200 at alpha: 0.1). A (1 - alpha/2) quantile puts
-# roughly n_eff * alpha/2 effective observations in the tail, so 20/alpha leaves
-# about ten of them.
-n_eff_target: 200
+# 600 is the default (omit the key to use it); n_eff_target: auto chooses it by
+# cross-validation on the calibration set (see kernel_n_eff_tuned_pf.yaml).
+n_eff_target: 600
 n_eff_min: 20
 
 variables:

@@ -10,15 +10,31 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10,<3.13"
 authors = [{ name = "Antonio Alcántara", email = "antonio.alcantara@cunef.edu" }]
+keywords = ["conformal prediction", "uncertainty quantification", "foundation models", "power systems", "contingency screening"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
 dependencies = [
   "matplotlib>=3.8",
   "numpy>=2.2",
   "pandas>=2.3",
   "pyarrow>=15",
-  "numba>=0.60",
   "scipy>=1.13",
   "pyyaml>=6",
 ]
+
+[project.urls]
+Repository = "https://github.com/gridfm/gridfm-trustlayer"
+Issues = "https://github.com/gridfm/gridfm-trustlayer/issues"
+Changelog = "https://github.com/gridfm/gridfm-trustlayer/blob/main/CHANGELOG.md"
+Paper = "https://arxiv.org/abs/2602.07995"
 
 [project.optional-dependencies]
 # gridfm-datakit imports `run_julia` from juliapkg, which juliapkg 0.1.26
@@ -59,7 +75,7 @@ ignore = [
 # numpy's stubs use PEP 695 `type` statements, which mypy refuses to parse when
 # targeting < 3.12 -- it aborts on the stub before checking any project code.
 # Type-check against 3.12; the >=3.10 floor stays enforced by ruff's
-# target-version and by the 3.10/3.11/3.12 pytest matrix in CI.
+# target-version and by the Python 3.10 test job in CI.
 python_version = "3.12"
 files = ["gridfm_trustlayer", "tests"]
 warn_unused_configs = true

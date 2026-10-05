@@ -1,0 +1,59 @@
+name: CI Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Supported Python versions are 3.10-3.12 (requires-python in pyproject.toml).
+# The newest is checked by pre-commit, which also runs the test suite; the
+# oldest gets its own test run, since pip installs older dependency versions
+# there (e.g. numpy 2.2).
+jobs:
+  pre-commit:
+    name: Pre-commit (ruff, mypy, tests) on Python 3.12
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,test]"
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+
+  pytests:
+    name: Tests on Python 3.10 (oldest supported)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Run pytest
+        run: pytest

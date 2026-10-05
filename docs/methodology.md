@@ -129,17 +129,17 @@ $$
 
 Two modes are implemented. Both produce a per-test-point $h^2$; everything downstream is identical.
 
-**`bandwidth: knn` (default).** The bandwidth is the distance to the $k_{\mathrm{nn}}$-th nearest neighbour within the stratum:
+**`bandwidth: knn`.** The bandwidth is the distance to the $k_{\mathrm{nn}}$-th nearest neighbour within the stratum:
 
 $$
 h^2 = d^2_{(k_{\mathrm{nn}})}.
 $$
 
-This adapts to local density — tight in well-sampled regions, wider in sparse ones — and is the rule the paper specifies.
+This adapts to local density — tight in well-sampled regions, wider in sparse ones.
 
 Its limitation is that $k_{\mathrm{nn}}$ is not portable across representations. Squared Euclidean distances concentrate as dimension grows, so a fixed $k_{\mathrm{nn}}$ localizes very differently depending on embedding width. On synthetic data with about 1500 calibration scenarios per stratum, $k_{\mathrm{nn}} = 20$ produces a median $n_{\mathrm{eff}}$ of roughly 40 at 2 dimensions, 1045 at 16, and 1498 at 384. At the widest, $k_{\mathrm{nn}} = 20$ and $k_{\mathrm{nn}} = 50$ are indistinguishable: the knob no longer controls anything.
 
-**`bandwidth: n_eff`.** The bandwidth is instead solved, per test point, so the resulting weights reach a target effective sample size:
+**`bandwidth: n_eff` (default).** The bandwidth is instead solved, per test point, so the resulting weights reach a target effective sample size:
 
 $$
 h^2 : \quad n_{\mathrm{eff}}(h^2) = n^{\mathrm{target}}_{\mathrm{eff}}.
@@ -147,9 +147,21 @@ $$
 
 $n_{\mathrm{eff}}$ increases monotonically from 1 (all weight on the nearest calibration scenario) to the stratum size (uniform weights), so this is a well-posed one-dimensional root find, solved by log-space bisection across a whole block of test points at once. Because $n_{\mathrm{eff}}$ is invariant to a common rescaling of the weights, the solve shifts the exponent by each row's minimum distance, which avoids underflow at small bandwidths without changing the result.
 
-This parameterization is invariant to embedding width and stratum size, and its default is derived from $\alpha$ rather than tuned: a $1-\alpha/2$ quantile places roughly $n_{\mathrm{eff}} \cdot \alpha/2$ effective observations in the tail, so $n^{\mathrm{target}}_{\mathrm{eff}} = 20/\alpha$ leaves about ten of them.
+This parameterization is invariant to embedding width and stratum size. The default target is $n^{\mathrm{target}}_{\mathrm{eff}} = 600$. A stratum with fewer calibration scenarios than the target gets uniform weights (equivalent to `cp_type: element`), and `n_eff_target: auto` chooses the target from the calibration data.
 
 Both remain hyperparameters. Selecting either by inspecting calibrated results on the set you intend to report on breaks the coverage guarantee; a disjoint tuning partition is required.
+
+### Cross-validated choice of $n^{\mathrm{target}}_{\mathrm{eff}}$
+
+With `n_eff_target: auto`, the target is chosen by $K$-fold cross-validation inside the calibration dataset, so no data beyond it is needed and the test set stays untouched. For each candidate $c$ and fold $f$, the kernel is fitted on the other folds and applied to fold $f$. This gives the cross-validated coverage $\widehat{\mathrm{cov}}_g(c)$ in every stratum $g$ (and overall) and the mean interval width $\bar{w}(c)$. A candidate is eligible if
+
+$$
+\widehat{\mathrm{cov}}_g(c) \;\ge\; 1-\alpha - 2\sqrt{\alpha(1-\alpha)/n_g} \quad \text{for every } g,
+$$
+
+with $n_g$ the number of calibration scenarios behind the estimate (the default tolerance; a fixed tolerance can be set instead). Among eligible candidates the narrowest, relative to the largest candidate, is chosen. If none is eligible, the weights are made uniform within each stratum, which reproduces `cp_type: element`.
+
+Optionally, the distance (Euclidean or cosine) is chosen in the same way, as a second dimension, over a full grid or a random sample of a fixed budget. Folds keep scenarios that share a load profile together (datakit's `load_scenario_idx`). Near-duplicate scenarios split across folds would otherwise make localization look better than it is on new data. Because $n_{\mathrm{eff}}$ is an absolute effective sample size, a target chosen on folds holding $(K-1)/K$ of the data carries over to the final fit on all of it. The result is an empirical, not a formal, coverage check. Options and outputs are described in [configuration.md](configuration.md#choosing-n_eff_target-automatically-n_eff_target-auto).
 
 ### Effective sample size and fallback
 

@@ -283,3 +283,145 @@ def test_turning_screening_off_hides_only_the_bounds() -> None:
     assert field("Line loading upper").layout.display == "none"
     for description in ["predictions", "alpha", "Output directory", "Config file"]:
         assert field(description).layout.display != "none", description
+
+
+def test_tuning_writes_auto_and_the_tuning_block() -> None:
+    config = _config(
+        cp_type="kernel",
+        bandwidth="n_eff",
+        n_eff_target=300.0,
+        tune_n_eff_target=True,
+        tuning={"folds": 4, "grid": [200, 100]},
+    )
+    validate_config(config)
+
+    assert config["n_eff_target"] == "auto"
+    assert config["tuning"]["folds"] == 4
+    assert config["tuning"]["grid"] == [100.0, 200.0]
+    assert config["tuning"]["group_by"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("cp_type", "bandwidth"), [("element", "n_eff"), ("kernel", "knn")]
+)
+def test_tuning_is_ignored_where_it_does_not_apply(
+    cp_type: str, bandwidth: str
+) -> None:
+    config = _config(cp_type=cp_type, bandwidth=bandwidth, tune_n_eff_target=True)
+    validate_config(config)
+
+    assert "tuning" not in config
+    assert config.get("n_eff_target") != "auto"
+
+
+def test_form_tuning_toggle_swaps_the_target_for_the_tuning_options(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    widgets, field = _form()
+    field("Method").value = "kernel"
+    field("Bandwidth").value = "n_eff"
+    tune = field("Tune n_eff_target by cross-validation on the calibration set")
+
+    assert not tune.value  # off by default
+    assert _shown(widgets, "n_eff_target")
+    assert not _shown(widgets, "Folds")
+
+    tune.value = True
+    assert not _shown(widgets, "n_eff_target")
+    assert _shown(widgets, "Folds")
+
+    for index, name in enumerate(["cal", "test"]):
+        for key, value in _dataset(name, kernel=True).items():
+            field(key, index).value = value
+    field("Candidates").value = "150, 300"
+    field("Save config").click()
+    config = load_cli_config(str(tmp_path / "trust_config.yaml"))
+    assert config["n_eff_target"] == "auto"
+    assert config["tuning"]["grid"] == [150.0, 300.0]
+
+
+def _shown(widgets: list[Any], description: str) -> bool:
+    """A field is shown when neither it nor any enclosing box is hidden."""
+
+    target = next(x for x in widgets if getattr(x, "description", None) == description)
+
+    def visible(node: Any) -> bool:
+        if node is target:
+            return node.layout.display != "none"
+        for child in getattr(node, "children", ()):
+            if visible(child):
+                return node.layout.display != "none"
+        return False
+
+    return visible(widgets[0])
+
+
+def test_random_search_writes_budget_and_range_instead_of_the_grid() -> None:
+    config = _config(
+        cp_type="kernel",
+        bandwidth="n_eff",
+        tune_n_eff_target=True,
+        tuning={
+            "search": "random",
+            "budget": 7,
+            "n_eff_range": [80, 900],
+            "distances": ["euclidean", "cosine"],
+        },
+    )
+    validate_config(config)
+
+    tuning = config["tuning"]
+    assert tuning["search"] == "random"
+    assert tuning["budget"] == 7
+    assert tuning["n_eff_range"] == [80.0, 900.0]
+    assert tuning["distances"] == ["euclidean", "cosine"]
+    assert "grid" not in tuning
+
+
+def test_form_random_search_with_both_distances(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    widgets, field = _form()
+    field("Method").value = "kernel"
+    field("Bandwidth").value = "n_eff"
+    field("Tune n_eff_target by cross-validation on the calibration set").value = True
+
+    assert _shown(widgets, "Candidates")
+    assert not _shown(widgets, "Budget (tries)")
+    field("Search").value = "random"
+    assert not _shown(widgets, "Candidates")
+    assert _shown(widgets, "Budget (tries)")
+    assert _shown(widgets, "n_eff range")
+
+    field("Also compare distances (euclidean and cosine)").value = True
+    field("Budget (tries)").value = 6
+    field("n_eff range").value = "150, 1500"
+    for index, name in enumerate(["cal", "test"]):
+        for key, value in _dataset(name, kernel=True).items():
+            field(key, index).value = value
+    field("Save config").click()
+
+    tuning = load_cli_config(str(tmp_path / "trust_config.yaml"))["tuning"]
+    assert tuning["search"] == "random"
+    assert tuning["budget"] == 6
+    assert tuning["n_eff_range"] == [150.0, 1500.0]
+    assert set(tuning["distances"]) == {"euclidean", "cosine"}
+
+
+def test_a_blank_n_eff_target_is_written_as_the_default() -> None:
+    config = _config(cp_type="kernel")
+    validate_config(config)
+
+    assert config["bandwidth"] == "n_eff"
+    assert config["n_eff_target"] == 600.0
+
+
+def test_form_preselects_and_lists_the_default_bandwidth_first() -> None:
+    widgets, field = _form()
+    field("Method").value = "kernel"
+    bandwidth = field("Bandwidth")
+
+    assert bandwidth.value == "n_eff"
+    assert next(iter(bandwidth.options)) == "n_eff"
+    preview = " ".join(str(getattr(x, "value", "")) for x in widgets)
+    assert "n_eff_target: 600.0" in preview

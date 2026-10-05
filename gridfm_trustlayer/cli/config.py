@@ -11,7 +11,12 @@ from gridfm_trustlayer.conformal.kernel import (
     SUPPORTED_BANDWIDTHS,
     SUPPORTED_DISTANCES,
 )
+from gridfm_trustlayer.conformal.tuning import TuningOptions
 from gridfm_trustlayer.io.embeddings import validate_pooling
+
+# `n_eff_target: auto` selects the target by cross-validation on the calibration
+# data (see gridfm_trustlayer.conformal.tuning); options live under `tuning:`.
+N_EFF_TARGET_AUTO = "auto"
 
 _ALLOWED_TOP_LEVEL_KEYS = {
     "version",
@@ -28,6 +33,7 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "distance",
     "embedding_pooling",
     "variables",
+    "tuning",
     "screen_bounds",
     "save_figures",
     "inputs",
@@ -213,6 +219,7 @@ def resolve_command_config(
         "distance",
         "embedding_pooling",
         "variables",
+        "tuning",
         "screen_bounds",
         "save_figures",
     ):
@@ -274,8 +281,26 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
     validate_distance(config.get("distance"))
     bandwidth = validate_bandwidth(config.get("bandwidth"))
     n_eff_target = validate_n_eff_target(config.get("n_eff_target"))
-    if bandwidth == "n_eff" and n_eff_target is not None:
-        n_eff_min = config.get("n_eff_min")
+    n_eff_min = config.get("n_eff_min")
+    if n_eff_target == N_EFF_TARGET_AUTO:
+        if cp_type != "kernel" or bandwidth != "n_eff":
+            raise ValueError(
+                "n_eff_target: auto tunes the kernel bandwidth, so it requires "
+                "cp_type: kernel and bandwidth: n_eff.",
+            )
+        options = TuningOptions.from_config(config.get("tuning"))
+        if n_eff_min is not None and options.smallest_n_eff_target() < float(n_eff_min):
+            where = "n_eff_range" if options.search == "random" else "grid"
+            raise ValueError(
+                f"tuning.{where} contains values below n_eff_min ({n_eff_min}); those "
+                "candidates would fall back to the stratum quantile everywhere.",
+            )
+    elif config.get("tuning") is not None:
+        raise ValueError(
+            "The tuning block only applies with n_eff_target: auto (and cp_type: kernel, "
+            "bandwidth: n_eff). Set n_eff_target: auto to tune, or remove tuning.",
+        )
+    elif bandwidth == "n_eff" and isinstance(n_eff_target, float):
         if n_eff_min is not None and n_eff_target < float(n_eff_min):
             raise ValueError(
                 f"n_eff_target ({n_eff_target}) is below n_eff_min ({n_eff_min}), "
@@ -427,15 +452,19 @@ def validate_bandwidth(value: str | None) -> str:
     return normalized
 
 
-def validate_n_eff_target(value: Any) -> float | None:
-    """Validate the target effective sample size for `bandwidth: n_eff`."""
+def validate_n_eff_target(value: Any) -> float | str | None:
+    """Validate `n_eff_target`: a number >= 1, `"auto"` (tuned by cross-validation), or None."""
 
     if value is None:
         return None
+    if isinstance(value, str) and value.strip().lower() == N_EFF_TARGET_AUTO:
+        return N_EFF_TARGET_AUTO
     try:
         normalized = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("n_eff_target must be numeric when provided.") from exc
+        raise ValueError(
+            "n_eff_target must be a number or 'auto' when provided."
+        ) from exc
     if normalized < 1.0:
         raise ValueError(f"n_eff_target must be >= 1; got {value!r}.")
     return normalized

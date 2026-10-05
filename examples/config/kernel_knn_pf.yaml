@@ -1,8 +1,8 @@
-# Kernel-weighted CP with the paper's bandwidth rule
+# Kernel-weighted CP with the k-nearest-neighbour bandwidth
 #
 # KCP localizes the quantile to each test scenario using a scenario embedding, so
-# bounds adapt per scenario rather than per stratum. This is the reference setup:
-# Euclidean distance, bandwidth from the k_nn-th nearest neighbour.
+# bounds adapt per scenario rather than per stratum. Here the bandwidth is the
+# distance to the k_nn-th nearest neighbour, instead of the default n_eff target.
 #
 # Run:
 #   gridfm_trustlayer compute   --config examples/config/kernel_knn_pf.yaml

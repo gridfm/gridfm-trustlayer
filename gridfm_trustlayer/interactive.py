@@ -31,8 +31,15 @@ from gridfm_trustlayer.conformal.kernel import (
     DEFAULT_DISTANCE,
     DEFAULT_K_NN,
     DEFAULT_N_EFF_MIN,
+    DEFAULT_N_EFF_TARGET,
     SUPPORTED_BANDWIDTHS,
     SUPPORTED_DISTANCES,
+)
+from gridfm_trustlayer.conformal.tuning import (
+    DEFAULT_TUNING_BUDGET,
+    DEFAULT_TUNING_FOLDS,
+    DEFAULT_TUNING_GRID,
+    TuningOptions,
 )
 from gridfm_trustlayer.io.embeddings import DEFAULT_POOLING, POOLING_REGISTRY
 
@@ -70,6 +77,8 @@ def build_config(
     k_nn: int = DEFAULT_K_NN,
     n_eff_target: float | None = None,
     n_eff_min: float = DEFAULT_N_EFF_MIN,
+    tune_n_eff_target: bool = False,
+    tuning: Mapping[str, Any] | None = None,
     screen_bounds: Mapping[str, Mapping[str, float]] | None = None,
     output_dir: str = "trustlayer_outputs",
 ) -> dict[str, Any]:
@@ -78,6 +87,12 @@ def build_config(
     Options that do not apply are dropped rather than written, e.g. kernel knobs
     for ``cp_type="element"``, ``k_nn`` under ``bandwidth="n_eff"``, embeddings for
     an element run, or bounds for variables that are not calibrated.
+
+    ``tune_n_eff_target=True`` (kernel with ``bandwidth="n_eff"`` only) writes
+    ``n_eff_target: auto`` and a ``tuning:`` block, so ``compute`` chooses the target
+    by cross-validation on the calibration set; ``tuning`` overrides its defaults
+    (``folds``, ``grid``, ``distances``, ``search``, ``budget``, ``n_eff_range``,
+    ``group_by``, ``seed``, ``coverage_tolerance``).
 
     ``screen_bounds=None`` (or bounds only for unselected variables) gives a config
     without a screening step: ``compute`` and ``calibrate`` produce the prediction
@@ -104,8 +119,29 @@ def build_config(
         config["bandwidth"] = bandwidth
         if bandwidth == "knn":
             config["k_nn"] = int(k_nn)
-        elif n_eff_target is not None:
-            config["n_eff_target"] = float(n_eff_target)
+        elif tune_n_eff_target:
+            options = TuningOptions.from_config(tuning)
+            config["n_eff_target"] = "auto"
+            block: dict[str, Any] = {"folds": options.folds, "search": options.search}
+            if options.search == "grid":
+                block["grid"] = list(options.grid)
+            else:
+                block["budget"] = options.budget
+                block["n_eff_range"] = list(options.resolved_range())
+            if options.distances:
+                block["distances"] = list(options.distances)
+            block.update(
+                group_by=options.group_by,
+                seed=options.seed,
+                coverage_tolerance=options.coverage_tolerance,
+            )
+            config["tuning"] = block
+        else:
+            # Written out even when left at the default, so the saved config is
+            # explicit and keeps its meaning if the library default changes.
+            config["n_eff_target"] = float(
+                DEFAULT_N_EFF_TARGET if n_eff_target is None else n_eff_target
+            )
         config["n_eff_min"] = float(n_eff_min)
     config["variables"] = variables
 
@@ -287,7 +323,11 @@ def config_builder() -> Any:
         layout=wide(),
     )
     bandwidth = w.ToggleButtons(
-        options=SUPPORTED_BANDWIDTHS,
+        # Default first.
+        options=[
+            DEFAULT_BANDWIDTH,
+            *[name for name in SUPPORTED_BANDWIDTHS if name != DEFAULT_BANDWIDTH],
+        ],
         value=DEFAULT_BANDWIDTH,
         description="Bandwidth",
         style=style,
@@ -302,7 +342,7 @@ def config_builder() -> Any:
     )
     n_eff_target = w.Text(
         value="",
-        placeholder="blank = 20 / alpha",
+        placeholder="blank = 600 (default)",
         description="n_eff_target",
         style=style,
         layout=wide(),
@@ -314,6 +354,128 @@ def config_builder() -> Any:
         description="n_eff_min",
         style=style,
         layout=wide(),
+    )
+    tune = w.Checkbox(
+        value=False,
+        description="Tune n_eff_target by cross-validation on the calibration set",
+        indent=False,
+        layout=w.Layout(width="520px"),
+    )
+    tune_note = note(
+        "compute splits the calibration scenarios into folds, fits the kernel on all but one "
+        "fold and checks coverage and width on the held-out one, for each candidate. It picks "
+        "the narrowest candidate that meets the coverage target overall and in every stratum; "
+        "if none does, the weights become uniform (equivalent to element). The test set is "
+        "never used. Off by default: costs about one kernel run per fold and candidate."
+    )
+    folds = w.BoundedIntText(
+        value=DEFAULT_TUNING_FOLDS,
+        min=2,
+        max=20,
+        description="Folds",
+        style=style,
+        layout=wide(),
+    )
+    grid = w.Text(
+        value=", ".join(f"{value:g}" for value in DEFAULT_TUNING_GRID),
+        description="Candidates",
+        style=style,
+        layout=wide(),
+    )
+    tune_distance = w.Checkbox(
+        value=False,
+        description="Also compare distances (euclidean and cosine)",
+        indent=False,
+        layout=w.Layout(margin="0 0 0 155px"),
+    )
+    search = w.ToggleButtons(
+        options=["grid", "random"], value="grid", description="Search", style=style
+    )
+    budget = w.BoundedIntText(
+        value=DEFAULT_TUNING_BUDGET,
+        min=1,
+        max=1000,
+        description="Budget (tries)",
+        style=style,
+        layout=wide(),
+    )
+    n_eff_range = w.Text(
+        value=f"{min(DEFAULT_TUNING_GRID):g}, {max(DEFAULT_TUNING_GRID):g}",
+        description="n_eff range",
+        style=style,
+        layout=wide(),
+    )
+    grid_row = w.VBox(
+        [
+            grid,
+            note(
+                "n_eff_target values to compare (comma-separated). Values above a stratum's "
+                "size give uniform weights in that stratum."
+            ),
+        ]
+    )
+    random_row = w.VBox(
+        [
+            budget,
+            n_eff_range,
+            note(
+                "Evaluates this many distinct settings, drawing n_eff_target log-uniformly "
+                "from the range (low, high) and the distance at random. Use it to bound the "
+                "cost when both dimensions vary; the cost grows with the budget, not with "
+                "the size of the space."
+            ),
+        ]
+    )
+    group_by = w.Dropdown(
+        options=[
+            ("auto: load_scenario_idx if present", "auto"),
+            ("load_scenario_idx (required)", "load_scenario_idx"),
+            ("none: split scenarios at random", "none"),
+        ],
+        value="auto",
+        description="Group folds by",
+        style=style,
+        layout=wide(),
+    )
+    seed = w.IntText(value=0, description="Seed", style=style, layout=wide())
+    tolerance = w.Text(
+        value="auto",
+        description="Coverage tolerance",
+        style=style,
+        layout=wide(),
+    )
+    tuning_box = w.VBox(
+        [
+            folds,
+            note(
+                "More folds use more calibration data per fit but take longer; 5 is a good default."
+            ),
+            tune_distance,
+            note(
+                "Adds the distance as a second dimension. Cosine keeps only the direction in "
+                "which a scenario deviates from the average one; it doubles the cost of a "
+                "grid search."
+            ),
+            search,
+            note(
+                "grid: every combination of the candidates (and distances). random: a fixed "
+                "budget of tries drawn from a range."
+            ),
+            grid_row,
+            random_row,
+            group_by,
+            note(
+                "Scenarios sharing a load profile (datakit load_scenario_idx) stay in one fold, "
+                "so near-duplicates cannot make the kernel look better than it is."
+            ),
+            seed,
+            tolerance,
+            note(
+                "How far below 1 - alpha cross-validated coverage may fall and still count as "
+                "meeting the target. auto: two standard errors for the number of scenarios "
+                "checked; or a fixed number such as 0.005."
+            ),
+        ]
     )
     knn_row = w.VBox(
         [
@@ -327,7 +489,9 @@ def config_builder() -> Any:
         [
             n_eff_target,
             note(
-                "Effective sample size per test scenario. Transfers across networks and embedding widths; k_nn does not."
+                "Effective sample size per test scenario; blank uses the default, 600. Transfers "
+                "across networks and embedding widths, unlike k_nn. Or tick the box above to "
+                "choose it by cross-validation on the calibration set."
             ),
         ]
     )
@@ -338,7 +502,10 @@ def config_builder() -> Any:
             distance,
             bandwidth,
             knn_row,
+            tune,
+            tune_note,
             neff_row,
+            tuning_box,
             n_eff_min,
         ]
     )
@@ -400,6 +567,26 @@ def config_builder() -> Any:
 
     def current_config() -> dict[str, Any]:
         raw_target = n_eff_target.value.strip()
+        raw_tolerance = tolerance.value.strip().lower()
+
+        def numbers(text: str) -> list[float]:
+            return [float(v) for v in text.replace(";", ",").split(",") if v.strip()]
+
+        tuning_values: dict[str, Any] = {
+            "folds": folds.value,
+            "grid": numbers(grid.value),
+            "search": search.value,
+            "budget": budget.value,
+            "n_eff_range": numbers(n_eff_range.value),
+            "distances": list(SUPPORTED_DISTANCES) if tune_distance.value else None,
+            "group_by": group_by.value,
+            "seed": seed.value,
+            "coverage_tolerance": raw_tolerance
+            if raw_tolerance in ("", "auto")
+            else float(raw_tolerance),
+        }
+        if tuning_values["coverage_tolerance"] == "":
+            tuning_values["coverage_tolerance"] = "auto"
         bounds: dict[str, dict[str, float]] = {
             "Vm": {"lower": vm_lower.value, "upper": vm_upper.value},
             "line_loading": {"upper": line_upper.value},
@@ -420,6 +607,8 @@ def config_builder() -> Any:
             k_nn=k_nn.value,
             n_eff_target=float(raw_target) if raw_target else None,
             n_eff_min=n_eff_min.value,
+            tune_n_eff_target=tune.value,
+            tuning=tuning_values,
             screen_bounds=bounds if screen.value else None,
             output_dir=output_dir.value,
         )
@@ -439,7 +628,13 @@ def config_builder() -> Any:
         show(pred_bins, strat.value == "pred_bins")
         show(kernel_box, kernel)
         show(knn_row, bandwidth.value == "knn")
-        show(neff_row, bandwidth.value == "n_eff")
+        n_eff_bandwidth = bandwidth.value == "n_eff"
+        show(tune, n_eff_bandwidth)
+        show(tune_note, n_eff_bandwidth)
+        show(neff_row, n_eff_bandwidth and not tune.value)
+        show(tuning_box, n_eff_bandwidth and tune.value)
+        show(grid_row, search.value == "grid")
+        show(random_row, search.value == "random")
         for fields in (cal_fields, test_fields):
             show(fields["embeddings"], kernel)
             show(fields["generator_predictions"], task.value == "OptimalPowerFlow")
@@ -556,6 +751,16 @@ def config_builder() -> Any:
         k_nn,
         n_eff_target,
         n_eff_min,
+        tune,
+        folds,
+        grid,
+        tune_distance,
+        search,
+        budget,
+        n_eff_range,
+        group_by,
+        seed,
+        tolerance,
         screen,
         vm_lower,
         vm_upper,

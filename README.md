@@ -32,8 +32,8 @@ The distance over scenario representations is `distance: euclidean` (default) or
 
 The kernel bandwidth can be selected two ways:
 
-- `bandwidth: knn` (default): `h^2` is the squared distance to the `k_nn`-th nearest calibration scenario, as specified in the paper.
-- `bandwidth: n_eff`: `h^2` is solved per test scenario so the kernel weights reach a target effective sample size `n_eff_target`. This is invariant to embedding width and stratum size, which `k_nn` is not, and its default is derived from `alpha` rather than tuned.
+- `bandwidth: n_eff` (default): `h^2` is solved per test scenario so the kernel weights reach a target effective sample size `n_eff_target`, 600 by default. This is invariant to embedding width and stratum size, which `k_nn` is not. `n_eff_target: auto` (off by default) chooses the target by cross-validation on the calibration set instead, requiring coverage first and then the narrowest intervals (see `docs/configuration.md`).
+- `bandwidth: knn`: `h^2` is the squared distance to the `k_nn`-th nearest calibration scenario.
 
 The two families compose with stratification rather than replacing it: with `cp_type: kernel` and `strat: n_outages`, the kernel localizes *within* each outage stratum.
 
@@ -91,7 +91,7 @@ python -m pip install -e ".[graphkit,dev,test]"
 
 ## Quick Start
 
-The CLI is config-first: every verb requires `--config`, and individual CLI flags act only as overrides of specific YAML values.
+The CLI is config-first: every verb requires `--config`, and individual CLI flags act only as overrides of specific YAML values. To write the config, start from one of the [example configs](#example-configs) or generate it with the config-builder notebook, [`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb), which shows only the options that apply to your choices and validates the result (see [Building the config interactively](#building-the-config-interactively)).
 
 Minimal workflow:
 
@@ -217,6 +217,7 @@ For full option tables and command behavior, see:
 The repository ships a matrix of runnable example configs, one per option combination:
 
 - `examples/config/` — see [`examples/config/README.md`](examples/config/README.md) for the full table
+- `examples/notebooks/config_builder.ipynb` — a Jupyter form that builds and validates a config for your own choices (see [Building the config interactively](#building-the-config-interactively))
 
 | Config | Demonstrates |
 | --- | --- |
@@ -225,8 +226,9 @@ The repository ships a matrix of runnable example configs, one per option combin
 | `element_outage_type_pf.yaml` | Stratified by outage regime instead of count |
 | `element_system_load_bin_pf.yaml` | Stratified by percentile bins of total demand |
 | `element_pred_bins_pf.yaml` | Stratified by percentile bins of the model's own predictions |
-| `kernel_knn_pf.yaml` | Kernel-weighted CP with the paper's bandwidth rule |
+| `kernel_knn_pf.yaml` | Kernel-weighted CP with the k-nearest-neighbour bandwidth |
 | `kernel_n_eff_pf.yaml` | Kernel-weighted CP with a dimension-portable bandwidth |
+| `kernel_n_eff_tuned_pf.yaml` | Same, with the target chosen by cross-validation on the calibration set |
 | `kernel_cosine_pf.yaml` | Kernel-weighted CP with cosine distance |
 | `element_n_outages_opf.yaml` | OPF artifacts with near-limit screening bounds |
 
@@ -256,7 +258,7 @@ The current workflow produces:
 - Only `cp_type: element` and `cp_type: kernel` are implemented today.
 - Only `strat: n_outages`, `strat: outage_type`, `strat: system_load_bin`, and `strat: pred_bins` are implemented today when stratification is requested.
 - `cp_type: kernel` requires `embeddings` in both datasets, and it does not support `strat: pred_bins` (prediction bins are element-wise while kernel localization is scenario-wise).
-- `bandwidth: knn` and `bandwidth: n_eff` are the two implemented bandwidth-selection modes. Selecting a good `k_nn` or `n_eff_target` for a given dataset still requires a tuning partition disjoint from the evaluation set.
+- `bandwidth: knn` and `bandwidth: n_eff` are the two implemented bandwidth-selection modes. `n_eff_target` can be chosen automatically by cross-validation on the calibration set (`n_eff_target: auto`); `k_nn` cannot, and choosing it by hand requires a tuning partition disjoint from the evaluation set.
 - Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
 
 ## Documentation
@@ -266,6 +268,7 @@ The current workflow produces:
 - `docs/cli.md`: detailed CLI reference
 - `docs/configuration.md`: YAML configuration reference
 - `docs/schemas.md`: current schema and loading-path notes
+- `examples/notebooks/config_builder.ipynb`: interactive config builder
 
 ## Reference
 
