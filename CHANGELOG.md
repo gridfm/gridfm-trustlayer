@@ -12,12 +12,13 @@ First public release.
 ### Added
 - Two conformal methods for continuous grid-state predictions:
   - stratified split-conformal prediction (`cp_type: element`);
-  - kernel-weighted conformal prediction (`cp_type: kernel`), localized in a scenario-embedding space, with `knn` or `n_eff` bandwidth selection and `euclidean` or `cosine` distance.
+  - kernel-weighted conformal prediction (`cp_type: kernel`), localized in a scenario-embedding space, with `n_eff` (default, target 600) or `knn` bandwidth selection and `euclidean` or `cosine` distance.
 - Stratification by `n_outages`, `outage_type`, `system_load_bin` and `pred_bins`.
 - Direct targets (`Vm`, `Va` and other continuous task outputs) and the derived `line_loading`.
-- The config-first CLI, `gridfm_trustlayer compute | calibrate | screen`, with nine example configs in `examples/config/`.
+- The config-first CLI, `gridfm_trustlayer compute | calibrate | screen`, with ten example configs in `examples/config/`.
 - A top-level Python API: `from gridfm_trustlayer import NaiveIntervalCalibrator, KernelIntervalCalibrator, ChannelSet, ...`. A worked example is in the README, under "Python API".
 - `CITATION.cff`.
+- Cross-validated choice of the kernel bandwidth: `n_eff_target: auto` (with `cp_type: kernel`, `bandwidth: n_eff`) makes `compute` pick the target, and optionally the distance (`distances: [euclidean, cosine]`), by K-fold cross-validation on the calibration set only, over a grid or a random sample with a fixed `budget`, grouped by load profile when datakit's `load_scenario_idx` is available. The rule is coverage first, then the narrowest intervals, with uniform weights as the fallback. Off by default; options under `tuning:`. The choice is recorded in the artifact and reported in `<artifact>_kernel_tuning*.csv`. Also available from Python as `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`.
 - A config builder: `gridfm_trustlayer.interactive.config_builder()`, a Jupyter form (optional extra `interactive`; notebook in `examples/notebooks/config_builder.ipynb`). It shows only the options that apply and validates the result with the CLI's own checks. The underlying `build_config()` works without Jupyter.
 
 ### Changed (relative to the internal 0.0.1 snapshot)
@@ -30,6 +31,7 @@ First public release.
   - `analysis_pf_node` / `analysis_pf_edge` and per-command `commands.<verb>.inputs` overrides are removed, since each command reads its own dataset block.
 - **Calibration quantiles now use the split-conformal finite-sample correction.** Each tail at level `alpha / 2` takes the `ceil((n + 1)(1 - alpha / 2))`-th smallest residual for the upper bound and the `floor((n + 1) alpha / 2)`-th for the lower bound. Version 0.0.1 used the interpolated empirical quantile, which does not carry the finite-sample coverage guarantee. Bounds are therefore slightly wider (by at most one order statistic per tail). This applies to `cp_type: element` and to the stratum fallback quantiles of `cp_type: kernel`.
 - **Strata with too few calibration samples now get infinite bounds.** This covers the case of no valid residual at all, where 0.0.1 returned a zero-width interval. A finite bound at level `alpha / 2` needs at least `ceil(2 / alpha) - 1` valid residuals, e.g. 19 at `alpha = 0.1`. Analysis figures plot the finite widths; the CSV outputs keep the infinite ones.
+- Kernel defaults: `bandwidth: n_eff` with `n_eff_target: 600` (0.0.1: `bandwidth: knn`, `k_nn: 20`). Artifacts record their bandwidth, so existing artifacts are read unchanged.
 - The package version is defined once, in `gridfm_trustlayer/_version.py`, and read by the build.
 
 ### Fixed

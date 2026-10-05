@@ -1,0 +1,85 @@
+# Kernel-weighted CP with the bandwidth target chosen by cross-validation
+#
+# Same as kernel_n_eff_pf.yaml, but instead of fixing n_eff_target, `compute`
+# chooses it from the calibration data alone: K-fold cross-validation, keeping
+# scenarios that share a load profile in the same fold. It requires coverage
+# first, then picks the narrowest intervals; if no candidate meets the coverage
+# target, the weights become uniform (equivalent to element). The test set is
+# never used for the choice.
+#
+# Run:
+#   gridfm_trustlayer compute   --config examples/config/kernel_n_eff_tuned_pf.yaml
+#   gridfm_trustlayer calibrate --config examples/config/kernel_n_eff_tuned_pf.yaml
+#   gridfm_trustlayer screen    --config examples/config/kernel_n_eff_tuned_pf.yaml
+#
+# `compute` also writes trustlayer_outputs/kernel/n_eff_tuned_pf_kernel_tuning.csv
+# (one row per candidate) and ..._kernel_tuning_details.csv (every coverage check).
+#
+# Replace every `path/to/...` with your own artifacts before running.
+
+version: 1
+
+task_name: PowerFlow
+cp_type: kernel
+strat: n_outages
+alpha: 0.1
+
+embedding_pooling: mean
+distance: euclidean
+bandwidth: n_eff
+n_eff_target: auto
+n_eff_min: 20
+# Optional; these are the defaults. Every grid value must be >= n_eff_min.
+tuning:
+  folds: 5                       # cross-validation folds within the calibration set
+  search: grid                   # grid: every combination; random: `budget` draws
+  grid: [100, 200, 400, 600, 800, 1200]   # candidate n_eff_target values (grid search)
+  # distances: [euclidean, cosine]   # also choose the distance (second dimension)
+  # budget: 10                       # random search: number of settings to evaluate
+  # n_eff_range: [100, 1200]         # random search: n_eff_target drawn log-uniformly
+  group_by: auto                 # keep scenarios of one load profile in one fold
+  seed: 0                        # fold assignment seed
+  coverage_tolerance: auto       # allowed shortfall below 1 - alpha (auto: 2 standard errors)
+
+variables:
+  - Vm
+  - Va
+  - line_loading
+
+screen_bounds:
+  Vm:
+    lower: 0.95
+    upper: 1.05
+  line_loading:
+    upper: 1.0
+
+# Two separately generated datasets: `compute` fits the layer on the
+# calibration set, `calibrate` and `screen` apply and evaluate it on the test set.
+# They must be different data (e.g. datakit runs with different seeds).
+# Embeddings are required for cp_type: kernel; produce them with
+#   gridfm_graphkit predict --get_embeddings
+inputs:
+  calibration:  # read by `compute`
+    predictions: path/to/calibration/predictions.parquet
+    embeddings: path/to/calibration/bus_embeddings.parquet
+    pf_node: path/to/calibration/raw/bus_data.parquet
+    pf_edge: path/to/calibration/raw/branch_data.parquet
+  test:  # read by `calibrate` and `screen`
+    predictions: path/to/test/predictions.parquet
+    embeddings: path/to/test/bus_embeddings.parquet
+    pf_node: path/to/test/raw/bus_data.parquet
+    pf_edge: path/to/test/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/kernel/n_eff_tuned_pf.trustlayer
+  calibrated_predictions_volt: trustlayer_outputs/kernel/n_eff_tuned_pf_vm_va_with_intervals.parquet
+  calibrated_predictions_line: trustlayer_outputs/kernel/n_eff_tuned_pf_line_loading_with_intervals.parquet
+  screen_dir: trustlayer_outputs/kernel/n_eff_tuned_pf_screen
+
+# `screen` defaults to the shared `variables` list, but Va has no natural
+# operating bound. Restrict screening to the variables that do.
+commands:
+  screen:
+    variables:
+      - Vm
+      - line_loading

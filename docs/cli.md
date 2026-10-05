@@ -65,9 +65,9 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | `--embeddings` | `str` | Scenario embeddings parquet with `emb_*` columns. Required for `--cp-type kernel`. |
 | `--embedding-pooling` | `str` | How per-entity embeddings are pooled into one vector per scenario: `mean` (default), `max`, `meanmax`, or `concat`. |
 | `--distance` | `str` | Distance over scenario representations: `euclidean` (default) or `cosine`. |
-| `--bandwidth` | `str` | How the kernel bandwidth is chosen: `knn` (default) or `n_eff`. |
+| `--bandwidth` | `str` | How the kernel bandwidth is chosen: `n_eff` (default) or `knn`. |
 | `--k-nn` | `int` | Nearest-neighbour rank whose distance sets the kernel bandwidth. Used by `--bandwidth knn`. Default `20`. |
-| `--n-eff-target` | `float` | Target effective sample size solved for per test scenario. Used by `--bandwidth n_eff`. Defaults to `20/alpha`. |
+| `--n-eff-target` | `float` or `auto` | Target effective sample size solved for per test scenario. Used by `--bandwidth n_eff`. Defaults to `600`. `auto` chooses it by cross-validation on the calibration data, with the options of the config's `tuning` block. |
 | `--n-eff-min` | `float` | Minimum effective sample size before kernel weights revert to the stratum-wide quantile. Default `5`. |
 | `--task-name` | `str` | Task adapter name such as `PowerFlow` or `OptimalPowerFlow`. |
 | `--generator-predictions` | `str` | Optional generator parquet for OPF prediction artifacts. |
@@ -99,10 +99,11 @@ Distance metric:
 
 Bandwidth selection:
 
-- `--bandwidth knn` sets `h^2` to the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum. This is the rule the paper specifies and remains the default.
-- `--bandwidth n_eff` instead solves, per test scenario, for the `h^2` whose kernel weights reach `--n-eff-target` effective calibration scenarios. `n_eff` is monotone in `h^2`, so this is a log-space bisection, vectorized across a block of test scenarios.
+- `--bandwidth n_eff` (default) solves, per test scenario, for the `h^2` whose kernel weights reach `--n-eff-target` effective calibration scenarios (600 by default). `n_eff` is monotone in `h^2`, so this is a log-space bisection, vectorized across a block of test scenarios.
+- `--bandwidth knn` instead sets `h^2` to the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum.
 - Prefer `n_eff` when the same configuration has to work across different embedding widths, stratum sizes, or networks: the `k_nn` that localizes well at one embedding width can be effectively uniform at another, whereas the `n_eff` target means the same thing everywhere.
-- Neither mode removes the need to choose a number. `k_nn` and `n_eff_target` are both hyperparameters, and picking one by looking at calibrated results on the application set invalidates the coverage guarantee. Use a tuning partition disjoint from the set you report on.
+- Neither mode removes the need to choose a number. `k_nn` and `n_eff_target` are both hyperparameters, and picking one by looking at calibrated results on the application set invalidates the coverage guarantee. Use a tuning partition disjoint from the set you report on, or let `--n-eff-target auto` choose it by cross-validation inside the calibration data.
+- With `--n-eff-target auto`, `compute` writes `<artifact>_kernel_tuning.csv` and `<artifact>_kernel_tuning_details.csv` next to the artifact and prints the chosen value per target family. See [configuration.md](configuration.md#choosing-n_eff_target-automatically-n_eff_target-auto).
 
 ## `calibrate`
 
@@ -243,8 +244,8 @@ Saved outputs:
 
 ### `bandwidth` (kernel only)
 
-- `knn` (default)
-- `n_eff`
+- `n_eff` (default)
+- `knn`
 
 ### `embedding_pooling` (kernel only)
 

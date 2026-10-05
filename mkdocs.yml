@@ -1,6 +1,7 @@
 site_name: gridfm-trustlayer
 site_description: Conformal trustworthiness layer for GridFM foundation models
 repo_name: gridfm/gridfm-trustlayer
+repo_url: https://github.com/gridfm/gridfm-trustlayer
 
 nav:
   - Home: index.md

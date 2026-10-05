@@ -1,4 +1,5 @@
-"""CLI for naive interval computation and parquet augmentation."""
+"""Command-line interface: `compute` fits the layer on calibration data, `calibrate`
+applies it to test data, and `screen` compares the intervals with operating limits."""
 
 from __future__ import annotations
 
@@ -10,9 +11,11 @@ from typing import Literal
 import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+import pyarrow.dataset as pa_dataset  # type: ignore[import-untyped]
 from scipy.stats import gaussian_kde  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.cli.config import (
+    N_EFF_TARGET_AUTO,
     coalesce_option,
     load_cli_config,
     normalize_variables,
@@ -35,6 +38,11 @@ from gridfm_trustlayer.conformal.kernel import (
     DEFAULT_K_NN,
     DEFAULT_N_EFF_MIN,
     KernelIntervalCalibrator,
+)
+from gridfm_trustlayer.conformal.tuning import (
+    BandwidthTuningResult,
+    TuningOptions,
+    tune_n_eff_target,
 )
 from gridfm_trustlayer.io import (
     PredictionSet,
@@ -140,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compute_parser.add_argument(
         "--bandwidth",
-        help="How the kernel bandwidth is chosen: 'knn' (default, distance to the k_nn-th neighbour) or 'n_eff' (solve for a target effective sample size).",
+        help="How the kernel bandwidth is chosen: 'n_eff' (default, solve for a target effective sample size) or 'knn' (distance to the k_nn-th neighbour).",
     )
     compute_parser.add_argument(
         "--k-nn",
@@ -149,8 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compute_parser.add_argument(
         "--n-eff-target",
-        type=float,
-        help="Target effective sample size solved for per test scenario (--bandwidth n_eff). Defaults to 20/alpha.",
+        help="Target effective sample size solved for per test scenario (--bandwidth n_eff). Defaults to 600. 'auto' chooses it by cross-validation on the calibration data (options under 'tuning' in the config).",
     )
     compute_parser.add_argument(
         "--n-eff-min",
@@ -319,6 +326,16 @@ def _run_compute(args: argparse.Namespace) -> None:
         validate_n_eff_min(coalesce_option(args.n_eff_min, config, "n_eff_min"))
         or DEFAULT_N_EFF_MIN
     )
+    tuning_options = (
+        TuningOptions.from_config(config.get("tuning"))
+        if n_eff_target == N_EFF_TARGET_AUTO
+        else None
+    )
+    if tuning_options is not None and (cp_type != "kernel" or bandwidth != "n_eff"):
+        raise ValueError(
+            "n_eff_target auto requires cp_type kernel and bandwidth n_eff."
+        )
+    fixed_n_eff_target = n_eff_target if isinstance(n_eff_target, float) else None
     predictions_path = coalesce_option(
         args.predictions, config, "predictions", required=True
     )
@@ -337,15 +354,29 @@ def _run_compute(args: argparse.Namespace) -> None:
             coalesce_option(args.embeddings, config, "embeddings", required=True),
             pooling=embedding_pooling,
         )
+    pf_node_path = coalesce_option(args.pf_node, config, "pf_node", required=True)
     ground_truth = load_ground_truth(
-        coalesce_option(args.pf_node, config, "pf_node", required=True),
+        pf_node_path,
         coalesce_option(args.pf_edge, config, "pf_edge", required=True),
         scenario_ids=predictions.scenario_ids,
     )
+    tuning_groups = (
+        None
+        if tuning_options is None
+        else _load_tuning_groups(pf_node_path, tuning_options.group_by)
+    )
+    artifact_path = coalesce_option(args.output, config, "artifact")
+    if artifact_path is None:
+        artifact_path = str(
+            _default_output_dir(predictions.task_name, cp_type).joinpath(
+                _default_artifact_name(predictions_path, cp_type, variables),
+            ),
+        )
     # Every scenario of the calibration dataset is used for fitting; the layer is
     # evaluated by `calibrate` on a separate test dataset.
     fingerprint = _prediction_fingerprint(predictions)
     calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator] = {}
+    tuning_results: dict[str, BandwidthTuningResult] = {}
     for target_kind, target_variables in variable_groups.items():
         working_predictions = predictions
         working_ground_truth = ground_truth
@@ -382,6 +413,30 @@ def _run_compute(args: argparse.Namespace) -> None:
         calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator
         if cp_type == "kernel":
             assert calibration_predictions.scenario_embeddings is not None
+            family_n_eff_target = fixed_n_eff_target
+            family_distance = distance
+            if tuning_options is not None:
+                # Cross-validated on the calibration data only; the test set is untouched.
+                tuning_results[target_kind] = tune_n_eff_target(
+                    calibration_predictions,
+                    calibration_ground_truth,
+                    alpha=alpha,
+                    channel_names=target_variables,
+                    strat=strat,
+                    embedding_pooling=embedding_pooling,
+                    distance=distance,
+                    n_eff_min=n_eff_min,
+                    options=tuning_options,
+                    groups=None
+                    if tuning_groups is None
+                    else tuning_groups.reindex(
+                        calibration_predictions.scenario_ids
+                    ).to_numpy(),
+                    system_load_n_bins=system_load_n_bins,
+                    system_load_bin_edges=system_load_bin_edges,
+                )
+                family_n_eff_target = tuning_results[target_kind].selected_n_eff_target
+                family_distance = tuning_results[target_kind].selected_distance
             calibrator = KernelIntervalCalibrator.fit(
                 calibration_predictions,
                 calibration_ground_truth,
@@ -393,8 +448,8 @@ def _run_compute(args: argparse.Namespace) -> None:
                 k_nn=k_nn,
                 n_eff_min=n_eff_min,
                 bandwidth=bandwidth,
-                n_eff_target=n_eff_target,
-                distance=distance,
+                n_eff_target=family_n_eff_target,
+                distance=family_distance,
                 system_load_n_bins=system_load_n_bins,
                 system_load_bin_edges=system_load_bin_edges,
             )
@@ -411,15 +466,65 @@ def _run_compute(args: argparse.Namespace) -> None:
                 pred_bin_edges=pred_bin_edges,
             )
         calibrator.calibration_fingerprint = fingerprint
+        if (
+            isinstance(calibrator, KernelIntervalCalibrator)
+            and target_kind in tuning_results
+        ):
+            calibrator.tuning = tuning_results[target_kind].summary()
         calibrators[target_kind] = calibrator
-    artifact_path = coalesce_option(args.output, config, "artifact")
-    if artifact_path is None:
-        artifact_path = str(
-            _default_output_dir(predictions.task_name, cp_type).joinpath(
-                _default_artifact_name(predictions_path, cp_type, variables),
-            ),
-        )
     save_interval_artifacts(calibrators, artifact_path)
+    if tuning_results:
+        _write_tuning_reports(tuning_results, artifact_path)
+
+
+def _load_tuning_groups(pf_node_path: str, group_by: str) -> pd.Series | None:
+    """Fold groups per scenario for `n_eff_target: auto`, or None for scenario-level folds.
+
+    Datakit writes `load_scenario_idx`: scenarios generated from the same load
+    profile (different topologies) share it. Keeping them in one fold prevents
+    near-duplicates on both sides of a split from flattering the kernel.
+    """
+
+    if group_by == "none":
+        return None
+    dataset = pa_dataset.dataset(pf_node_path, format="parquet")
+    if "load_scenario_idx" not in dataset.schema.names:
+        if group_by == "load_scenario_idx":
+            raise ValueError(
+                "tuning.group_by is 'load_scenario_idx' but the calibration pf_node "
+                "parquet has no load_scenario_idx column.",
+            )
+        return None
+    frame = dataset.to_table(columns=["scenario", "load_scenario_idx"]).to_pandas()
+    return frame.groupby("scenario")["load_scenario_idx"].first()
+
+
+def _write_tuning_reports(
+    results: dict[str, BandwidthTuningResult], artifact_path: str
+) -> None:
+    """Write the per-candidate and per-check tables next to the artifact."""
+
+    stem = Path(artifact_path)
+    candidates = pd.concat(
+        [result.candidates.assign(target=kind) for kind, result in results.items()],
+        ignore_index=True,
+    )
+    details = pd.concat(
+        [result.details.assign(target=kind) for kind, result in results.items()],
+        ignore_index=True,
+    )
+    summary_path = stem.with_name(f"{stem.stem}_kernel_tuning.csv")
+    details_path = stem.with_name(f"{stem.stem}_kernel_tuning_details.csv")
+    candidates.to_csv(summary_path, index=False)
+    details.to_csv(details_path, index=False)
+    for kind, result in results.items():
+        print(
+            f"kernel tuning ({kind}): n_eff_target = {result.selected_n_eff_target:g}, "
+            f"distance = {result.selected_distance} ({result.reason}; "
+            f"{len(result.candidates)} candidates, {result.options.search} search, "
+            f"{result.options.folds} {'grouped ' if result.grouped else ''}folds). "
+            f"Report: {summary_path}"
+        )
 
 
 def _run_calibrate(args: argparse.Namespace) -> None:

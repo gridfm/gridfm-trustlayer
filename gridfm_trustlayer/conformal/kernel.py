@@ -54,14 +54,17 @@ DEFAULT_DISTANCE = DISTANCE_EUCLIDEAN
 BANDWIDTH_KNN = "knn"
 BANDWIDTH_N_EFF = "n_eff"
 SUPPORTED_BANDWIDTHS = (BANDWIDTH_KNN, BANDWIDTH_N_EFF)
-DEFAULT_BANDWIDTH = BANDWIDTH_KNN
+DEFAULT_BANDWIDTH = BANDWIDTH_N_EFF
 
-# When `bandwidth: n_eff` is requested without an explicit target, aim for this
-# many effective calibration scenarios per unit of alpha. A (1 - alpha/2)
-# quantile puts roughly n_eff * alpha/2 effective observations in the tail, so
-# n_eff = 20/alpha leaves about ten of them -- enough for a stable tail estimate.
-# At alpha = 0.1 this resolves to 200.
-DEFAULT_N_EFF_TARGET_SCALE = 20.0
+# Default target effective sample size for `bandwidth: n_eff`. It is
+# data-dependent: in a stratum with fewer calibration scenarios the weights
+# become uniform there (equivalent to cp_type element); `n_eff_target: auto`
+# chooses the target from the calibration data instead.
+DEFAULT_N_EFF_TARGET = 600.0
+
+# Artifacts written before the bandwidth option existed carry no `bandwidth`
+# key; they used the k-nearest-neighbour rule.
+_LEGACY_ARTIFACT_BANDWIDTH = BANDWIDTH_KNN
 
 # Bisection settings for the n_eff bandwidth solve. n_eff is monotonically
 # increasing in the bandwidth, so a log-space bisection converges quickly.
@@ -131,6 +134,9 @@ class KernelIntervalCalibrator:
     # SHA-256 of the calibration predictions, so that applying the artifact to the
     # very same data (in-sample evaluation) can be detected and refused.
     calibration_fingerprint: str | None = None
+    # How n_eff_target was chosen when `n_eff_target: auto` (cross-validation
+    # summary from gridfm_trustlayer.conformal.tuning); None when set by hand.
+    tuning: dict[str, Any] | None = None
     n_jobs: int | None = None
     _banks: dict[str, list[_StratumBank]] = field(
         default_factory=dict, repr=False, compare=False
@@ -197,9 +203,7 @@ class KernelIntervalCalibrator:
                 f"Unsupported bandwidth: {bandwidth!r}. Supported values: {supported}.",
             )
         resolved_n_eff_target = (
-            DEFAULT_N_EFF_TARGET_SCALE / alpha
-            if n_eff_target is None
-            else float(n_eff_target)
+            DEFAULT_N_EFF_TARGET if n_eff_target is None else float(n_eff_target)
         )
         if resolved_n_eff_target < 1.0:
             raise ValueError(
@@ -587,6 +591,7 @@ class KernelIntervalCalibrator:
                 key: values.tolist() for key, values in self.pred_bin_edges.items()
             },
             "calibration_fingerprint": self.calibration_fingerprint,
+            "tuning": self.tuning,
         }
 
     def array_payload(self) -> dict[str, np.ndarray]:
@@ -654,16 +659,10 @@ class KernelIntervalCalibrator:
             ),
             k_nn=int(cast(Any, data.get("k_nn", DEFAULT_K_NN))),
             n_eff_min=float(cast(Any, data.get("n_eff_min", DEFAULT_N_EFF_MIN))),
-            bandwidth=str(data.get("bandwidth", DEFAULT_BANDWIDTH)),
+            bandwidth=str(data.get("bandwidth", _LEGACY_ARTIFACT_BANDWIDTH)),
             distance=str(data.get("distance", DEFAULT_DISTANCE)),
             n_eff_target=float(
-                cast(
-                    Any,
-                    data.get(
-                        "n_eff_target",
-                        DEFAULT_N_EFF_TARGET_SCALE / float(cast(Any, data["alpha"])),
-                    ),
-                )
+                cast(Any, data.get("n_eff_target", DEFAULT_N_EFF_TARGET))
             ),
             embedding_pooling=str(data.get("embedding_pooling", "mean")),
             embedding_mean=np.asarray(arrays["embedding_mean"], dtype=FLOAT32_DTYPE),
@@ -686,6 +685,7 @@ class KernelIntervalCalibrator:
                 for key, values in cast(dict, data.get("pred_bin_edges") or {}).items()
             },
             calibration_fingerprint=_optional_str(data.get("calibration_fingerprint")),
+            tuning=cast(dict[str, Any] | None, data.get("tuning")),
         )
 
     @property

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from gridfm_trustlayer.conformal import ChannelSet, KernelIntervalCalibrator
-from gridfm_trustlayer.conformal.kernel import DEFAULT_N_EFF_TARGET_SCALE
+from gridfm_trustlayer.conformal.kernel import DEFAULT_N_EFF_TARGET
 from gridfm_trustlayer.io.artifact import (
     load_interval_artifacts,
     save_interval_artifacts,
@@ -63,6 +63,10 @@ def _fit(
     alpha: float = 0.1, **kwargs: Any
 ) -> tuple[KernelIntervalCalibrator, ChannelSet]:
     predictions, ground_truth, embeddings = _make_sets()
+    # These tests exercise localization on about 200 scenarios per stratum. At that
+    # size the default target (600) makes the weights uniform, so the localizing
+    # k-nearest-neighbour rule is requested unless a test sets the bandwidth.
+    kwargs.setdefault("bandwidth", "knn")
     calibrator = KernelIntervalCalibrator.fit(
         predictions,
         ground_truth,
@@ -338,9 +342,9 @@ def test_n_eff_bandwidth_is_invariant_to_embedding_width() -> None:
     np.testing.assert_allclose([n_eff_low, n_eff_high], 100.0, rtol=5e-3)
 
 
-def test_n_eff_target_defaults_to_twenty_over_alpha() -> None:
+def test_n_eff_target_defaults_to_600() -> None:
     calibrator, _ = _fit(alpha=0.2, bandwidth="n_eff")
-    assert calibrator.n_eff_target == DEFAULT_N_EFF_TARGET_SCALE / 0.2
+    assert calibrator.n_eff_target == DEFAULT_N_EFF_TARGET == 600.0
 
 
 def test_n_eff_target_saturates_at_stratum_size() -> None:
@@ -379,9 +383,33 @@ def test_bandwidth_survives_artifact_roundtrip(tmp_path) -> None:
     np.testing.assert_allclose(actual[1], expected[1])
 
 
-def test_knn_remains_the_default() -> None:
-    calibrator, _ = _fit()
-    assert calibrator.bandwidth == "knn"
+def test_n_eff_is_the_default_bandwidth() -> None:
+    predictions, ground_truth, embeddings = _make_sets()
+    calibrator = KernelIntervalCalibrator.fit(
+        predictions,
+        ground_truth,
+        alpha=0.1,
+        channel_names=("Vm",),
+        embeddings=embeddings,
+        embedding_pooling="mean",
+    )
+    assert calibrator.bandwidth == "n_eff"
+    assert calibrator.n_eff_target == 600.0
+
+
+def test_artifacts_without_a_bandwidth_key_load_with_the_knn_rule() -> None:
+    # Artifacts written before the bandwidth option existed used k-nearest
+    # neighbours; the default must not change how they are read.
+    calibrator, predictions = _fit(bandwidth="knn")
+    metadata = calibrator.to_dict()
+    del metadata["bandwidth"]
+    loaded = KernelIntervalCalibrator.from_dict(metadata, calibrator.array_payload())
+
+    assert loaded.bandwidth == "knn"
+    np.testing.assert_allclose(
+        loaded.predict_intervals(predictions)["Vm"][1],
+        calibrator.predict_intervals(predictions)["Vm"][1],
+    )
 
 
 def test_cosine_distance_projects_onto_the_unit_sphere() -> None:

@@ -75,9 +75,9 @@ alpha: 0.1
 # Kernel knobs
 embedding_pooling: mean
 distance: euclidean # or cosine
-bandwidth: knn      # or n_eff
-k_nn: 50            # used when bandwidth: knn
-# n_eff_target: 200 # used when bandwidth: n_eff; defaults to 20/alpha
+bandwidth: n_eff    # default; or knn
+n_eff_target: 600   # default; or auto (see below)
+# k_nn: 20          # used when bandwidth: knn
 n_eff_min: 5
 
 variables:
@@ -124,9 +124,10 @@ outputs:
 | `alpha`                | `float`         | Required for`compute`                          | Miscoverage level used while fitting intervals.                                                                 |
 | `embedding_pooling`    | `str or null`   | No (kernel only)                                 | How per-entity embeddings are pooled into one vector per scenario:`mean` (default), `max`, `meanmax`, `concat`. Stored in the artifact; `compute` and `calibrate` must agree. |
 | `distance`             | `str or null`   | No (kernel only)                                 | Distance over scenario representations:`euclidean` (default) or `cosine`.                                     |
-| `bandwidth`            | `str or null`   | No (kernel only)                                 | How the kernel bandwidth is chosen:`knn` (default) or `n_eff`.                                                |
+| `bandwidth`            | `str or null`   | No (kernel only)                                 | How the kernel bandwidth is chosen: `n_eff` (default) or `knn`.                                                |
 | `k_nn`                 | `int or null`   | No (`bandwidth: knn`)                            | Nearest-neighbour rank whose squared distance becomes the kernel bandwidth `h^2`. Default `20`. Lower localizes harder; higher moves behavior toward `element`. |
-| `n_eff_target`         | `float or null` | No (`bandwidth: n_eff`)                          | Target effective sample size solved for per test scenario. Defaults to `20/alpha` (200 at `alpha: 0.1`). Must be at least `n_eff_min`. |
+| `n_eff_target`         | `float, auto or null` | No (`bandwidth: n_eff`)                    | Target effective sample size solved for per test scenario. Defaults to `600`. Must be at least `n_eff_min`. `auto` chooses it by cross-validation on the calibration data (see [below](#choosing-n_eff_target-automatically-n_eff_target-auto)). |
+| `tuning`               | `mapping or null` | No (`n_eff_target: auto` only)                 | Options of the cross-validated choice of `n_eff_target`: `folds`, `grid`, `group_by`, `seed`, `coverage_tolerance`. Rejected unless `n_eff_target: auto`. |
 | `n_eff_min`            | `float or null` | No (kernel only)                                 | Minimum effective sample size before kernel weights revert to the stratum-wide quantile. Default `5`.          |
 | `variables`            | `list[str]`     | Usually yes                                      | Any subset of`Vm`, `Va`, and `line_loading`. Defaults to `Vm, Va` if omitted.                           |
 | `screen_bounds`        | `mapping`       | Required for`screen` on each screened variable | Per-variable screening bounds.`Vm` uses lower and upper bounds; `line_loading` uses only `upper`.         |
@@ -321,13 +322,13 @@ The bandwidth `h^2` controls how sharply the kernel localizes, and is the main l
 
 Two selection modes are implemented.
 
-### `bandwidth: knn` (default)
+### `bandwidth: knn`
 
-`h^2` is the squared distance to the `k_nn`-th nearest calibration scenario within the stratum. This is the rule the paper specifies, and it is the default so published results stay reproducible.
+`h^2` is the squared distance to the `k_nn`-th nearest calibration scenario within the stratum.
 
 Its weakness is that `k_nn` is not a portable number. Squared Euclidean distances concentrate as embedding width grows, so the same `k_nn` can localize sharply in one representation and be effectively uniform in another. On synthetic data with 1500 calibration scenarios per stratum, `k_nn: 20` yields a median `kcp_n_eff` of about 40 at 2 dimensions, 1045 at 16, and 1498 at 384 — at the widest, `k_nn: 20` and `k_nn: 50` become indistinguishable and the knob has stopped working.
 
-### `bandwidth: n_eff`
+### `bandwidth: n_eff` (default)
 
 `h^2` is instead solved per test scenario so that the kernel weights reach a target effective sample size:
 
@@ -341,9 +342,70 @@ Why prefer it:
 
 - **Portable.** The same `n_eff_target` means the same thing at any embedding width, stratum size, or network. The example above resolves to exactly 200 at 2, 16, and 384 dimensions.
 - **Interpretable.** "200 calibration scenarios effectively contribute" is a statement about estimator variance; "the 20th nearest neighbour sets the scale" is not, until you know the geometry.
-- **Derivable from `alpha`.** The default target is `20/alpha`. A `1 - alpha/2` quantile places roughly `n_eff * alpha/2` effective observations in the tail, so `20/alpha` leaves about ten of them — enough for a stable tail estimate. That is an argument from `alpha`, not a tuned number.
+- **Default.** The default target is 600. A stratum with fewer calibration scenarios than the target gets uniform weights (equivalent to `cp_type: element`), and `n_eff_target: auto` chooses the target from the calibration data.
 
-Note that `n_eff_target` is still a hyperparameter, just a better-conditioned one. Choosing it by inspecting calibrated results on the application set breaks the coverage guarantee exactly as tuning `k_nn` that way would.
+Note that `n_eff_target` is still a hyperparameter, just a better-conditioned one. Choosing it by inspecting calibrated results on the application set breaks the coverage guarantee exactly as tuning `k_nn` that way would. To choose it from the calibration data instead, use `n_eff_target: auto` (next section).
+
+### Choosing `n_eff_target` automatically (`n_eff_target: auto`)
+
+Instead of a number, `n_eff_target: auto` lets `compute` choose the target by cross-validation **on the calibration dataset alone**. The test dataset is never used, so the coverage that `calibrate` reports on it stays an honest out-of-sample check. Tuning is off by default; it requires `cp_type: kernel` and `bandwidth: n_eff`.
+
+```yaml
+cp_type: kernel
+bandwidth: n_eff
+n_eff_target: auto
+tuning:                       # optional; these are the defaults
+  folds: 5
+  search: grid
+  grid: [100, 200, 400, 600, 800, 1200]
+  group_by: auto
+  seed: 0
+  coverage_tolerance: auto
+```
+
+To also choose the distance, and to bound the cost when both dimensions vary, use random search:
+
+```yaml
+tuning:
+  distances: [euclidean, cosine]   # second dimension; omit to keep the config's `distance`
+  search: random
+  budget: 12                       # number of (n_eff_target, distance) settings to evaluate
+  n_eff_range: [100, 1500]         # n_eff_target drawn log-uniformly from this range
+```
+
+**How it works.** A candidate is an (`n_eff_target`, `distance`) pair. By default only `n_eff_target` varies and the config's `distance` is kept. Listing `distances` adds the distance as a second dimension. The candidates are either every combination of `grid` and `distances` (`search: grid`), or `budget` distinct settings drawn at random (`search: random`). The calibration scenarios are split into `folds` folds. For every candidate and every fold, the kernel is fitted on the other folds and applied to the held-out one. That gives cross-validated coverage, overall and in every stratum, and the mean interval width. Then:
+
+1. A candidate is **eligible** if its coverage reaches `1 - alpha - tolerance` overall and in every stratum, for every calibrated variable.
+2. Among eligible candidates, the one with the **narrowest intervals** is chosen. Width is measured relative to the evaluated candidate with the largest `n_eff_target` (the one closest to uniform weights), so candidates with different distances are compared on one scale.
+3. If **no candidate is eligible**, kernel localization does not reach the target on this data, and the target is set to the size of the largest stratum. This makes the weights uniform within every stratum, which is equivalent to `cp_type: element`. The report says so explicitly.
+
+Coverage comes first and width second, because kernel-weighted CP has no finite-sample guarantee: a narrow interval is only useful if its coverage holds. Each target family (voltages, line loading) is tuned separately.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `folds` | `5` | Number of cross-validation folds (at least 2). More folds give each fit more data but take proportionally longer. |
+| `grid` | `[100, 200, 400, 600, 800, 1200]` | Candidate `n_eff_target` values for `search: grid`. A value above a stratum's size gives uniform weights in that stratum. All values must be at least `n_eff_min`. |
+| `distances` | not set | Distances to compare (`euclidean`, `cosine`). Not set: only the config's `distance`. Both distances support `bandwidth: n_eff`; cosine only changes how the embeddings are prepared (projected onto the unit sphere). |
+| `search` | `grid` | `grid`: every combination of `grid` and `distances`. `random`: `budget` distinct settings, with `n_eff_target` drawn log-uniformly from `n_eff_range` (so not limited to grid values) and the distance uniformly from `distances`. |
+| `budget` | `10` | Number of settings evaluated by `search: random`. The cost grows with the budget, not with the size of the search space. A small budget spread over two distances tries only a few targets per distance and can miss the best one, which gives valid but wider intervals than a finer search. Prefer `search: grid` when only `n_eff_target` varies. |
+| `n_eff_range` | span of `grid` | `[low, high]` for `search: random`. `low` must be at least `n_eff_min`. |
+| `group_by` | `auto` | Keeps related scenarios in one fold. `auto` uses datakit's `load_scenario_idx` column of the calibration `pf_node` file when it exists; `load_scenario_idx` requires it; `none` splits scenarios at random. |
+| `seed` | `0` | Seed of the fold assignment, so a run can be reproduced. |
+| `coverage_tolerance` | `auto` | How far below `1 - alpha` cross-validated coverage may fall and still count as meeting the target. `auto` uses two standard errors for the number of scenarios behind each check, `2 * sqrt(alpha * (1 - alpha) / n_scenarios)`, so small strata get more room; a number (e.g. `0.005`) applies the same tolerance to every check. |
+
+**Why group the folds.** When datakit generates several topologies per load profile, those scenarios are near-duplicates. If they land on both sides of a fold, every held-out scenario has a near-twin in the bank, and localization looks better than it will on new data. Grouping by `load_scenario_idx` prevents that. With one topology per load profile, the grouping changes nothing.
+
+**Why `n_eff_target` and not `k_nn`.** An effective sample size is absolute: a target chosen on folds holding 80% of the calibration data means the same on all of it, so the value transfers to the final fit. A good `k_nn` shifts with the size of the bank.
+
+**Outputs.**
+- The chosen values are stored in the artifact (`n_eff_target` and `distance`), together with a `tuning` record: the candidates, the selection reason, the search, the folds and whether they were grouped.
+- `compute` writes `<artifact>_kernel_tuning.csv` (one row per candidate: coverage, worst margin to the target, relative width, fallback share, eligible, selected) and `<artifact>_kernel_tuning_details.csv` (every coverage check).
+- It also prints a one-line summary per target family.
+
+**Cost.** About one kernel run per fold and candidate: `folds x len(grid) x len(distances)` runs for a grid search, `folds x budget` for a random search, each on `(folds - 1) / folds` of the calibration data. With about 20k calibration scenarios and 186 branches, the default grid takes about two minutes on a laptop CPU. Most of the time goes into the per-element weighted quantiles, which depend on each candidate's weights, so it cannot be shared across candidates.
+
+**Limits.** Cross-validation gives an honest empirical estimate of coverage, not a formal guarantee: the chosen kernel is still verified empirically, as any KCP configuration is. A grid search cannot pick a value between two candidates; refine the grid around the chosen value, or use `search: random` over a range, if the precise target matters.
+
 
 ### Interaction with `n_eff_min`
 
