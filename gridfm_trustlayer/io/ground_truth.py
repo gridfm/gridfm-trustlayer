@@ -35,6 +35,8 @@ _BRANCH_COLUMNS = (
     "Ytt_i",
 )
 _BUS_COLUMNS = ("scenario", "bus", "Vm", "Va", "Pd", "PQ", "PV", "REF", "vn_kv")
+# Bus columns that hold the AC solution rather than the scenario description.
+_SOLUTION_BUS_COLUMNS = ("Vm", "Va")
 
 
 @dataclass
@@ -113,7 +115,13 @@ def scan_ground_truth_reference(
             generator_path, "in_service"
         )
     va_max = 0.0
-    for batch in open_dataset(pf_node_parquet).to_batches(columns=["Va"]):
+    bus_dataset = open_dataset(pf_node_parquet)
+    va_batches = (
+        bus_dataset.to_batches(columns=["Va"])
+        if "Va" in bus_dataset.schema.names
+        else []
+    )
+    for batch in va_batches:
         values = np.abs(batch.column(0).to_numpy(zero_copy_only=False))
         if values.size and np.isfinite(values).any():
             va_max = max(va_max, float(np.nanmax(values)))
@@ -168,6 +176,7 @@ def load_ground_truth(
     channel_names: Iterable[str] | None = None,
     sn_mva: float = 100.0,
     reference: GroundTruthReference | None = None,
+    solved: bool = True,
 ) -> GroundTruthSet:
     """Read datakit's raw bus and branch parquets into arrays.
 
@@ -183,6 +192,10 @@ def load_ground_truth(
         reference: Dataset-wide outage reference and angle unit, from
             `scan_ground_truth_reference`, when loading a subset of a dataset
             block by block. Computed from the loaded scenarios when not given.
+        solved: Whether to read the AC solution (`Vm`, `Va` and the other bus
+            channels). With `False`, only the description of each scenario is
+            read (topology, branch parameters, loads, bus types), which is all
+            that bounds for new scenarios need; `Vm` and `Va` are then NaN.
 
     Returns:
         The ground truth. `Va` is converted to radians if stored in degrees.
@@ -191,15 +204,18 @@ def load_ground_truth(
     requested_channels = (
         ["Pg", "Qg"] if channel_names is None else [str(name) for name in channel_names]
     )
-    bus_frame = read_frame(
-        pf_node_parquet,
-        [*_BUS_COLUMNS, *requested_channels],
-        scenario_ids=scenario_ids,
-    )
+    bus_columns = [*_BUS_COLUMNS, *requested_channels]
+    if not solved:
+        bus_columns = [
+            name for name in _BUS_COLUMNS if name not in _SOLUTION_BUS_COLUMNS
+        ]
+    bus_frame = read_frame(pf_node_parquet, bus_columns, scenario_ids=scenario_ids)
     branch_frame = read_frame(
         pf_edge_parquet, _BRANCH_COLUMNS, scenario_ids=scenario_ids
     )
-    _require_columns(bus_frame, ("scenario", "bus", "Vm", "Va"))
+    _require_columns(
+        bus_frame, ("scenario", "bus", "Vm", "Va") if solved else ("scenario", "bus")
+    )
     _require_columns(branch_frame, _BRANCH_COLUMNS)
 
     bus_frame["scenario"] = bus_frame["scenario"].astype(np.int64)
@@ -222,15 +238,19 @@ def load_ground_truth(
         branch_frame, selected_scenarios, branch_ids, "idx"
     )
 
-    vm = _reshape_column(
-        sorted_bus, "Vm", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
-    )
-    va = _reshape_column(
-        sorted_bus, "Va", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
-    )
-    va = _normalize_angle_units(
-        va, in_degrees=None if reference is None else reference.va_in_degrees
-    )
+    if solved:
+        vm = _reshape_column(
+            sorted_bus, "Vm", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
+        )
+        va = _reshape_column(
+            sorted_bus, "Va", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
+        )
+        va = _normalize_angle_units(
+            va, in_degrees=None if reference is None else reference.va_in_degrees
+        )
+    else:
+        vm = np.full((len(selected_scenarios), len(bus_ids)), np.nan, FLOAT32_DTYPE)
+        va = vm.copy()
 
     direct_channel_names = _resolve_direct_channel_names(
         sorted_bus.columns, channel_names

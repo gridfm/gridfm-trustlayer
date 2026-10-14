@@ -69,7 +69,8 @@ For each command, a value is taken from the first of these that sets it:
 | `strat` | str or null | null | Group scenarios and fit bounds per group: `n_outages`, `outage_type`, `system_load_bin` or `pred_bins` (`element` only). See [Choosing a setup](../user-guide/choosing-a-setup.md#grouping-strat). |
 | `system_load_n_bins` | int | – | Number of percentile bins of total load. Required with `strat: system_load_bin`. |
 | `pred_n_bins` | int | – | Number of percentile bins of the predicted values, per variable. Required with `strat: pred_bins`. |
-| `save_figures` | bool | `true` | `false` makes `calibrate` skip its figures, like `--no-figures`. |
+| `sparse_strata` | str | `pooled` | With `strat`: the bounds of a bus or line in a stratum with fewer than $\lceil 2/\alpha \rceil - 1$ valid calibration samples, or in a stratum absent from the calibration data. `pooled` uses the element's quantile over all calibration scenarios: finite, but without a guarantee within that stratum. `infinite` keeps the per-stratum guarantee with infinite bounds. See [Sparse strata](../user-guide/choosing-a-setup.md#sparse-strata-sparse_strata). |
+| `save_figures` | bool | `true` | `false` makes `calibrate` and `screen` skip their figures, like `--no-figures`. |
 
 The stratifications in detail:
 
@@ -110,10 +111,11 @@ Only with `cp_type: kernel`, `bandwidth: n_eff` and `n_eff_target: auto`. All ke
 
 ## `inputs`
 
-Two blocks, one per dataset. They must be different data; see [Preparing the data](../user-guide/data.md#two-separate-datasets).
+Two blocks, one per dataset, and an optional third. The first two must be different data; see [Preparing the data](../user-guide/data.md#two-separate-datasets).
 
 - `inputs.calibration` is read by `compute`.
 - `inputs.test` is read by `calibrate` and `screen`.
+- `inputs.apply` (optional) is read by `apply`: new scenarios without a known solution. Only `predictions` is required; `pf_node` and `pf_edge` describe the scenarios when the layer is stratified by outages or load or calibrates `line_loading`, and need no solved values. See the [CLI reference](cli.md#apply).
 
 | Key | Required | Description |
 | --- | --- | --- |
@@ -132,10 +134,13 @@ The config is rejected if both blocks name the same `predictions` file, and `cal
 | `artifact` | `compute` writes, `calibrate` reads | The `.trustlayer` file. |
 | `calibrated_predictions` | `calibrate` writes, `screen` reads | One target family (voltages or `line_loading`): the path of the calibrated dataset. Both families: a directory, in which the two datasets are named after the test predictions and the variables, e.g. `<predictions>_vm_va_with_intervals.parquet`. |
 | `calibrated_predictions_volt`, `calibrated_predictions_line` | `calibrate`, `screen` | Explicit paths for the voltage and line-loading datasets. Take precedence over `calibrated_predictions`. |
-| `screen_dir` | `screen` | Directory for the screening CSVs and figures. |
+| `applied_predictions` | `apply` | One target family: the path of the bounds dataset. Both families: a directory, in which the datasets are named `<predictions>_<variables>_bounds.parquet`. |
+| `applied_predictions_volt`, `applied_predictions_line` | `apply` | Explicit paths for the two bounds datasets. Take precedence over `applied_predictions`. |
+| `coverage_dir` | `calibrate` | Directory for the coverage report: `summary.md`, the `coverage_by_*.csv` tables and `figures/`. Default: a `coverage/` folder next to the calibrated datasets. |
+| `screen_dir` | `screen` | Directory for the screening report, tables, figures and detail datasets. |
 | `output` | `calibrate`, `screen` | Generic override, like the `--output` flag. |
 
-The calibrated predictions and the screening detail are written as partitioned parquet datasets: directories with one `scenario_partition=k/` folder per 200 scenarios, like gridfm-datakit's outputs ([Reading the results](../user-guide/results.md)). A path that already holds a previous trustlayer output is replaced; any other existing directory is left alone and the run stops. Analysis CSVs and figures of `calibrate` are written next to the calibrated datasets. Without any output keys, everything goes to `trustlayer_outputs/<task_name>/<cp_type>/` in the working directory.
+The calibrated predictions and the screening detail are written as partitioned parquet datasets: directories with one `scenario_partition=k/` folder per 200 scenarios, like gridfm-datakit's outputs ([Reading the results](../user-guide/results.md)). A path that already holds a previous trustlayer output is replaced; any other existing directory is left alone and the run stops. The coverage report of `calibrate` goes to `coverage_dir`, by default a `coverage/` folder next to the calibrated datasets. Without any output keys, everything goes to `trustlayer_outputs/<task_name>/<cp_type>/` in the working directory.
 
 ## `screen_bounds`
 
@@ -150,7 +155,7 @@ Every screened variable needs bounds. `Va` has no natural limit, so restrict scr
 
 ## `commands`
 
-`commands.compute`, `commands.calibrate` and `commands.screen` override shared keys for one command. Allowed keys: `task_name`, `alpha`, `cp_type`, `strat`, `system_load_n_bins`, `pred_n_bins`, `embedding_pooling`, `distance`, `bandwidth`, `n_eff_target`, `k_nn`, `n_eff_min`, `variables`, `screen_bounds`, `save_figures`, `artifact`, `output` and a nested `outputs` mapping. Inputs cannot be overridden per command, since each command already reads its own dataset.
+`commands.compute`, `commands.calibrate`, `commands.screen` and `commands.apply` override shared keys for one command. Allowed keys: `task_name`, `alpha`, `cp_type`, `strat`, `system_load_n_bins`, `pred_n_bins`, `embedding_pooling`, `distance`, `bandwidth`, `n_eff_target`, `k_nn`, `n_eff_min`, `variables`, `screen_bounds`, `save_figures`, `artifact`, `output` and a nested `outputs` mapping. Inputs cannot be overridden per command, since each command already reads its own dataset.
 
 The most common use is restricting screening to the variables that have limits:
 

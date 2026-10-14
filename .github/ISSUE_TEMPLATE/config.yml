@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://gridfm.github.io/gridfm-trustlayer/
+    about: Guides, configuration reference and troubleshooting.

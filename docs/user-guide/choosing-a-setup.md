@@ -53,7 +53,28 @@ Without `strat`, each bus or line gets one set of bounds learned from all calibr
 Bin edges for `system_load_bin` and `pred_bins` are learned from the calibration set during `compute` and stored in the artifact, so test scenarios are assigned with the same edges.
 
 !!! warning "Small strata"
-    Each stratum is calibrated on its own scenarios only. A stratum with fewer than $\lceil 2/\alpha \rceil - 1$ scenarios gets infinite bounds, and one with a few dozen gets wide, noisy bounds. Check the number of calibration scenarios per stratum (the `n_scenarios_min` column of `trust_reliability_*.csv` reports it on the test side) and merge rare levels, for example by generating fewer N-3 contingencies or by not stratifying.
+    Each stratum is calibrated on its own scenarios only. A bus or line with fewer than $\lceil 2/\alpha \rceil - 1$ calibration samples in a stratum cannot get a finite bound from that stratum alone (see [Sparse strata](#sparse-strata-sparse_strata)), and one with a few dozen gets wide, noisy bounds. Check the number of calibration scenarios per stratum (the `n_scenarios` column of `coverage/coverage_by_stratum.csv` reports it on the test side) and merge rare levels, for example by generating fewer N-3 contingencies or by not stratifying.
+
+    What counts is the number of samples per bus or line, which can be much smaller than the number of scenarios. In a power flow, the voltage magnitude of a generator bus is only predicted in the scenarios where its generator is out of service (otherwise it is a set-point, see [Known values](results.md#known-values-are-not-counted)). In the N-1 stratum that is only the scenarios where that generator is the single outage, often too few for a finite bound. `compute` lists the strata affected and how many buses or lines each.
+
+### Sparse strata: `sparse_strata`
+
+A finite bound at level $\alpha/2$ needs at least $\lceil 2/\alpha \rceil - 1$ valid calibration residuals of that bus or line in its stratum:
+
+| `alpha` | 0.2 | 0.1 | 0.05 | 0.01 |
+| --- | --- | --- | --- | --- |
+| minimum samples | 9 | 19 | 39 | 199 |
+
+Valid residuals exclude [known values](results.md#known-values-are-not-counted) and masked entries, such as an out-of-service branch. A test stratum that the calibration data does not contain at all (for example N-6 when calibration stops at N-5) has none.
+
+With fewer, the element gets its quantile over all calibration scenarios in that stratum (`sparse_strata: pooled`, the default). The bounds are finite, but they lose the guarantee within the stratum: the pooled quantile is calibrated on all strata together, and a rare stratum can have larger errors than the average. Nothing is silent: `compute` lists the strata concerned, the calibrated predictions mark the rows in a `<variable>_pooled` column, and the coverage report counts them in `n_pooled`. Other elements and strata are unchanged. With `cp_type: kernel`, the same rule applies to the stratum quantile the kernel falls back to.
+
+`sparse_strata: infinite` gives those elements infinite bounds instead. That keeps the per-stratum guarantee, and `screen` flags every such case, but the bounds carry no information. Bounds stay infinite in either mode when an element has fewer than $\lceil 2/\alpha \rceil - 1$ valid residuals over all calibration scenarios together.
+
+```yaml
+strat: n_outages
+sparse_strata: infinite   # default: pooled
+```
 
 `strat` also works with `cp_type: kernel`: the kernel then localizes *within* each stratum, so an N-2 test scenario is only compared with N-2 calibration scenarios. `pred_bins` is the exception; it assigns groups per bus or line, while the kernel compares whole scenarios.
 

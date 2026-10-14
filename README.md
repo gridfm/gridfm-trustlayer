@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/gridfm/gridfm-trustlayer/refs/heads/main/docs/figs/gridfm-trustlayer-logo-1024.png" alt="gridfm-trustlayer logo" style="width: 40%; height: auto;"/>
+  <img src="docs/figs/gridfm-trustlayer-logo-1024.png" alt="gridfm-trustlayer logo" style="width: 40%; height: auto;"/>
   <br/>
 </p>
 
@@ -88,6 +88,8 @@ gridfm_trustlayer calibrate --config trust_config.yaml   # bounds + coverage on 
 gridfm_trustlayer screen    --config trust_config.yaml   # caught / missed violations
 ```
 
+Once the coverage holds on the test set, `gridfm_trustlayer apply` gives bounds for new scenarios that have no known AC solution (`inputs.apply` in the config).
+
 To write the config, use the Jupyter **config builder**, which shows only the options that apply to your choices and validates the result ([`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb)), or start from one of the ten [example configs](examples/config/). The [Quick start guide](https://gridfm.github.io/gridfm-trustlayer/getting-started/quickstart/) walks through every step, including data generation and how to read the results.
 
 ## Python API
@@ -151,6 +153,12 @@ The sources are in [`docs/`](docs/); `mkdocs serve` builds the site locally.
 
 > [!NOTE]
 > This is a pre-1.0 release. The statistical core is tested, but the Python API, configuration keys and artifact formats may still change between minor versions; check [`CHANGELOG.md`](CHANGELOG.md) before upgrading.
+
+## About
+
+`gridfm-trustlayer` was initially developed by [Antonio Alcántara](https://antonioalcantara.com) for the [OpenGridFM](https://gridfm.org/) community, as a common trustworthiness layer for its foundation models to build on.
+
+Contributions are welcome, from bug reports to new methods: see [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started, or open an issue to discuss an idea.
 
 ## Citation
 

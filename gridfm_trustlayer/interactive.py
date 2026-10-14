@@ -71,6 +71,7 @@ def build_config(
     strat: str | None = None,
     system_load_n_bins: int | None = None,
     pred_n_bins: int | None = None,
+    sparse_strata: str = "pooled",
     embedding_pooling: str = DEFAULT_POOLING,
     distance: str = DEFAULT_DISTANCE,
     bandwidth: str = DEFAULT_BANDWIDTH,
@@ -80,6 +81,7 @@ def build_config(
     tune_n_eff_target: bool = False,
     tuning: Mapping[str, Any] | None = None,
     screen_bounds: Mapping[str, Mapping[str, float]] | None = None,
+    apply: Mapping[str, str | None] | None = None,
     output_dir: str = "trustlayer_outputs",
 ) -> dict[str, Any]:
     """Assemble a config dict, keeping only the keys that apply to the choices.
@@ -97,6 +99,15 @@ def build_config(
     ``screen_bounds=None`` (or bounds only for unselected variables) gives a config
     without a screening step: ``compute`` and ``calibrate`` produce the prediction
     intervals, and no ``screen_bounds``, ``screen_dir`` or ``screen`` command is set.
+
+    ``sparse_strata="infinite"`` (with ``strat``) gives elements in a stratum too
+    small for a finite bound infinite bounds instead of their quantile over all
+    calibration scenarios (the default, ``"pooled"``).
+
+    ``apply`` (optional) describes new scenarios without a known solution, for the
+    ``apply`` command: their predictions, and the bus and branch files describing
+    them when the layer is stratified by outages or load or calibrates
+    ``line_loading``.
     """
 
     kernel = cp_type == "kernel"
@@ -113,6 +124,8 @@ def build_config(
             config["system_load_n_bins"] = system_load_n_bins
         if strat == "pred_bins":
             config["pred_n_bins"] = pred_n_bins
+        if sparse_strata != "pooled":
+            config["sparse_strata"] = sparse_strata
     if kernel:
         config["embedding_pooling"] = embedding_pooling
         config["distance"] = distance
@@ -162,6 +175,9 @@ def build_config(
         return block
 
     config["inputs"] = {"calibration": dataset(calibration), "test": dataset(test)}
+    new_scenarios = dataset(apply or {})
+    if new_scenarios.get("predictions"):
+        config["inputs"]["apply"] = new_scenarios
 
     out = output_dir.rstrip("/")
     names = "_".join(name.lower() for name in variables)
@@ -169,13 +185,22 @@ def build_config(
     families = {"line" if name == "line_loading" else "volt" for name in variables}
     if len(families) > 1:
         outputs["calibrated_predictions_volt"] = (
-            f"{out}/test_volt_with_intervals.parquet"
+            f"{out}/calibrated/test_volt_with_intervals.parquet"
         )
         outputs["calibrated_predictions_line"] = (
-            f"{out}/test_line_with_intervals.parquet"
+            f"{out}/calibrated/test_line_with_intervals.parquet"
         )
     else:
-        outputs["calibrated_predictions"] = f"{out}/test_{names}_with_intervals.parquet"
+        outputs["calibrated_predictions"] = (
+            f"{out}/calibrated/test_{names}_with_intervals.parquet"
+        )
+    outputs["coverage_dir"] = f"{out}/coverage"
+    if "apply" in config["inputs"]:
+        if len(families) > 1:
+            outputs["applied_predictions_volt"] = f"{out}/new_volt_bounds.parquet"
+            outputs["applied_predictions_line"] = f"{out}/new_line_bounds.parquet"
+        else:
+            outputs["applied_predictions"] = f"{out}/new_{names}_bounds.parquet"
     if bounds:
         outputs["screen_dir"] = f"{out}/screen"
     config["outputs"] = outputs
@@ -201,7 +226,12 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError(f"inputs.{dataset} is missing: {', '.join(missing)}.")
     if not config.get("variables"):
         raise ValueError("Select at least one variable to calibrate.")
-    for command in ("compute", "calibrate", "screen"):
+    commands = ["compute", "calibrate", "screen"]
+    if "apply" in inputs:
+        commands.append("apply")
+        if not (inputs.get("apply") or {}).get("predictions"):
+            raise ValueError("inputs.apply is missing: predictions.")
+    for command in commands:
         validate_command_config(command, resolve_command_config(config, command))
 
 
@@ -216,6 +246,10 @@ def to_yaml(config: Mapping[str, Any], *, path: str = "trust_config.yaml") -> st
     ]
     if "screen_bounds" in config:
         header.append(f"#   gridfm_trustlayer screen    --config {path}")
+    if "apply" in (config.get("inputs") or {}):
+        header.append(
+            f"#   gridfm_trustlayer apply     --config {path}   # new scenarios"
+        )
     body = yaml.safe_dump(dict(config), sort_keys=False, default_flow_style=False)
     return "\n".join(header) + "\n\n" + body
 
@@ -303,6 +337,17 @@ def config_builder() -> Any:
         min=2,
         max=100,
         description="Prediction bins",
+        style=style,
+        layout=wide(),
+    )
+
+    sparse = w.Dropdown(
+        options=[
+            ("pooled quantile", "pooled"),
+            ("infinite bounds", "infinite"),
+        ],
+        value="pooled",
+        description="Sparse strata",
         style=style,
         layout=wide(),
     )
@@ -495,6 +540,17 @@ def config_builder() -> Any:
             ),
         ]
     )
+    sparse_box = w.VBox(
+        [
+            sparse,
+            note(
+                "For an element in a stratum with too few calibration samples for a finite bound "
+                "(fewer than ceil(2/alpha) - 1), or a stratum absent from the calibration data. "
+                "The pooled quantile (over all calibration scenarios, the default) is finite but "
+                "carries no guarantee within that stratum; infinite bounds keep the guarantee."
+            ),
+        ]
+    )
     kernel_box = w.VBox(
         [
             header("Kernel options"),
@@ -529,6 +585,24 @@ def config_builder() -> Any:
         }
 
     cal_fields, test_fields = dataset_fields("calibration"), dataset_fields("test")
+    new_fields = dataset_fields("new")
+    use_apply = w.Checkbox(
+        value=False,
+        description="Also apply the layer to new scenarios (no known solution)",
+        indent=False,
+    )
+    apply_box = w.VBox(
+        [
+            w.HTML(
+                "<div style='color:#666;font-size:12px;margin:0 0 6px 155px'>"
+                "For <code>gridfm_trustlayer apply</code>. pf_node and pf_edge describe "
+                "the new scenarios (topology, loads); they are needed for outage or load "
+                "stratification and for line_loading, and need no AC solution.</div>"
+            ),
+            *new_fields.values(),
+        ],
+        layout=w.Layout(),
+    )
 
     # --- screening and outputs
     screen = w.Checkbox(
@@ -594,6 +668,9 @@ def config_builder() -> Any:
         return build_config(
             calibration={key: field.value for key, field in cal_fields.items()},
             test={key: field.value for key, field in test_fields.items()},
+            apply={key: field.value for key, field in new_fields.items()}
+            if use_apply.value
+            else None,
             task_name=task.value,
             cp_type=cp_type.value,
             alpha=alpha.value,
@@ -601,6 +678,7 @@ def config_builder() -> Any:
             strat=strat.value,
             system_load_n_bins=load_bins.value,
             pred_n_bins=pred_bins.value,
+            sparse_strata=sparse.value,
             embedding_pooling=pooling.value,
             distance=distance.value,
             bandwidth=bandwidth.value,
@@ -626,6 +704,7 @@ def config_builder() -> Any:
             strat.value = value
         show(load_bins, strat.value == "system_load_bin")
         show(pred_bins, strat.value == "pred_bins")
+        show(sparse_box, strat.value is not None)
         show(kernel_box, kernel)
         show(knn_row, bandwidth.value == "knn")
         n_eff_bandwidth = bandwidth.value == "n_eff"
@@ -638,6 +717,9 @@ def config_builder() -> Any:
         for fields in (cal_fields, test_fields):
             show(fields["embeddings"], kernel)
             show(fields["generator_predictions"], task.value == "OptimalPowerFlow")
+        show(apply_box, use_apply.value)
+        show(new_fields["embeddings"], kernel)
+        show(new_fields["generator_predictions"], task.value == "OptimalPowerFlow")
         show(vm_lower, screen.value and variables["Vm"].value)
         show(vm_upper, screen.value and variables["Vm"].value)
         show(line_upper, screen.value and variables["line_loading"].value)
@@ -682,9 +764,14 @@ def config_builder() -> Any:
             f"<b style='color:#080'>Saved to {html.escape(str(path.resolve()))}</b><br>"
             f"Next: <code>gridfm_trustlayer compute --config {html.escape(filename.value)}</code>, "
             + (
-                "then <code>calibrate</code> and <code>screen</code>."
+                "then <code>calibrate</code> and <code>screen</code>"
                 if "screen_bounds" in config
-                else "then <code>calibrate</code> (no screening step)."
+                else "then <code>calibrate</code> (no screening step)"
+            )
+            + (
+                "; <code>apply</code> for the new scenarios."
+                if "apply" in config["inputs"]
+                else "."
             )
         )
 
@@ -711,6 +798,7 @@ def config_builder() -> Any:
             ),
             load_bins,
             pred_bins,
+            sparse_box,
             kernel_box,
             header("Data: two separately generated datasets"),
             note(
@@ -723,6 +811,8 @@ def config_builder() -> Any:
                     w.VBox([w.HTML("<b>Test</b>"), *test_fields.values()]),
                 ]
             ),
+            w.HBox([use_apply], layout=w.Layout(margin="8px 0 0 155px")),
+            apply_box,
             header("Screening"),
             w.HBox([screen], layout=w.Layout(margin="0 0 0 155px")),
             screen_note,
@@ -770,6 +860,8 @@ def config_builder() -> Any:
         *variables.values(),
         *cal_fields.values(),
         *test_fields.values(),
+        use_apply,
+        *new_fields.values(),
     ]:
         widget.observe(refresh, names="value")
     save.on_click(on_save)

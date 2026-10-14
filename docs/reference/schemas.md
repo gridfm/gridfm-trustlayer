@@ -116,8 +116,8 @@ Important note:
 
 When loading PowerFlow predictions:
 
-- `Vm` is clamped on `PV` and `REF` buses
-- `Va` is clamped on `REF` buses
+- `Vm` is replaced by `Vm_target` on `PV` buses, and `Va` by `Va_target` on the `REF` bus: these are the set-points of a power flow, given to the model as inputs in graphkit's power-flow mask (which treats `Vm` at the reference bus as unknown)
+- the same values are needed by `apply` for new scenarios; graphkit writes them for every scenario it predicts
 - `Pg_pred` and `Qg_pred` remain available as raw direct-output channels in `PredictionSet.channels`
 
 ### OptimalPowerFlow semantics
@@ -312,6 +312,7 @@ Typical columns include:
 - original prediction parquet columns
 - `Vm_pi_lower`, `Vm_pi_upper` when `Vm` is calibrated
 - `Va_pi_lower`, `Va_pi_upper` when `Va` is calibrated
+- `Vm_known`, `Va_known`: the set-points, see [Known values](#known-values)
 - optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, `system_load_bin_label`, `pred_bins_vm`, `pred_bins_vm_label`, `pred_bins_va`, and `pred_bins_va_label`
 - kernel diagnostic columns `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback` when `cp_type: kernel`
 
@@ -333,31 +334,38 @@ Typical columns include:
 - optional stratification columns such as `outage_type`, `outage_type_label`, `system_load_bin`, `system_load_bin_label`, `pred_bins_line_loading`, and `pred_bins_line_loading_label`
 - kernel diagnostic columns `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback` when `cp_type: kernel`
 
-### Analysis CSVs
+### Coverage reports
 
-Produced by `calibrate`, next to the calibrated parquets: `trust_analysis_{volt,line}.csv` (per entity), `trust_summary_{volt,line}.csv` (per group of entities) and `trust_reliability_{volt,line}.csv` (per variable and stratum).
+Produced by `calibrate` in `outputs.coverage_dir` (default: `coverage/` next to the calibrated parquets):
 
-- With stratification, rows carry `analysis_scope`, `stratification`, `stratum_value` and `stratum_label`.
-- `system_load_bin` labels are percentile ranges with cut-point hints, e.g. `system_load_bin=p20-p40 [1450, 1620)`.
+- `summary.md`
+- `coverage_by_stratum.csv`: one row per variable and stratum
+- `coverage_by_group.csv`: one row per variable, stratum and group (`bus_type=...` or `rate_a=...`)
+- `coverage_by_element_voltage.csv`, `coverage_by_element_line_loading.csv`: one row per variable, stratum and bus or line
+- `figures/`
+
+The `stratum` column reads `all` for the whole test set, or the stratum label:
+
+- `n_outages=2`, `outage_type=branch_only`;
+- `system_load_bin` labels are percentile ranges with cut-point hints, e.g. `system_load_bin=p20-p40 [1450, 1620)`;
 - `pred_bins` labels are per variable, e.g. `pred_bins_vm=p00-p50 (<1.0)` or `pred_bins_line_loading=p50-p100 (>=0.82)`.
 
-Every column is explained in [Reading the results](../user-guide/results.md).
+Widths are in the model's units (`Va` in radians); `summary.md` and the figures show `Va` in degrees. Every column is explained in [Reading the results](../user-guide/results.md#outputs-of-calibrate).
 
-### Screening CSVs
+### Screening reports
 
-Produced by `screen`.
+Produced by `screen` in `outputs.screen_dir`:
 
-Voltage side:
+- `summary.md`
+- `screening_by_stratum.csv`, `screening_by_group.csv`, `screening_by_element_voltage.csv`, `screening_by_element_line_loading.csv`: one row per screened side (`lower`, `upper`, `any` for `Vm`; `upper` for `line_loading`)
+- `screening_detail_voltage.parquet/`, `screening_detail_line_loading.parquet/` (partitioned datasets): one row per screened value
+- `figures/`
 
-- `trust_screen_detail_volt.parquet/` (partitioned dataset)
-- `trust_screen_entity_volt.csv`
-- `trust_screen_summary_volt.csv`
+See [Reading the results](../user-guide/results.md#outputs-of-screen).
 
-Line side:
+### Known values
 
-- `trust_screen_detail_line.parquet/` (partitioned dataset)
-- `trust_screen_entity_line.csv`
-- `trust_screen_summary_line.csv`
+`Vm_known` and `Va_known` (boolean) in the calibrated and applied voltage parquets mark the set-points: `Vm` at PV buses and `Va` at the reference bus for `PowerFlow`, `Va` at the reference bus for `OptimalPowerFlow`. Their bounds equal the set-point, and every report leaves them out and counts them in `n_known`.
 
 ## Known limits
 

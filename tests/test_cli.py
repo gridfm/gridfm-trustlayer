@@ -12,31 +12,12 @@ import pytest
 
 from gridfm_trustlayer.cli import main
 from gridfm_trustlayer.cli.config import load_cli_config, normalize_variables
-from gridfm_trustlayer.cli.main import _format_figure_stratum_label
 from gridfm_trustlayer.io import (
     compute_line_loading,
     load_ground_truth,
     load_predictions,
 )
 from tests.conformal_reference import conformal_quantile
-
-
-def test_format_figure_stratum_label_strips_prefix() -> None:
-    assert (
-        _format_figure_stratum_label(
-            "system_load_bin=p20-p40 [2388.02, 2492.31)",
-            "system_load_bin",
-        )
-        == "p20-p40 [2388.02, 2492.31)"
-    )
-    assert (
-        _format_figure_stratum_label(
-            "outage_type=branch_only",
-            "outage_type",
-        )
-        == "branch_only"
-    )
-    assert _format_figure_stratum_label("all", "system_load_bin") == "all"
 
 
 def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
@@ -131,78 +112,38 @@ def test_compute_then_calibrate_roundtrip(tmp_path) -> None:
         expected_rows + expected_vm_upper[None, :],
         rtol=1e-6,  # float32 parquet output against a float64 expectation
     )
-    analysis_path = tmp_path / "trust_analysis_volt.csv"
-    summary_path = tmp_path / "trust_summary_volt.csv"
-    reliability_path = tmp_path / "trust_reliability_volt.csv"
-    figures_dir = tmp_path / "figures"
-    assert analysis_path.exists()
-    assert summary_path.exists()
-    assert reliability_path.exists()
-    analysis_frame = pd.read_csv(analysis_path)
-    summary_frame = pd.read_csv(summary_path)
-    reliability_frame = pd.read_csv(reliability_path)
-    assert {
+    coverage_dir = tmp_path / "coverage"
+    elements = pd.read_csv(coverage_dir / "coverage_by_element_voltage.csv")
+    by_stratum = pd.read_csv(coverage_dir / "coverage_by_stratum.csv")
+    groups = pd.read_csv(coverage_dir / "coverage_by_group.csv")
+    assert list(elements.columns) == [
         "variable",
+        "stratum",
         "bus",
         "bus_type",
-        "width_mean",
-        "width_min",
-        "width_max",
-        "width_mean_degrees",
-        "width_min_degrees",
-        "width_max_degrees",
-        "empirical_coverage",
-        "n_samples",
-    }.issubset(analysis_frame.columns)
-    va_rows = analysis_frame[analysis_frame["variable"].eq("Va")].copy()
-    np.testing.assert_allclose(
-        va_rows["width_mean_degrees"].to_numpy(),
-        np.rad2deg(va_rows["width_mean"].to_numpy()),
-    )
-    assert set(analysis_frame["bus_type"].unique().tolist()) == {"PQ", "PV"}
-    assert {
-        "scope",
-        "variable",
-        "bus_type",
-        "n_buses",
-        "n_samples_min",
-        "n_samples_max",
-        "width_mean_across_buses",
-        "width_min_across_buses",
-        "width_max_across_buses",
-        "empirical_coverage_mean_across_buses",
-        "empirical_coverage_min_across_buses",
-        "empirical_coverage_max_across_buses",
-        "width_mean_degrees_across_buses",
-        "width_min_degrees_across_buses",
-        "width_max_degrees_across_buses",
-    }.issubset(summary_frame.columns)
-    assert set(summary_frame["scope"].unique().tolist()) == {"system", "bus_type"}
-    assert len(summary_frame) == 6
-    assert {
-        "variable",
-        "analysis_scope",
-        "stratification",
-        "stratum_label",
-        "target_coverage",
-        "n_entities",
-        "n_samples_total",
-        "empirical_coverage_weighted",
-        "coverage_gap_weighted",
-        "width_mean_weighted",
-    }.issubset(reliability_frame.columns)
-    np.testing.assert_allclose(
-        reliability_frame["target_coverage"].to_numpy(),
-        np.full(len(reliability_frame), 0.5),
-    )
-    assert figures_dir.joinpath("vm_width_summary.png").exists()
-    assert figures_dir.joinpath("vm_coverage_summary.png").exists()
-    assert figures_dir.joinpath("vm_width_density.png").exists()
-    assert figures_dir.joinpath("vm_coverage_density.png").exists()
-    assert figures_dir.joinpath("va_width_summary.png").exists()
-    assert figures_dir.joinpath("va_coverage_summary.png").exists()
-    assert figures_dir.joinpath("va_width_density.png").exists()
-    assert figures_dir.joinpath("va_coverage_density.png").exists()
+        "n_values",
+        "n_known",
+        "coverage",
+        "mean_width",
+        "min_width",
+        "max_width",
+    ]
+    assert set(elements["bus_type"]) == {"PQ", "PV"}
+    assert set(groups["group"]) == {"bus_type=PQ", "bus_type=PV"}
+    assert by_stratum["variable"].tolist() == ["Vm", "Va"]
+    assert set(by_stratum["stratum"]) == {"all"}
+    np.testing.assert_allclose(by_stratum["target_coverage"], 0.5)
+    # Coverage pools the values of all buses.
+    vm = elements[elements["variable"].eq("Vm")]
+    pooled = (vm["coverage"] * vm["n_values"]).sum() / vm["n_values"].sum()
+    vm_coverage = by_stratum.loc[by_stratum["variable"].eq("Vm"), "coverage"]
+    assert vm_coverage.item() == pytest.approx(pooled, rel=1e-5)
+    for name in ("coverage_by_stratum", "coverage_by_bus", "width_by_stratum"):
+        assert (coverage_dir / "figures" / f"vm_{name}.png").exists()
+        assert (coverage_dir / "figures" / f"va_{name}.png").exists()
+    summary = (coverage_dir / "summary.md").read_text(encoding="utf-8")
+    assert summary.startswith("# Coverage report")
+    assert "figures/vm_coverage_by_stratum.png" in summary
 
 
 def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
@@ -264,10 +205,10 @@ def test_default_common_output_folder(tmp_path, monkeypatch) -> None:
 
     output_path = output_dir / "test_predictions_vm_va_with_intervals.parquet"
     assert output_path.exists()
-    assert (output_dir / "trust_analysis_volt.csv").exists()
-    assert (output_dir / "trust_summary_volt.csv").exists()
-    assert (output_dir / "figures" / "vm_width_summary.png").exists()
-    assert (output_dir / "figures" / "vm_width_density.png").exists()
+    coverage_dir = output_dir / "coverage"
+    assert (coverage_dir / "coverage_by_element_voltage.csv").exists()
+    assert (coverage_dir / "coverage_by_stratum.csv").exists()
+    assert (coverage_dir / "figures" / "vm_width_by_stratum.png").exists()
     output_frame = pd.read_parquet(output_path)
     assert {"Vm_pi_lower", "Va_pi_upper"}.issubset(output_frame.columns)
 
@@ -317,10 +258,16 @@ def test_calibrate_no_figures_skips_figure_outputs(tmp_path) -> None:
     )
 
     assert output_path.exists()
-    assert (tmp_path / "trust_analysis_volt.csv").exists()
-    assert (tmp_path / "trust_summary_volt.csv").exists()
-    assert (tmp_path / "trust_reliability_volt.csv").exists()
-    assert not (tmp_path / "figures").exists()
+    coverage_dir = tmp_path / "coverage"
+    for name in (
+        "coverage_by_stratum.csv",
+        "coverage_by_group.csv",
+        "coverage_by_element_voltage.csv",
+        "summary.md",
+    ):
+        assert (coverage_dir / name).exists()
+    assert not (coverage_dir / "figures").exists()
+    assert "## Figures" not in (coverage_dir / "summary.md").read_text(encoding="utf-8")
 
 
 def test_config_driven_compute_and_calibrate(tmp_path) -> None:
@@ -421,44 +368,35 @@ def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
     outage_one = output_frame[output_frame["scenario"].eq(3)].reset_index(drop=True)
     outage_zero = output_frame[output_frame["scenario"].eq(0)].reset_index(drop=True)
     # N-0 holds three calibration scenarios (finite bounds at alpha = 0.9); N-1
-    # holds one, which cannot support a finite bound, so it must not borrow N-0's.
+    # holds one, which cannot support a finite bound: it takes the quantile of
+    # all four calibration scenarios (sparse_strata: pooled, the default).
     assert np.all(np.isfinite(outage_zero["Vm_pi_upper"].to_numpy()))
-    assert np.all(np.isposinf(outage_one["Vm_pi_upper"].to_numpy()))
-    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
-    summary_frame = pd.read_csv(output_path.parent / "trust_summary_volt.csv")
-    assert {
-        "analysis_scope",
-        "stratification",
-        "stratum_value",
-        "stratum_label",
-        "n_scenarios",
-    }.issubset(analysis_frame.columns)
-    assert set(analysis_frame["analysis_scope"].unique().tolist()) == {
-        "overall",
-        "stratified",
-    }
-    strat_rows = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
-    assert set(strat_rows["stratification"].unique().tolist()) == {"n_outages"}
-    np.testing.assert_array_equal(
-        np.sort(strat_rows["stratum_value"].dropna().to_numpy(dtype=int)),
-        np.array([0, 0, 0, 0, 1, 1, 1, 1]),
+    assert not outage_zero["Vm_pooled"].any()
+    assert outage_one["Vm_pooled"].all()
+    calibration = pd.read_parquet(predictions_path).sort_values(["scenario", "bus"])
+    residuals = (calibration["Vm_target"] - calibration["Vm_pred"]).to_numpy()
+    np.testing.assert_allclose(
+        outage_one["Vm_pi_upper"].to_numpy(),
+        outage_one["Vm_pred"].to_numpy()
+        + conformal_quantile(residuals.reshape(4, 2), 0.55),
+        rtol=1e-6,
     )
-    assert {
-        "analysis_scope",
-        "stratification",
-        "stratum_value",
-        "stratum_label",
-        "n_scenarios_min",
-        "n_scenarios_max",
-    }.issubset(summary_frame.columns)
-    assert (output_path.parent / "figures" / "va_coverage_summary.png").exists()
-    assert (output_path.parent / "figures" / "va_coverage_density.png").exists()
+    coverage_dir = output_path.parent / "coverage"
+    elements = pd.read_csv(coverage_dir / "coverage_by_element_voltage.csv")
+    by_stratum = pd.read_csv(coverage_dir / "coverage_by_stratum.csv")
+    assert set(elements["stratum"]) == {"all", "n_outages=0", "n_outages=1"}
+    assert by_stratum["stratum"].tolist() == ["all", "n_outages=0", "n_outages=1"] * 2
+    # N-1 uses pooled bounds at both buses: reported, not hidden.
+    n_minus_1 = by_stratum[by_stratum["stratum"].eq("n_outages=1")]
+    assert (n_minus_1["n_elements_infinite"] == 0).all()
+    assert (n_minus_1["n_pooled"] == 2).all()
+    summary = (coverage_dir / "summary.md").read_text(encoding="utf-8")
     assert (
-        output_path.parent / "figures" / "vm_width_summary_by-n-outages.png"
-    ).exists()
-    assert (
-        output_path.parent / "figures" / "vm_coverage_mean_by-n-outages.png"
-    ).exists()
+        "Too few calibration samples for a finite bound: Vm: 2 buses (n_outages=1: 2)"
+        in summary
+    )
+    assert (coverage_dir / "figures" / "vm_coverage_by_stratum.png").exists()
+    assert (coverage_dir / "figures" / "vm_width_by_stratum.png").exists()
 
 
 def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> None:
@@ -532,18 +470,16 @@ def test_compute_then_calibrate_with_outage_type_stratification(tmp_path) -> Non
         .tolist()
     ) == {"mixed"}
 
-    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
-    strat_rows = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
-    assert set(strat_rows["stratification"].unique().tolist()) == {"outage_type"}
-    assert set(strat_rows["stratum_label"].unique().tolist()) == {
+    coverage_dir = output_path.parent / "coverage"
+    elements = pd.read_csv(coverage_dir / "coverage_by_element_voltage.csv")
+    assert set(elements["stratum"]) == {
+        "all",
         "outage_type=none",
         "outage_type=branch_only",
         "outage_type=gen_only",
         "outage_type=mixed",
     }
-    assert (
-        output_path.parent / "figures" / "vm_width_summary_by-outage-type.png"
-    ).exists()
+    assert (coverage_dir / "figures" / "vm_width_by_stratum.png").exists()
 
 
 def test_compute_then_calibrate_with_system_load_bin_stratification(tmp_path) -> None:
@@ -609,12 +545,11 @@ def test_compute_then_calibrate_with_system_load_bin_stratification(tmp_path) ->
         low_load["Vm_pi_upper"].to_numpy(),
         high_load["Vm_pi_upper"].to_numpy(),
     )
-    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
-    strat_rows = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
-    assert set(strat_rows["stratification"].dropna().unique().tolist()) == {
-        "system_load_bin"
-    }
-    assert set(strat_rows["stratum_label"].dropna().unique().tolist()) == {
+    elements = pd.read_csv(
+        output_path.parent / "coverage" / "coverage_by_element_voltage.csv"
+    )
+    assert set(elements["stratum"]) == {
+        "all",
         "system_load_bin=p00-p50 (<50)",
         "system_load_bin=p50-p100 (>=50)",
     }
@@ -685,12 +620,12 @@ def test_compute_then_calibrate_with_pred_bins_stratification(tmp_path) -> None:
         same_scenario["pred_bins_vm"].to_numpy(dtype=float),
         np.array([1.0, 0.0]),
     )
-    analysis_frame = pd.read_csv(output_path.parent / "trust_analysis_volt.csv")
-    vm_rows = analysis_frame[
-        (analysis_frame["analysis_scope"].eq("stratified"))
-        & (analysis_frame["variable"].eq("Vm"))
-    ]
-    assert set(vm_rows["stratification"].dropna().unique().tolist()) == {"pred_bins_vm"}
+    elements = pd.read_csv(
+        output_path.parent / "coverage" / "coverage_by_element_voltage.csv"
+    )
+    vm_strata = set(elements.loc[elements["variable"].eq("Vm"), "stratum"])
+    assert "all" in vm_strata
+    assert all(s == "all" or s.startswith("pred_bins_vm=") for s in vm_strata)
 
 
 def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
@@ -790,48 +725,27 @@ def test_compute_then_calibrate_line_loading_roundtrip(tmp_path) -> None:
         output_frame["line_loading_pred"].to_numpy() + expected_upper,
     )
 
-    analysis_frame = pd.read_csv(tmp_path / "trust_analysis_line.csv")
-    summary_frame = pd.read_csv(tmp_path / "trust_summary_line.csv")
-    reliability_frame = pd.read_csv(tmp_path / "trust_reliability_line.csv")
-    assert {
+    coverage_dir = tmp_path / "coverage"
+    elements = pd.read_csv(coverage_dir / "coverage_by_element_line_loading.csv")
+    groups = pd.read_csv(coverage_dir / "coverage_by_group.csv")
+    by_stratum = pd.read_csv(coverage_dir / "coverage_by_stratum.csv")
+    assert list(elements.columns) == [
         "variable",
+        "stratum",
         "branch",
         "from_bus",
         "to_bus",
         "rate_a",
-        "width_mean",
-        "empirical_coverage",
-        "n_samples",
-    }.issubset(analysis_frame.columns)
-    assert {
-        "scope",
-        "variable",
-        "rate_a",
-        "n_lines",
-        "width_mean_across_lines",
-        "empirical_coverage_mean_across_lines",
-    }.issubset(summary_frame.columns)
-    assert set(summary_frame["scope"].unique().tolist()) == {"system", "rate_a"}
-    rate_rows = summary_frame[summary_frame["scope"].eq("rate_a")].copy()
-    assert len(rate_rows) == 1
-    np.testing.assert_allclose(rate_rows["rate_a"].to_numpy(), np.array([10.0]))
-    assert {
-        "variable",
-        "analysis_scope",
-        "stratification",
-        "stratum_label",
-        "target_coverage",
-        "n_entities",
-        "empirical_coverage_weighted",
-        "coverage_gap_weighted",
-        "width_mean_weighted",
-    }.issubset(reliability_frame.columns)
-    np.testing.assert_allclose(
-        reliability_frame["target_coverage"].to_numpy(),
-        np.full(len(reliability_frame), 0.5),
-    )
-    assert (tmp_path / "figures" / "line_loading_width_summary.png").exists()
-    assert (tmp_path / "figures" / "line_loading_coverage_density.png").exists()
+        "n_values",
+        "coverage",
+        "mean_width",
+        "min_width",
+        "max_width",
+    ]
+    assert groups["group"].tolist() == ["rate_a=10"]
+    np.testing.assert_allclose(by_stratum["target_coverage"], 0.5)
+    assert (coverage_dir / "figures" / "line_loading_width_by_stratum.png").exists()
+    assert (coverage_dir / "figures" / "line_loading_coverage_by_line.png").exists()
 
 
 def test_compute_then_calibrate_line_loading_with_pred_bins_stratification(
@@ -929,9 +843,9 @@ def test_config_driven_line_loading_compute_and_calibrate(tmp_path) -> None:
         "line_loading_pi_lower",
         "line_loading_pi_upper",
     }.issubset(output_frame.columns)
-    assert (output_path.parent / "trust_analysis_line.csv").exists()
-    assert (output_path.parent / "trust_summary_line.csv").exists()
-    assert (output_path.parent / "figures" / "line_loading_width_summary.png").exists()
+    coverage_dir = output_path.parent / "coverage"
+    assert (coverage_dir / "coverage_by_element_line_loading.csv").exists()
+    assert (coverage_dir / "figures" / "line_loading_width_by_stratum.png").exists()
 
 
 def test_config_driven_mixed_compute_and_calibrate(tmp_path) -> None:
@@ -984,12 +898,13 @@ def test_config_driven_mixed_compute_and_calibrate(tmp_path) -> None:
     line_frame = pd.read_parquet(line_output_path)
     assert {"Vm_pi_lower", "Va_pi_upper"}.issubset(volt_frame.columns)
     assert {"line_loading_pred", "line_loading_pi_upper"}.issubset(line_frame.columns)
-    assert (outputs_dir / "trust_analysis_volt.csv").exists()
-    assert (outputs_dir / "trust_summary_volt.csv").exists()
-    assert (outputs_dir / "trust_analysis_line.csv").exists()
-    assert (outputs_dir / "trust_summary_line.csv").exists()
-    assert (outputs_dir / "figures" / "vm_width_summary.png").exists()
-    assert (outputs_dir / "figures" / "line_loading_width_summary.png").exists()
+    coverage_dir = outputs_dir / "coverage"
+    by_stratum = pd.read_csv(coverage_dir / "coverage_by_stratum.csv")
+    assert by_stratum["variable"].tolist() == ["Vm", "Va", "line_loading"]
+    assert (coverage_dir / "coverage_by_element_voltage.csv").exists()
+    assert (coverage_dir / "coverage_by_element_line_loading.csv").exists()
+    assert (coverage_dir / "figures" / "vm_width_by_stratum.png").exists()
+    assert (coverage_dir / "figures" / "line_loading_width_by_stratum.png").exists()
 
 
 def test_config_driven_mixed_screen(tmp_path) -> None:
@@ -1046,75 +961,86 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     assert main(["calibrate", "--config", str(config_path)]) == 0
     assert main(["screen", "--config", str(config_path)]) == 0
 
-    volt_detail = pd.read_parquet(screen_dir / "trust_screen_detail_volt.parquet")
-    volt_entity = pd.read_csv(screen_dir / "trust_screen_entity_volt.csv")
-    volt_summary = pd.read_csv(screen_dir / "trust_screen_summary_volt.csv")
-    line_detail = pd.read_parquet(screen_dir / "trust_screen_detail_line.parquet")
-    line_summary = pd.read_csv(screen_dir / "trust_screen_summary_line.csv")
+    volt_detail = pd.read_parquet(screen_dir / "screening_detail_voltage.parquet")
+    line_detail = pd.read_parquet(screen_dir / "screening_detail_line_loading.parquet")
+    by_stratum = pd.read_csv(screen_dir / "screening_by_stratum.csv")
+    by_group = pd.read_csv(screen_dir / "screening_by_group.csv")
+    volt_elements = pd.read_csv(screen_dir / "screening_by_element_voltage.csv")
 
     assert set(volt_detail["variable"].unique().tolist()) == {"Vm"}
     assert set(line_detail["variable"].unique().tolist()) == {"line_loading"}
-    assert {
-        "pred_any_violation",
-        "true_any_violation",
-        "any_tp",
-        "any_fp",
-        "any_fn",
-        "any_tn",
-    }.issubset(volt_detail.columns)
-    assert {"lower_precision", "upper_recall", "any_precision", "any_recall"}.issubset(
-        volt_entity.columns
-    )
-    assert {
-        "scope",
-        "variable",
+    flags = [
+        "pred_lower_violation",
+        "true_lower_violation",
+        "pred_upper_violation",
+        "true_upper_violation",
+    ]
+    values = ["variable", "target", "pi_lower", "pi_upper", *flags]
+    partition = ["scenario_partition"]
+    assert list(volt_detail.columns) == [
+        "scenario",
+        "bus",
         "bus_type",
-        "lower_tp",
-        "upper_fp",
-        "any_recall",
-    }.issubset(volt_summary.columns)
-    assert {
-        "scope",
-        "variable",
+        *values,
+        *partition,
+    ]
+    assert list(line_detail.columns) == [
+        "scenario",
+        "branch",
+        "from_bus",
+        "to_bus",
         "rate_a",
-        "lower_tp",
-        "upper_fp",
-        "any_precision",
-    }.issubset(line_summary.columns)
-
-    np.testing.assert_array_equal(
-        volt_detail["pred_any_violation"].to_numpy(dtype=bool),
-        volt_detail["pred_lower_violation"].to_numpy(dtype=bool)
-        | volt_detail["pred_upper_violation"].to_numpy(dtype=bool),
+        *values,
+        *partition,
+    ]
+    # One row per variable, stratum and screened side; line loading only upper.
+    assert by_stratum[["variable", "side"]].values.tolist() == [
+        ["Vm", "lower"],
+        ["Vm", "upper"],
+        ["Vm", "any"],
+        ["line_loading", "upper"],
+    ]
+    assert list(by_stratum.columns) == [
+        "variable",
+        "stratum",
+        "side",
+        "n_values",
+        "n_known",
+        "violations",
+        "alarms",
+        "caught",
+        "missed",
+        "false_alarms",
+        "cleared",
+        "recall",
+        "precision",
+    ]
+    # The stored flags reproduce the counts.
+    predicted = (
+        volt_detail["pred_lower_violation"] | volt_detail["pred_upper_violation"]
     )
-    system_volt = volt_summary[volt_summary["scope"].eq("system")].iloc[0]
-    assert int(system_volt["n_samples"]) == len(volt_detail)
+    true = volt_detail["true_lower_violation"] | volt_detail["true_upper_violation"]
+    vm_any = by_stratum[
+        by_stratum["variable"].eq("Vm") & by_stratum["side"].eq("any")
+    ].iloc[0]
+    assert int(vm_any["caught"]) == int((predicted & true).sum())
+    assert int(vm_any["false_alarms"]) == int((predicted & ~true).sum())
+    assert int(vm_any["missed"]) == int((~predicted & true).sum())
+    assert int(vm_any["n_values"]) == len(volt_detail)
     assert int(
-        system_volt["any_tp"]
-        + system_volt["any_fp"]
-        + system_volt["any_fn"]
-        + system_volt["any_tn"]
+        vm_any["caught"] + vm_any["missed"] + vm_any["false_alarms"] + vm_any["cleared"]
     ) == len(volt_detail)
-    system_line = line_summary[line_summary["scope"].eq("system")].iloc[0]
-    assert int(system_line["n_samples"]) == len(line_detail)
-    assert set(line_summary["scope"].unique().tolist()) == {"system", "rate_a"}
-    assert line_detail["lower_bound"].isna().all()
+    assert set(by_group["group"]) == {"all", "bus_type=PQ", "bus_type=PV", "rate_a=10"}
+    assert {"bus", "bus_type", "side", "recall"}.issubset(volt_elements.columns)
+    # line_loading has only an upper limit.
     assert not line_detail["pred_lower_violation"].any()
     assert not line_detail["true_lower_violation"].any()
-    np.testing.assert_array_equal(
-        line_detail["pred_any_violation"].to_numpy(dtype=bool),
-        line_detail["pred_upper_violation"].to_numpy(dtype=bool),
-    )
-    np.testing.assert_array_equal(
-        line_detail["true_any_violation"].to_numpy(dtype=bool),
-        line_detail["true_upper_violation"].to_numpy(dtype=bool),
-    )
 
-    assert (screen_dir / "screen_figures" / "vm_precision_bus_summary.png").exists()
-    assert (screen_dir / "screen_figures" / "vm_any_confusion.png").exists()
-    assert (
-        screen_dir / "screen_figures" / "line_loading_recall_branch_summary.png"
-    ).exists()
+    assert (screen_dir / "figures" / "vm_confusion.png").exists()
+    assert (screen_dir / "figures" / "line_loading_confusion.png").exists()
+    summary = (screen_dir / "summary.md").read_text(encoding="utf-8")
+    assert summary.startswith("# Screening report")
+    assert "### Vm (either limit)" in summary
 
 
 def _screen_config(tmp_path, outputs: list[str]) -> Path:
@@ -1170,8 +1096,8 @@ def test_screen_finds_mixed_outputs_in_a_shared_directory(tmp_path) -> None:
     assert main(["calibrate", "--config", str(config_path)]) == 0
     assert main(["screen", "--config", str(config_path)]) == 0
 
-    assert (screen_dir / "trust_screen_summary_volt.csv").exists()
-    assert (screen_dir / "trust_screen_summary_line.csv").exists()
+    assert (screen_dir / "screening_by_stratum.csv").exists()
+    assert (screen_dir / "screening_by_element_line_loading.csv").exists()
 
 
 def test_screen_finds_mixed_outputs_in_the_default_directory(
@@ -1185,8 +1111,27 @@ def test_screen_finds_mixed_outputs_in_the_default_directory(
     assert main(["screen", "--config", str(config_path)]) == 0
 
     screen_dir = tmp_path / "trustlayer_outputs" / "stateestimation" / "element"
-    assert (screen_dir / "trust_screen_summary_volt.csv").exists()
-    assert (screen_dir / "trust_screen_summary_line.csv").exists()
+    assert (screen_dir / "screening_by_stratum.csv").exists()
+    assert (screen_dir / "screening_by_element_line_loading.csv").exists()
+
+
+def test_screen_no_figures_skips_the_figures(tmp_path) -> None:
+    screen_dir = tmp_path / "screen"
+    config_path = _screen_config(
+        tmp_path,
+        [
+            f"  calibrated_predictions: {tmp_path / 'calibrated'}",
+            f"  screen_dir: {screen_dir}",
+        ],
+    )
+    for command in ("compute", "calibrate"):
+        assert main([command, "--config", str(config_path)]) == 0
+    assert main(["screen", "--config", str(config_path), "--no-figures"]) == 0
+
+    assert (screen_dir / "screening_by_stratum.csv").exists()
+    assert not (screen_dir / "figures").exists()
+    summary = (screen_dir / "summary.md").read_text(encoding="utf-8")
+    assert "## Figures" not in summary
 
 
 def test_single_family_run_honours_the_family_specific_output_key(tmp_path) -> None:
@@ -1211,7 +1156,7 @@ def test_single_family_run_honours_the_family_specific_output_key(tmp_path) -> N
     assert main(["calibrate", "--config", str(config_path)]) == 0
     assert volt_path.exists()
     assert main(["screen", "--config", str(config_path)]) == 0
-    assert (tmp_path / "screen" / "trust_screen_summary_volt.csv").exists()
+    assert (tmp_path / "screen" / "screening_by_element_voltage.csv").exists()
 
 
 def test_screen_explains_a_missing_calibrated_parquet(tmp_path) -> None:
@@ -1510,3 +1455,47 @@ def _write_generator_status_fixture(path, *, in_service: list[float]) -> None:
         }
     )
     gen_frame.to_parquet(path, index=False)
+
+
+def test_version_flag_and_module_entry_point(capsys) -> None:
+    import subprocess
+    import sys
+
+    from gridfm_trustlayer import __version__
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"gridfm_trustlayer {__version__}"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "gridfm_trustlayer", "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == f"gridfm_trustlayer {__version__}"
+
+
+def test_commands_report_a_summary(tmp_path, capsys) -> None:
+    config_path = _screen_config(
+        tmp_path,
+        [
+            f"  calibrated_predictions: {tmp_path / 'calibrated'}",
+            f"  screen_dir: {tmp_path / 'screen'}",
+        ],
+    )
+
+    for command in ("compute", "calibrate", "screen"):
+        assert main([command, "--config", str(config_path)]) == 0
+    printed = capsys.readouterr().out
+
+    assert (
+        "compute: fitted element for Vm, Va, line_loading on 4 calibration" in printed
+    )
+    assert "calibrate: Vm: coverage" in printed
+    assert "calibrate: line_loading: coverage" in printed
+    assert f"reports in {tmp_path / 'calibrated' / 'coverage'}" in printed
+    assert "screen: Vm (either limit):" in printed
+    assert "true violations flagged" in printed
+    assert f"screen: reports in {tmp_path / 'screen'}" in printed

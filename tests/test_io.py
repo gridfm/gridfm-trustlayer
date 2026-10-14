@@ -1,4 +1,4 @@
-"""Tests for the Phase 2 data I/O layer."""
+"""Tests for the loaders of predictions, ground truth and line loading."""
 
 from __future__ import annotations
 

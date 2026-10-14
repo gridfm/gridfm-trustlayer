@@ -84,7 +84,7 @@ overloaded = upper > 1.0
 Two conventions worth knowing:
 
 - **`alpha` is two-sided.** Each tail gets `alpha / 2`, so `alpha=0.1` gives 90% intervals whose upper bound alone holds with probability at least 95%. For a one-sided screen at level `1 - a`, pass `alpha = 2 * a` and use only the upper bound.
-- **Too few calibration samples give infinite bounds.** A stratum needs at least `ceil(2 / alpha) - 1` valid residuals (19 at `alpha=0.1`) for a finite bound. With fewer, the bound is `+inf` / `-inf` rather than a falsely narrow interval.
+- **Too few calibration samples.** An element needs at least `ceil(2 / alpha) - 1` valid residuals (19 at `alpha=0.1`) in a stratum for a finite bound from that stratum. With fewer, or in a stratum absent from the calibration data, it uses its quantile over all strata (`sparse_strata="pooled"`, the default; `calibrator.pooled_masks` marks those entries after `predict_intervals`), or gets `+inf` / `-inf` with `fit(..., sparse_strata="infinite")`. Too few over all strata together always gives infinite bounds rather than a falsely narrow interval.
 
 ## Kernel-weighted intervals
 
@@ -207,7 +207,7 @@ test_predicted, test_true = load(
 lower, upper = calibrator.predict_intervals(test_predicted)["Vm"]
 ```
 
-`load_predictions` applies task-specific corrections: for `PowerFlow`, `Vm` is clamped on PV and reference buses and `Va` on the reference bus, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, using datakit's branch-flow routine (requires the `graphkit` extra). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
+`load_predictions` applies task-specific corrections: for `PowerFlow`, the predictions of the known set-points are replaced by their values (`Vm` at PV buses, `Va` at the reference bus), as graphkit's evaluation does, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, using datakit's branch-flow routine (requires the `graphkit` extra). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
 
 ## Saving and loading
 

@@ -68,13 +68,19 @@ Error messages are quoted as the CLI prints them, with the values in your run in
 ??? failure "`A mixed-variable run needs separate parquet outputs.`"
     Calibrating voltages and `line_loading` together writes two files, one per bus and one per branch. Set `outputs.calibrated_predictions` to a **directory**, or set `outputs.calibrated_predictions_volt` and `outputs.calibrated_predictions_line` to two file paths.
 
+??? failure "`This layer (strat: n_outages) needs the description of the new scenarios`"
+    `apply` was asked for bounds of a layer stratified by outages or load, or of `line_loading`, without the bus and branch files of the new scenarios. Set `inputs.apply.pf_node` and `pf_edge`. Only their topology, loads and branch parameters are read; they need no solved voltages.
+
+??? failure "`PowerFlow predictions need the known set-points of each scenario in Vm_target, Va_target`"
+    In a power flow, the voltage magnitude of PV buses and the angle of the reference bus are inputs, and trustlayer replaces the model's predictions there with them, as it did when fitting the layer. Keep `Vm_target` at PV buses and `Va_target` at the reference bus in the predictions of the new scenarios (graphkit writes them); the values at other buses may be missing.
+
 ## Results that look wrong
 
 ??? question "Some bounds are `inf` or `-inf`"
-    The stratum had fewer than $\lceil 2/\alpha \rceil - 1$ calibration samples for that bus or line (19 at $\alpha = 0.1$), too few for a finite bound with a coverage guarantee. Add calibration scenarios, use fewer strata (or none), or a larger `alpha`. Every such case is flagged by `screen`, which is the conservative outcome.
+    That bus or line has fewer than $\lceil 2/\alpha \rceil - 1$ valid calibration samples (19 at $\alpha = 0.1$) over all calibration scenarios together, or in its stratum with `sparse_strata: infinite`: too few for a finite bound with a coverage guarantee. Add calibration scenarios, use fewer strata (or none), or a larger `alpha`. Every such case is flagged by `screen`, which is the conservative outcome. See [Sparse strata](choosing-a-setup.md#sparse-strata-sparse_strata).
 
 ??? question "Coverage is clearly below $1-\alpha$ in one stratum"
-    With `cp_type: element`, the guarantee assumes calibration and test scenarios are drawn the same way. Check that both datasets were generated with the same datakit settings and the same model, and that the stratum is not tiny on either side (`n_scenarios_min` in `trust_reliability_*.csv`). Small shortfalls, of the order of $\sqrt{\alpha(1-\alpha)/n}$ for $n$ test scenarios, are sampling noise.
+    With `cp_type: element`, the guarantee assumes calibration and test scenarios are drawn the same way. Check that both datasets were generated with the same datakit settings and the same model, and that the stratum is not tiny on either side (`n_scenarios` in `coverage_by_stratum.csv`). A shortfall whose 95% interval (`coverage_low`, `coverage_high`) still contains the target is sampling noise.
 
 ??? question "Coverage is well above $1-\alpha$ with `cp_type: kernel`"
     The kernel is localizing too hard: the bounds are estimated from few neighbours and come out conservative. Raise `n_eff_target` (or `k_nn`), or let `n_eff_target: auto` choose it. A high share of `kcp_fallback` points the same way.

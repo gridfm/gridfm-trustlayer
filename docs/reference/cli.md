@@ -8,6 +8,8 @@ Entrypoint:
 
 ```bash
 gridfm_trustlayer <command> [OPTIONS]
+python -m gridfm_trustlayer <command> [OPTIONS]   # equivalent
+gridfm_trustlayer --version
 ```
 
 Available commands:
@@ -15,12 +17,17 @@ Available commands:
 - `compute`
 - `calibrate`
 - `screen`
+- `apply`
 
 The three run in this order:
 
 1. `compute` fits the calibrators on the calibration dataset (`inputs.calibration`) and writes a `.trustlayer` artifact.
 2. `calibrate` applies the artifact to the test dataset (`inputs.test`) and writes the predictions with their bounds, coverage reports and figures.
 3. `screen` compares the test bounds with the operating limits in `screen_bounds`.
+
+`apply` uses the artifact on new scenarios without a known solution (`inputs.apply`), at any point after `compute`.
+
+Each command ends with a short summary: what `compute` fitted and where the artifact is; the coverage and mean width per variable, with the weakest stratum, after `calibrate`; the violations caught and missed and the false alarms after `screen`. Both also say how many known values (set-points) were left out. On large test sets, `calibrate` and `screen` also print one line per block of scenarios as they go.
 
 ```bash
 gridfm_trustlayer compute --config path/to/trust_config.yaml
@@ -55,6 +62,7 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | `--strat` | `str` | Optional stratification: `n_outages`, `outage_type`, `system_load_bin`, or `pred_bins`. |
 | `--system-load-n-bins` | `int` | Requested number of percentile bins when `--strat system_load_bin` is used. |
 | `--pred-n-bins` | `int` | Requested number of percentile bins when `--strat pred_bins` is used. |
+| `--sparse-strata` | `str` | `pooled` (default) or `infinite`: the bounds of an element in a stratum with too few calibration samples. See [Sparse strata](../user-guide/choosing-a-setup.md#sparse-strata-sparse_strata). |
 | `--variables` | `list[str]` | Any subset of `Vm`, `Va`, `line_loading`. |
 | `--embeddings` | `str` | Scenario embeddings parquet with `emb_*` columns. Required for `--cp-type kernel`. |
 | `--embedding-pooling` | `str` | How per-entity embeddings are pooled into one vector per scenario: `mean` (default), `max`, `meanmax`, or `concat`. |
@@ -93,7 +101,7 @@ Distance metric:
 
 Bandwidth selection:
 
-- `--bandwidth n_eff` (default) solves, per test scenario, for the `h^2` whose kernel weights reach `--n-eff-target` effective calibration scenarios (600 by default). `n_eff` is monotone in `h^2`, so this is a log-space bisection, vectorized across a block of test scenarios.
+- `--bandwidth n_eff` (default) solves, per test scenario, for the `h^2` whose kernel weights reach `--n-eff-target` effective calibration scenarios (600 by default). `n_eff` is monotone in `h^2`, so this is a one-dimensional root find, solved with safeguarded Newton steps in log space, vectorized across a block of test scenarios.
 - `--bandwidth knn` instead sets `h^2` to the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum.
 - Prefer `n_eff` when the same configuration has to work across different embedding widths, stratum sizes, or networks: the `k_nn` that localizes well at one embedding width can be effectively uniform at another, whereas the `n_eff` target means the same thing everywhere.
 - Neither mode removes the need to choose a number. `k_nn` and `n_eff_target` are both hyperparameters, and picking one by looking at calibrated results on the application set invalidates the coverage guarantee. Use a tuning partition disjoint from the set you report on, or let `--n-eff-target auto` choose it by cross-validation inside the calibration data.
@@ -138,17 +146,15 @@ Output behavior:
 - For kernel artifacts, `calibrate` is where the localization happens: it loads and pools the test embeddings, computes distances to the stored calibration bank within each stratum, derives the per-scenario bandwidth and kernel weights, and evaluates the weighted quantile. The interval offsets therefore vary per test scenario rather than per stratum.
 - Kernel runs add three per-scenario diagnostic columns to the calibrated parquet: `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback`. See the notes below.
 
-Analysis side outputs:
+Reports, in `outputs.coverage_dir` (default: a `coverage/` folder next to the calibrated parquets):
 
-- `trust_analysis_volt.csv`
-- `trust_summary_volt.csv`
-- `trust_reliability_volt.csv`
-- `trust_analysis_line.csv`
-- `trust_summary_line.csv`
-- `trust_reliability_line.csv`
-- `figures/`
+- `summary.md`: method, data, known values set aside, coverage tables by stratum, figures and files
+- `coverage_by_stratum.csv`: coverage (with an approximate 95% interval), worst element and mean width per variable and stratum
+- `coverage_by_group.csv`: the same per bus type or line rating
+- `coverage_by_element_voltage.csv`, `coverage_by_element_line_loading.csv`: the same per bus or line
+- `figures/`: coverage by stratum, coverage per element, width by stratum
 
-Reliability side outputs summarize calibration quality per variable and stratum with expected coverage (`1 - alpha`), weighted empirical coverage, coverage gap, and mean-width aggregates.
+Known values (`Vm` at PV buses and `Va` at the reference bus, which are set-points) are left out of the fit and of every metric, and counted in `n_known`. The calibrated parquet marks them in `Vm_known` and `Va_known`. See [Reading the results](../user-guide/results.md#outputs-of-calibrate).
 
 Kernel diagnostic columns:
 
@@ -162,15 +168,49 @@ A `kcp_n_eff` near the stratum size means the kernel is barely localizing. A hig
 
 One fallback mode is specific to concentrated embedding spaces. The unobserved test residual enters the weighted quantile as a point mass of weight 1, since the test scenario sits at distance zero from itself. When no calibration scenario is close in the kernel's own metric, every calibration weight is far below 1, that point mass dominates, and the target level becomes unreachable, so the scenario falls back. This is the guarantee refusing to extrapolate rather than a defect, but a rising `kcp_fallback` rate is a signal that the bandwidth has been driven too small for the geometry.
 
-Figure aggregation semantics:
+Figure semantics:
 
-- Summary and density figures are generated from entity-level analysis rows.
-- `*_width_density*.png` plots are densities of `width_mean` (per-entity mean interval width over scenarios), not densities of raw per-row `interval_width` samples.
+- `*_coverage_by_stratum.png` pools all counted values of a stratum; `*_coverage_by_bus.png` / `*_coverage_by_line.png` show the coverage of each element over the whole test set.
+- `*_width_by_stratum.png` shows the distribution, across elements, of each element's mean interval width, not raw per-row widths.
 
 Mixed-run rule:
 
 - If both voltage and line-loading targets are present, `--output` must be a directory or omitted.
 - To force exact parquet names in a mixed run, use `outputs.calibrated_predictions_volt` and `outputs.calibrated_predictions_line` in the YAML.
+
+## `apply`
+
+Purpose:
+
+- load a `.trustlayer` artifact
+- write bounds for new scenarios (`inputs.apply`), which need no known AC solution
+- no coverage analysis, figures or reports: there is no true value to compare with
+
+Syntax:
+
+```bash
+gridfm_trustlayer apply --config path/to/trust_config.yaml
+```
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `--config` | `str` | Required YAML config. |
+| `--predictions` | `str` | Predictions parquet of the new scenarios (overrides `inputs.apply.predictions`). |
+| `--artifact` | `str` | Saved `.trustlayer` artifact from `compute`. |
+| `--output` | `str` | Output dataset path for one target family, or directory for both. |
+| `--pf-node` | `str` | Bus file describing the new scenarios (loads, bus types). |
+| `--pf-edge` | `str` | Branch file describing the new scenarios (status, parameters, ratings). |
+| `--embeddings` | `str` | Embeddings parquet of the new scenarios, for kernel artifacts. |
+| `--task-name` | `str` | Task adapter name used while loading predictions. |
+| `--generator-predictions` | `str` | Optional OPF generator prediction parquet. |
+
+What it reads:
+
+- the predictions. For `PowerFlow`, they must carry the set-points of each scenario: `Vm_target` at PV buses and `Va_target` at the reference bus (`Va_target` only, for `OptimalPowerFlow`). These are inputs of the problem, and the model's predictions there are replaced by them, as when the layer was fitted. Values at other buses are not read and may be missing;
+- `pf_node` and `pf_edge`, only when the layer needs the description of each scenario: its outages (`strat: n_outages`, `outage_type`), total load (`strat: system_load_bin`) or branch parameters (`line_loading`). Only topology, loads and parameters are read; the files need no solved `Vm` or `Va`;
+- the embeddings, for kernel artifacts.
+
+Outputs: one partitioned dataset per target family, `<predictions>_<variables>_bounds.parquet`, with the columns of the outputs of `calibrate` except the true values: the `*_target` columns of the predictions file are dropped, since for new scenarios they hold placeholders except at the set-points. They contain the bounds `*_pi_lower` and `*_pi_upper`, the strata, and the kernel diagnostics. The `_bounds` suffix keeps it apart from `calibrate`'s `_with_intervals` outputs, so that the two never overwrite each other. On labeled data, `apply` gives exactly the bounds of `calibrate`.
 
 ## `screen`
 
@@ -199,6 +239,7 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 | `--pf-node` | `str` | Bus ground truth used when voltage targets are missing from the calibrated parquet. |
 | `--pf-edge` | `str` | Branch ground truth used when line targets are missing from the calibrated parquet. |
 | `--task-name` | `str` | Task name used for default path resolution. |
+| `--figures` / `--no-figures` | flag | Write (default) or skip the screening figures. |
 
 Alarm rule (see [Reading the results](../user-guide/results.md#how-an-alarm-is-defined)):
 
@@ -207,15 +248,16 @@ Alarm rule (see [Reading the results](../user-guide/results.md#how-an-alarm-is-d
 - `line_loading` uses only the upper-bound screening rule
 - a numeric tolerance is applied internally to avoid floating-point boundary drift on exact limits
 
-Saved outputs:
+Saved outputs, in `outputs.screen_dir`:
 
-- `trust_screen_detail_volt.parquet/` (partitioned dataset)
-- `trust_screen_detail_line.parquet/` (partitioned dataset)
-- `trust_screen_entity_volt.csv`
-- `trust_screen_entity_line.csv`
-- `trust_screen_summary_volt.csv`
-- `trust_screen_summary_line.csv`
-- `screen_figures/`
+- `summary.md`: limits, known values set aside, results by stratum, figures and files
+- `screening_by_stratum.csv`: violations, alarms, caught, missed, false alarms, cleared, recall and precision per variable, stratum and side (`lower`, `upper`, `any`)
+- `screening_by_group.csv`: the same per bus type or line rating
+- `screening_by_element_voltage.csv`, `screening_by_element_line_loading.csv`: the same per bus or line
+- `screening_detail_voltage.parquet/`, `screening_detail_line_loading.parquet/`: one row per screened value (partitioned datasets)
+- `figures/`: confusion matrix and, with `strat`, recall and precision by stratum
+
+Known values are not screened: they are left out of every count and of the detail, and counted in `n_known`.
 
 ## Supported values
 

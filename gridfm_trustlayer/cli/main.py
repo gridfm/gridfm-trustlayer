@@ -6,16 +6,17 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
-import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 import pyarrow as pa  # type: ignore[import-untyped]
-from scipy.stats import gaussian_kde  # type: ignore[import-untyped]
 
+from gridfm_trustlayer._version import __version__
+from gridfm_trustlayer.cli import reports
 from gridfm_trustlayer.cli.config import (
     N_EFF_TARGET_AUTO,
     coalesce_option,
@@ -34,6 +35,11 @@ from gridfm_trustlayer.cli.config import (
     validate_system_load_n_bins,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
+from gridfm_trustlayer.conformal.calibrator import (
+    DEFAULT_SPARSE_STRATA,
+    SPARSE_STRATA_CHOICES,
+    validate_sparse_strata,
+)
 from gridfm_trustlayer.conformal.kernel import (
     DEFAULT_BANDWIDTH,
     DEFAULT_DISTANCE,
@@ -82,6 +88,10 @@ SCREEN_BOUND_TOLERANCE = 1e-6
 _BLOCK_ROWS = DEFAULT_BLOCK_ROWS
 # Scenarios whose predictions enter the in-sample fingerprint (with every id).
 _FINGERPRINT_SCENARIOS = 1000
+# Test embeddings are read and pooled once when the file is small enough to
+# decode at once (e.g. one row per scenario); larger ones, such as per-bus
+# embeddings of a big grid, are read again for each block.
+_EMBEDDINGS_PRELOAD_BYTES = 1 << 30
 BASE_ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type", "system_load_bin")
 
 
@@ -103,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "calibrate":
         _run_calibrate(args)
         return 0
+    if args.command == "apply":
+        _run_apply(args)
+        return 0
     if args.command == "screen":
         _run_screen(args)
         return 0
@@ -112,7 +125,16 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
 
-    parser = argparse.ArgumentParser(prog="gridfm_trustlayer")
+    parser = argparse.ArgumentParser(
+        prog="gridfm_trustlayer",
+        description=(
+            "Conformal trustworthiness layer for GridFM foundation models: "
+            "compute, calibrate, then screen; apply gives bounds for new scenarios."
+        ),
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     compute_parser = subparsers.add_parser(
@@ -173,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     compute_parser.add_argument(
         "--distance",
         help="Distance over scenario representations: 'euclidean' (default) or 'cosine'.",
+    )
+    compute_parser.add_argument(
+        "--sparse-strata",
+        choices=SPARSE_STRATA_CHOICES,
+        help="Bounds of an element in a stratum with too few calibration samples: 'pooled' (default, its quantile over all strata) or 'infinite'.",
     )
     compute_parser.add_argument(
         "--bandwidth",
@@ -261,6 +288,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip analysis figure generation and write only parquet/CSV outputs.",
     )
 
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Write bounds for new scenarios (inputs.apply), which need no known AC solution.",
+    )
+    apply_parser.add_argument(
+        "--config",
+        required=True,
+        help="Required trustlayer YAML config file. CLI flags override config values.",
+    )
+    apply_parser.add_argument(
+        "--predictions", help="Predictions parquet of the new scenarios."
+    )
+    apply_parser.add_argument(
+        "--artifact", help="Previously computed .trustlayer artifact."
+    )
+    apply_parser.add_argument(
+        "--output",
+        help="Output dataset path for one target family, or directory for both.",
+    )
+    apply_parser.add_argument(
+        "--pf-node",
+        help="Bus file describing the new scenarios (loads, bus types); needed for "
+        "strat n_outages, outage_type or system_load_bin, and for line_loading.",
+    )
+    apply_parser.add_argument(
+        "--pf-edge",
+        help="Branch file describing the new scenarios (status, parameters, ratings); "
+        "needed with --pf-node.",
+    )
+    apply_parser.add_argument(
+        "--embeddings",
+        help="Scenario embeddings parquet of the new scenarios (kernel artifacts).",
+    )
+    apply_parser.add_argument(
+        "--task-name", help="Task name used to interpret prediction schema."
+    )
+    apply_parser.add_argument(
+        "--generator-predictions",
+        help="Optional generator predictions parquet for OPF artifacts.",
+    )
+
     screen_parser = subparsers.add_parser(
         "screen",
         help="Compare the test bounds with the operating limits (screen_bounds) and count caught, missed and false alarms.",
@@ -311,6 +379,20 @@ def build_parser() -> argparse.ArgumentParser:
     screen_parser.add_argument(
         "--task-name", help="Task name used for default output-path resolution."
     )
+    screen_figures_group = screen_parser.add_mutually_exclusive_group()
+    screen_figures_group.add_argument(
+        "--figures",
+        dest="save_figures",
+        action="store_true",
+        default=None,
+        help="Write screening figures (default behavior).",
+    )
+    screen_figures_group.add_argument(
+        "--no-figures",
+        dest="save_figures",
+        action="store_false",
+        help="Skip screening figures and write only the tables and the detail.",
+    )
 
     return parser
 
@@ -332,6 +414,12 @@ def _run_compute(args: argparse.Namespace) -> None:
         )
     if strat == "pred_bins" and pred_n_bins is None:
         raise ValueError("pred_n_bins is required when strat is 'pred_bins'.")
+    sparse_strata = validate_sparse_strata(
+        str(
+            coalesce_option(args.sparse_strata, config, "sparse_strata")
+            or DEFAULT_SPARSE_STRATA
+        )
+    )
     variables = normalize_variables(
         coalesce_option(args.variables, config, "variables")
     )
@@ -462,6 +550,7 @@ def _run_compute(args: argparse.Namespace) -> None:
                     ).to_numpy(),
                     system_load_n_bins=system_load_n_bins,
                     system_load_bin_edges=system_load_bin_edges,
+                    sparse_strata=sparse_strata,
                 )
                 family_n_eff_target = tuning_results[target_kind].selected_n_eff_target
                 family_distance = tuning_results[target_kind].selected_distance
@@ -480,6 +569,7 @@ def _run_compute(args: argparse.Namespace) -> None:
                 distance=family_distance,
                 system_load_n_bins=system_load_n_bins,
                 system_load_bin_edges=system_load_bin_edges,
+                sparse_strata=sparse_strata,
             )
         else:
             calibrator = NaiveIntervalCalibrator.fit(
@@ -492,6 +582,7 @@ def _run_compute(args: argparse.Namespace) -> None:
                 system_load_bin_edges=system_load_bin_edges,
                 pred_n_bins=pred_n_bins,
                 pred_bin_edges=pred_bin_edges,
+                sparse_strata=sparse_strata,
             )
         calibrator.calibration_fingerprint = fingerprint
         if (
@@ -503,6 +594,66 @@ def _run_compute(args: argparse.Namespace) -> None:
     save_interval_artifacts(calibrators, artifact_path)
     if tuning_results:
         _write_tuning_reports(tuning_results, artifact_path)
+    method = cp_type if strat is None else f"{cp_type}, strat {strat}"
+    print(
+        f"compute: fitted {method} for {', '.join(variables)} on "
+        f"{len(predictions.scenario_ids)} calibration scenarios; "
+        f"artifact: {artifact_path}",
+        flush=True,
+    )
+    _report_sparse_strata(calibrators, sparse_strata)
+
+
+def _report_sparse_strata(
+    calibrators: Mapping[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
+    sparse_strata: str,
+) -> None:
+    """Which strata have elements with too few calibration samples, and what they get."""
+
+    sparse = _sparse_strata_listing(calibrators)
+    if not sparse:
+        return
+    outcome = (
+        "they use their quantile over all calibration scenarios (sparse_strata: pooled)"
+        if sparse_strata == "pooled"
+        else "they get infinite bounds (sparse_strata: infinite)"
+    )
+    print(
+        f"compute: too few calibration samples for a finite bound: {sparse}; {outcome}",
+        flush=True,
+    )
+
+
+def _sparse_strata_listing(
+    calibrators: Mapping[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
+) -> str:
+    """E.g. `Vm: 27 buses (n_outages=1: 27)`, or '' when no stratum is sparse."""
+
+    parts: list[str] = []
+    for calibrator in calibrators.values():
+        nouns = (
+            ("line", "lines")
+            if calibrator.entity_name == "branch"
+            else ("bus", "buses")
+        )
+        counts = calibrator.sparse_strata_counts()
+        for variable in sorted(counts, key=reports.variable_rank):
+            by_stratum = counts[variable]
+            if not by_stratum:
+                continue
+            total = sum(by_stratum.values())
+            where = ", ".join(
+                f"{_sparse_stratum_label(calibrator.strat, variable, value)}: {count}"
+                for value, count in by_stratum.items()
+            )
+            parts.append(f"{variable}: {total} {nouns[total != 1]} ({where})")
+    return "; ".join(parts)
+
+
+def _sparse_stratum_label(strat: str | None, variable: str, value: int) -> str:
+    if strat == "pred_bins":
+        return f"pred_bins_{variable.lower()} bin {value}"
+    return _format_stratum_label(str(strat), value)
 
 
 def _load_tuning_groups(pf_node_path: str, group_by: str) -> pd.Series | None:
@@ -577,24 +728,6 @@ def _run_calibrate(args: argparse.Namespace) -> None:
     generator_path = coalesce_option(
         args.generator_predictions, config, "generator_predictions"
     )
-    embeddings_path = None
-    pooling = None
-    kernel_calibrators = [
-        calibrator
-        for calibrator in calibrators.values()
-        if isinstance(calibrator, KernelIntervalCalibrator)
-    ]
-    if kernel_calibrators:
-        poolings = {calibrator.embedding_pooling for calibrator in kernel_calibrators}
-        if len(poolings) != 1:
-            raise ValueError(
-                f"Kernel artifact mixes embedding_pooling strategies: {sorted(poolings)}."
-            )
-        pooling = next(iter(poolings))
-        embeddings_path = coalesce_option(
-            args.embeddings, config, "embeddings", required=True
-        )
-
     scenario_ids = read_scenario_ids(predictions_path)
     if scenario_ids.size == 0:
         raise ValueError(f"{predictions_path} contains no scenarios.")
@@ -625,6 +758,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         ground_truth_paths = _ground_truth_paths(args, config)
         reference = scan_ground_truth_reference(*ground_truth_paths)
     bus_types = _scan_bus_types(predictions_path) if has_bus_targets else {}
+    embeddings = _EmbeddingSource.for_artifact(calibrators, args, config, scenario_ids)
     output_paths = {
         target_kind: _resolve_output_path(
             args,
@@ -643,22 +777,21 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         for target_kind, path in output_paths.items()
     }
     partials: dict[str, list[pd.DataFrame]] = {kind: [] for kind in calibrators}
-    for block in scenario_blocks(
+    blocks = scenario_blocks(
         scenario_ids,
         rows_per_scenario(predictions_path, len(scenario_ids)),
         _BLOCK_ROWS,
-    ):
+    )
+    for index, block in enumerate(blocks, start=1):
+        _report_progress("calibrate", index, blocks)
         predictions = load_predictions(
             predictions_path,
             task_name=task_name,
             generator_parquet_path=generator_path,
             scenario_ids=block,
         )
-        if embeddings_path is not None:
-            assert pooling is not None
-            predictions = _attach_scenario_embeddings(
-                predictions, embeddings_path, pooling=pooling
-            )
+        if embeddings is not None:
+            embeddings.attach(predictions)
         ground_truth = None
         if ground_truth_paths is not None:
             ground_truth = load_ground_truth(
@@ -684,36 +817,507 @@ def _run_calibrate(args: argparse.Namespace) -> None:
                 )
             )
 
+    data_dir = Path(_common_parent(output_paths.values()))
+    coverage_dir = Path(str(config.get("coverage_dir") or data_dir / "coverage"))
+    strata: list[pd.DataFrame] = []
+    groups: list[pd.DataFrame] = []
+    figures: list[Path] = []
+    files: list[tuple[str, str]] = [
+        ("coverage_by_stratum.csv", "coverage and width per variable and stratum"),
+        ("coverage_by_group.csv", "the same per bus type (voltages) or line rating"),
+    ]
+    data_files: list[tuple[str, str]] = []
     for target_kind, calibrator in calibrators.items():
-        analysis_dir = Path(output_paths[target_kind]).parent
-        figures_dir = analysis_dir / "figures"
+        entity_column = calibrator.entity_name
+        elements = _combine_analysis_partials(
+            partials[target_kind], entity_column=entity_column, bus_types=bus_types
+        )
+        by_stratum = reports.coverage_by_stratum(elements, float(calibrator.alpha))
+        strata.append(by_stratum)
+        groups.append(reports.coverage_by_group(elements, entity_column))
+        element_file = f"coverage_by_element_{reports.family_name(entity_column)}.csv"
+        reports.write_csv(
+            reports.coverage_by_element(elements, entity_column),
+            coverage_dir / element_file,
+        )
+        files.append(
+            (
+                element_file,
+                f"coverage and width of every {_ELEMENT_NAMES[entity_column]}",
+            )
+        )
+        data_files.append(
+            (
+                os.path.relpath(output_paths[target_kind], coverage_dir),
+                "the test predictions with their bounds (partitioned parquet)",
+            )
+        )
         if save_figures:
-            figures_dir.mkdir(parents=True, exist_ok=True)
-        analysis_frame = _combine_analysis_partials(
-            partials[target_kind],
-            entity_column=calibrator.entity_name,
-            bus_types=bus_types,
-        )
-        suffix = "line" if calibrator.entity_name == "branch" else "volt"
-        analysis_frame.to_csv(
-            analysis_dir / f"trust_analysis_{suffix}.csv", index=False
-        )
-        summary_frame = (
-            _build_line_summary_frame(analysis_frame)
+            figures += reports.save_coverage_figures(
+                by_stratum,
+                elements,
+                coverage_dir / "figures",
+                entity_column=entity_column,
+            )
+    by_stratum = reports.sort_by_stratum(pd.concat(strata, ignore_index=True))
+    files += data_files
+    reports.write_csv(
+        by_stratum.drop(columns=["stratification", "stratum_value"]),
+        coverage_dir / "coverage_by_stratum.csv",
+    )
+    reports.write_csv(
+        reports.sort_by_variable(pd.concat(groups, ignore_index=True)).drop(
+            columns=["stratification", "stratum_value"], errors="ignore"
+        ),
+        coverage_dir / "coverage_by_group.csv",
+    )
+    first = next(iter(calibrators.values()))
+    method = f"`cp_type: {cp_type}`" + (
+        f", `strat: {first.strat}`" if first.strat else ""
+    )
+    reports.write_coverage_summary(
+        coverage_dir / "summary.md",
+        by_stratum,
+        figures,
+        files,
+        context=[
+            (
+                f"- Method: {method}, `alpha: {first.alpha:g}` "
+                f"(target coverage {1 - first.alpha:.0%})."
+            ),
+            f"- Test predictions: `{predictions_path}` ({len(scenario_ids):,} scenarios).",
+            f"- Artifact: `{artifact_path}`.",
+            *_sparse_strata_context(calibrators),
+        ],
+        known_where=_known_where(sample.task_name),
+    )
+    _report_coverage(by_stratum)
+    print(f"calibrate: data in {data_dir}; reports in {coverage_dir}", flush=True)
+
+
+class _EmbeddingSource:
+    """Scenario embeddings for a kernel artifact, attached block by block.
+
+    Small files are read and pooled once; larger ones (e.g. per-bus embeddings
+    of a big grid) are read again for each block, which keeps memory bounded.
+    """
+
+    def __init__(self, path: str, pooling: str, scenario_ids: np.ndarray) -> None:
+        self.path = path
+        self.pooling = pooling
+        self.preloaded = None
+        if _decoded_size_estimate(path) <= _EMBEDDINGS_PRELOAD_BYTES:
+            self.preloaded = load_scenario_embeddings(
+                path, pooling=pooling, scenario_ids=scenario_ids
+            )
+
+    @classmethod
+    def for_artifact(
+        cls,
+        calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
+        args: argparse.Namespace,
+        config: dict[str, object],
+        scenario_ids: np.ndarray,
+    ) -> _EmbeddingSource | None:
+        poolings = {
+            calibrator.embedding_pooling
+            for calibrator in calibrators.values()
+            if isinstance(calibrator, KernelIntervalCalibrator)
+        }
+        if not poolings:
+            return None
+        if len(poolings) != 1:
+            raise ValueError(
+                f"Kernel artifact mixes embedding_pooling strategies: {sorted(poolings)}."
+            )
+        path = coalesce_option(args.embeddings, config, "embeddings", required=True)
+        return cls(str(path), next(iter(poolings)), scenario_ids)
+
+    def attach(self, predictions: PredictionSet) -> None:
+        if self.preloaded is not None:
+            predictions.scenario_embeddings = self.preloaded.align_to(
+                predictions.scenario_ids
+            )
+        else:
+            _attach_scenario_embeddings(predictions, self.path, pooling=self.pooling)
+
+
+# Stratifications computed from the description of each scenario: its outages
+# (branch and generator status) or its total load.
+_DESCRIPTION_STRATA = {"n_outages", "outage_type", "system_load_bin"}
+
+
+def _run_apply(args: argparse.Namespace) -> None:
+    """Bounds for new scenarios, which need no known AC solution.
+
+    Same computation as `calibrate`, without the coverage analysis: only the
+    predictions are needed, plus the description of each scenario (topology,
+    branch parameters, loads) when the layer is stratified by outages or load
+    or calibrates line loading, and the embeddings for `cp_type: kernel`.
+    """
+
+    config = resolve_command_config(load_cli_config(args.config), "apply")
+    validate_command_config("apply", config)
+    predictions_path = str(
+        coalesce_option(args.predictions, config, "predictions", required=True)
+    )
+    artifact_path = coalesce_option(args.artifact, config, "artifact", required=True)
+    calibrators = load_interval_artifacts(artifact_path)
+    task_name = coalesce_option(args.task_name, config, "task_name")
+    generator_path = coalesce_option(
+        args.generator_predictions, config, "generator_predictions"
+    )
+    scenario_ids = read_scenario_ids(predictions_path)
+    if scenario_ids.size == 0:
+        raise ValueError(f"{predictions_path} contains no scenarios.")
+    task = load_predictions(
+        predictions_path,
+        task_name=task_name,
+        generator_parquet_path=generator_path,
+        scenario_ids=scenario_ids[:1],
+    ).task_name
+    _require_set_point_columns(predictions_path, task)
+
+    reasons = sorted(
+        {
+            f"strat: {calibrator.strat}"
+            for calibrator in calibrators.values()
+            if calibrator.strat in _DESCRIPTION_STRATA
+        }
+        | {
+            "line_loading"
+            for calibrator in calibrators.values()
             if calibrator.entity_name == "branch"
-            else _build_summary_frame(analysis_frame)
+        }
+    )
+    description_paths = None
+    reference = None
+    if reasons:
+        pf_node = coalesce_option(args.pf_node, config, "pf_node")
+        pf_edge = coalesce_option(args.pf_edge, config, "pf_edge")
+        if pf_node is None or pf_edge is None:
+            raise ValueError(
+                f"This layer ({', '.join(reasons)}) needs the description of the new "
+                "scenarios: set inputs.apply.pf_node and inputs.apply.pf_edge (or "
+                "--pf-node / --pf-edge) to their bus and branch files. Their topology, "
+                "branch parameters and loads are read; no AC solution is needed.",
+            )
+        description_paths = (str(pf_node), str(pf_edge))
+        reference = scan_ground_truth_reference(*description_paths)
+    has_bus_targets = any(
+        calibrator.entity_name == "bus" for calibrator in calibrators.values()
+    )
+    embeddings = _EmbeddingSource.for_artifact(calibrators, args, config, scenario_ids)
+    output_paths = {
+        target_kind: _resolve_apply_output_path(
+            args,
+            config,
+            predictions_path,
+            calibrator,
+            target_kind=target_kind,
+            multiple_targets=len(calibrators) > 1,
         )
-        summary_frame.to_csv(analysis_dir / f"trust_summary_{suffix}.csv", index=False)
-        _build_reliability_frame(
-            analysis_frame,
-            entity_column=calibrator.entity_name,
-            target_coverage=1.0 - float(calibrator.alpha),
-        ).to_csv(analysis_dir / f"trust_reliability_{suffix}.csv", index=False)
-        if save_figures:
-            if calibrator.entity_name == "branch":
-                _save_line_analysis_figures(analysis_frame, figures_dir)
-            else:
-                _save_analysis_figures(analysis_frame, figures_dir)
+        for target_kind, calibrator in calibrators.items()
+    }
+    writers = {
+        target_kind: PartitionedWriter(path)
+        for target_kind, path in output_paths.items()
+    }
+    blocks = scenario_blocks(
+        scenario_ids,
+        rows_per_scenario(predictions_path, len(scenario_ids)),
+        _BLOCK_ROWS,
+    )
+    for index, block in enumerate(blocks, start=1):
+        _report_progress("apply", index, blocks)
+        predictions = load_predictions(
+            predictions_path,
+            task_name=task_name,
+            generator_parquet_path=generator_path,
+            scenario_ids=block,
+        )
+        _require_set_points(predictions)
+        if embeddings is not None:
+            embeddings.attach(predictions)
+        description = None
+        if description_paths is not None:
+            description = load_ground_truth(
+                *description_paths,
+                scenario_ids=predictions.scenario_ids,
+                reference=reference,
+                solved=False,
+            )
+        original_frame = (
+            read_frame(predictions_path, scenario_ids=block)
+            if has_bus_targets
+            else None
+        )
+        for target_kind, calibrator in calibrators.items():
+            writers[target_kind].write(
+                _bounds_block_frame(
+                    calibrator, predictions, description, original_frame
+                )
+            )
+    variables = [name for c in calibrators.values() for name in c.channel_names]
+    print(
+        f"apply: bounds for {', '.join(variables)} in {len(scenario_ids)} scenarios; "
+        f"outputs in {_common_parent(output_paths.values())}",
+        flush=True,
+    )
+
+
+# Quantities that are inputs, not results, of the task's problem: the voltage
+# magnitude of PV buses and the angle of the reference bus in a power flow, and
+# the reference angle in an OPF. The loaders replace the model's predictions there
+# with these set-points, read from the `<variable>_target` columns, so new
+# scenarios need them too (their values at other buses are not used).
+_SET_POINTS = {
+    "PowerFlow": (("Vm", "PV"), ("Va", "REF")),
+    "OptimalPowerFlow": (("Va", "REF"),),
+}
+
+
+_ELEMENT_NAMES = {"bus": "bus", "branch": "line"}
+_BUS_TYPE_WORDS = {"PV": "PV buses", "REF": "the reference bus"}
+# `screen` sees only the `<variable>_known` columns, not the task.
+_BUS_KNOWN_WHERE = {"Vm": "PV buses", "Va": "the reference bus"}
+
+
+def _known_where(task_name: str) -> dict[str, str]:
+    """Where each variable has known values, in words, for the reports."""
+
+    return {
+        variable: _BUS_TYPE_WORDS[bus_type]
+        for variable, bus_type in _SET_POINTS.get(task_name, ())
+    }
+
+
+def _add_known_columns(
+    frame: pd.DataFrame, variables: tuple[str, ...], task_name: str
+) -> pd.DataFrame:
+    """Mark the rows whose value is a known set-point, `<variable>_known`.
+
+    These values are inputs of the problem, so their bounds have zero width and
+    contain the value by construction: coverage and screening leave them out.
+    """
+
+    for variable, bus_type in _SET_POINTS.get(task_name, ()):
+        if variable in variables and bus_type in frame.columns:
+            frame[f"{variable}_known"] = frame[bus_type].to_numpy() == 1
+    return frame
+
+
+def _require_set_point_columns(predictions_path: str, task: str) -> None:
+    columns = {name.lower() for name in column_names(predictions_path)}
+    missing = [
+        f"{variable}_target"
+        for variable, _ in _SET_POINTS.get(task, ())
+        if f"{variable.lower()}_target" not in columns
+    ]
+    if missing:
+        raise ValueError(
+            f"{task} predictions need the known set-points of each scenario in "
+            f"{', '.join(missing)}: "
+            + ", ".join(f"{v} at {bus} buses" for v, bus in _SET_POINTS[task])
+            + ". The model's predictions there are replaced by these inputs, as when "
+            "the layer was fitted. Values at other buses may be missing.",
+        )
+
+
+def _require_set_points(predictions: PredictionSet) -> None:
+    for variable, bus_type in _SET_POINTS.get(predictions.task_name, ()):
+        mask = predictions.bus_type_masks.get(bus_type)
+        values = predictions.Vm if variable == "Vm" else predictions.Va
+        if mask is not None and not np.isfinite(values[mask]).all():
+            raise ValueError(
+                f"{variable}_target is missing at some {bus_type} buses: these "
+                f"set-points are inputs of each {predictions.task_name} scenario and "
+                "are needed to apply the layer.",
+            )
+
+
+def _resolve_apply_output_path(
+    args: argparse.Namespace,
+    config: dict[str, object],
+    predictions_path: str,
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
+    *,
+    target_kind: str,
+    multiple_targets: bool,
+) -> str:
+    """Where `apply` writes one target family.
+
+    The default name ends in `_bounds.parquet`, not `calibrate`'s
+    `_with_intervals.parquet`: new and test predictions often share a file
+    name, and the two runs must not overwrite each other.
+    """
+
+    stem = Path(predictions_path).stem
+    variables = "_".join(name.lower() for name in calibrator.channel_names)
+    default_name = f"{stem}_{variables}_bounds.parquet"
+    if args.output is not None:
+        output = Path(str(args.output))
+        return str(output / default_name if multiple_targets else output)
+    explicit = config.get(f"applied_predictions_{target_kind}")
+    if explicit is not None:
+        return str(explicit)
+    shared = config.get("applied_predictions")
+    if shared is not None:
+        if not multiple_targets:
+            return str(shared)
+        if Path(str(shared)).suffix.lower() == ".parquet":
+            raise ValueError(
+                "Bounds for voltages and line loading are written separately. Set "
+                "outputs.applied_predictions to a directory, or set "
+                "outputs.applied_predictions_volt and outputs.applied_predictions_line.",
+            )
+        return str(Path(str(shared)) / default_name)
+    task_name = str(coalesce_option(args.task_name, config, "task_name") or "unknown")
+    cp_type = (
+        "kernel" if isinstance(calibrator, KernelIntervalCalibrator) else "element"
+    )
+    return str(_default_output_dir(task_name, cp_type) / default_name)
+
+
+def _bounds_block_frame(
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
+    predictions: PredictionSet,
+    description: GroundTruthSet | None,
+    original_frame: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Rows of one block of new scenarios with their bounds, for one target family."""
+
+    scenario_columns: dict[str, np.ndarray] = {}
+    if description is not None:
+        scenario_columns = _build_scenario_columns(
+            _build_bus_channel_set(predictions, ("Vm",), scenario_columns=None),
+            description,
+            calibrator.strat,
+            system_load_n_bins=calibrator.system_load_n_bins,
+            system_load_bin_edges=calibrator.system_load_bin_edges,
+            pred_n_bins=calibrator.pred_n_bins,
+            pred_bin_edges=calibrator.pred_bin_edges,
+        )
+    application: ChannelSet
+    if calibrator.entity_name == "branch":
+        assert description is not None
+        loading = compute_line_loading(predictions.Vm, predictions.Va, description)
+        application = ChannelSet(
+            scenario_ids=predictions.scenario_ids.copy(),
+            entity_ids=description.branch_ids.copy(),
+            entity_name="branch",
+            channels={"line_loading": loading},
+            # Out-of-service or unrated branches carry -1 and get no interval.
+            valid_masks={"line_loading": loading >= 0.0},
+            entity_columns={
+                "from_bus": description.f_bus.astype(np.int64, copy=True),
+                "to_bus": description.t_bus.astype(np.int64, copy=True),
+                "rate_a": description.rate_a.astype(np.float32, copy=True),
+            },
+            scenario_columns=scenario_columns,
+            scenario_embeddings=predictions.scenario_embeddings,
+        )
+        intervals = calibrator.predict_intervals(application)
+        output_frame = _build_entity_output_frame(application, None, intervals)
+    else:
+        assert original_frame is not None
+        application = _build_bus_channel_set(
+            predictions, calibrator.channel_names, scenario_columns=scenario_columns
+        )
+        intervals = calibrator.predict_intervals(application)
+        # For new scenarios the `*_target` columns hold real values only at the
+        # set-points (Vm at PV buses, Va at the reference bus) and placeholders
+        # elsewhere, which would read as true values; they are not written.
+        targets = [c for c in original_frame.columns if c.lower().endswith("_target")]
+        output_frame = original_frame.drop(columns=targets).merge(
+            _build_interval_frame(application, intervals),
+            on=["scenario", "bus"],
+            how="left",
+            validate="one_to_one",
+        )
+    if calibrator.strat == "pred_bins":
+        entity = application.entity_name
+        output_frame = output_frame.merge(
+            _build_pred_bin_frame(application, calibrator.pred_bin_edges),
+            on=["scenario", entity],
+            how="left",
+            validate="one_to_one",
+        )
+    return _merge_kernel_diagnostics(
+        _merge_pooled_columns(
+            _add_known_columns(
+                output_frame, calibrator.channel_names, predictions.task_name
+            ),
+            calibrator,
+            application,
+        ),
+        calibrator,
+        application.scenario_ids,
+    )
+
+
+def _report_progress(command: str, index: int, blocks: list[np.ndarray]) -> None:
+    """One line per block, so that long runs show where they are."""
+
+    if len(blocks) > 1:
+        done = sum(len(block) for block in blocks[:index])
+        total = sum(len(block) for block in blocks)
+        print(
+            f"{command}: block {index}/{len(blocks)} ({done}/{total} scenarios)",
+            flush=True,
+        )
+
+
+def _report_coverage(by_stratum: pd.DataFrame) -> None:
+    """Overall coverage and width per variable, and the weakest stratum."""
+
+    for variable, rows in by_stratum.groupby("variable", sort=False):
+        overall = rows[rows["stratification"].eq("")].iloc[0]
+        unit, factor = reports.unit_of(str(variable))
+        width = float(overall["mean_width"]) * factor
+        width_text = (
+            f"mean width {width:.4g} {unit}".rstrip()
+            if np.isfinite(width)
+            else "mean width infinite (some strata have too few calibration samples)"
+        )
+        line = (
+            f"calibrate: {variable}: coverage "
+            f"{overall['coverage']:.3f} "
+            f"(target {overall['target_coverage']:.3f}), {width_text}"
+        )
+        strata = rows[rows["stratification"].ne("")]
+        if not strata.empty:
+            weakest = strata.loc[strata["coverage"].idxmin()]
+            line += f"; lowest stratum {weakest['stratum']} {weakest['coverage']:.3f}"
+        if int(overall["n_known"]):
+            line += f"; {int(overall['n_known']):,} known values not counted"
+        print(line, flush=True)
+
+
+def _report_screening(by_stratum: pd.DataFrame) -> None:
+    """Caught, missed and false alarms per screened variable."""
+
+    overall = by_stratum[by_stratum["stratification"].eq("")]
+    for variable, rows in overall.groupby("variable", sort=False):
+        side = "upper" if variable == "line_loading" else "any"
+        row = rows[rows["side"].eq(side)].iloc[0]
+        limit = "upper limit" if side == "upper" else "either limit"
+        line = (
+            f"screen: {variable} ({limit}): {int(row['caught']):,} of "
+            f"{int(row['violations']):,} true violations flagged "
+            f"({int(row['missed']):,} missed), {int(row['false_alarms']):,} false alarms "
+            f"in {int(row['n_values']):,} values"
+        )
+        if int(row["n_known"]):
+            line += f"; {int(row['n_known']):,} known values not counted"
+        print(line, flush=True)
+
+
+def _common_parent(paths: Iterable[str]) -> str:
+    parents = [Path(path).parent for path in paths]
+    return str(
+        parents[0] if len(set(parents)) == 1 else Path(os.path.commonpath(parents))
+    )
 
 
 def _calibrated_block_frame(
@@ -808,7 +1412,13 @@ def _calibrated_block_frame(
                 validate="one_to_one",
             )
     return _merge_kernel_diagnostics(
-        output_frame,
+        _merge_pooled_columns(
+            _add_known_columns(
+                output_frame, calibrator.channel_names, predictions.task_name
+            ),
+            calibrator,
+            application_predictions,
+        ),
         calibrator,
         application_predictions.scenario_ids,
     )
@@ -845,6 +1455,13 @@ def _ground_truth_paths(
             "inputs.test.pf_edge (or --pf-node / --pf-edge).",
         )
     return str(pf_node), str(pf_edge)
+
+
+def _decoded_size_estimate(path: str) -> int:
+    """Rough in-memory size of a whole dataset once decoded, from its metadata."""
+
+    dataset = open_dataset(path)
+    return dataset.count_rows() * len(dataset.schema.names) * 4 * 3
 
 
 def _scan_bus_types(path: str) -> dict[int, str]:
@@ -901,9 +1518,16 @@ def _run_screen(args: argparse.Namespace) -> None:
         cp_type=cp_type,
     )
     screen_dir.mkdir(parents=True, exist_ok=True)
-    figures_dir = screen_dir / "screen_figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
 
+    strata: list[pd.DataFrame] = []
+    groups: list[pd.DataFrame] = []
+    files: list[tuple[str, str]] = [
+        (
+            "screening_by_stratum.csv",
+            "alarms, misses and false alarms per variable and stratum",
+        ),
+        ("screening_by_group.csv", "the same per bus type (voltages) or line rating"),
+    ]
     for target_kind, channel_names in target_groups.items():
         input_path = input_paths[target_kind]
         if not Path(input_path).exists():
@@ -911,6 +1535,7 @@ def _run_screen(args: argparse.Namespace) -> None:
                 f"Calibrated predictions not found: {input_path}. Run calibrate first."
             )
         entity_column = "bus" if target_kind == "volt" else "branch"
+        family = reports.family_name(entity_column)
         group_columns = (
             ["variable", "bus", "bus_type"]
             if target_kind == "volt"
@@ -927,20 +1552,38 @@ def _run_screen(args: argparse.Namespace) -> None:
         reference = None
         if not needed.issubset(columns):
             reference = scan_ground_truth_reference(*_ground_truth_paths(args, config))
+        strat_columns = [
+            column
+            for column in _ordered_analysis_strat_columns(columns)
+            if any(
+                _stratification_applies_to_variable(column, v) for v in channel_names
+            )
+        ]
+        extra = [
+            *strat_columns,
+            *(
+                f"{column}_label"
+                for column in strat_columns
+                if f"{column}_label" in columns
+            ),
+        ]
+        known_columns = [f"{v}_known" for v in channel_names if f"{v}_known" in columns]
         bus_types = _scan_bus_types(input_path) if target_kind == "volt" else {}
         scenario_ids = read_scenario_ids(input_path)
-        detail_writer = PartitionedWriter(
-            screen_dir / f"trust_screen_detail_{target_kind}.parquet"
-        )
+        detail_name = f"screening_detail_{family}.parquet"
+        detail_writer = PartitionedWriter(screen_dir / detail_name)
         counts: list[pd.DataFrame] = []
-        for block in scenario_blocks(
+        stratum_counts: list[pd.DataFrame] = []
+        blocks = scenario_blocks(
             scenario_ids,
             rows_per_scenario(input_path, len(scenario_ids)),
             _BLOCK_ROWS,
-        ):
+        )
+        for index, block in enumerate(blocks, start=1):
+            _report_progress(f"screen ({target_kind})", index, blocks)
             frame = read_frame(
                 input_path,
-                ["scenario", entity_column, *sorted(needed)],
+                ["scenario", entity_column, *sorted(needed), *extra, *known_columns],
                 scenario_ids=block,
             )
             if target_kind == "volt":
@@ -948,33 +1591,167 @@ def _run_screen(args: argparse.Namespace) -> None:
                     frame, channel_names, args, config, reference=reference
                 )
                 detail_frame = _build_voltage_screen_detail_frame(
-                    frame, channel_names, bounds_by_variable, bus_types=bus_types
+                    frame,
+                    channel_names,
+                    bounds_by_variable,
+                    bus_types=bus_types,
+                    extra=extra,
                 )
             else:
                 frame = _ensure_line_screen_targets(
                     frame, channel_names, args, config, reference=reference
                 )
                 detail_frame = _build_line_screen_detail_frame(
-                    frame, channel_names, bounds_by_variable
+                    frame, channel_names, bounds_by_variable, extra=extra
                 )
-            detail_writer.write(detail_frame)
-            counts.append(_screen_counts(detail_frame, group_columns))
+            known = detail_frame["known"].to_numpy(dtype=bool)
+            stratum_counts.append(_screen_stratum_counts(detail_frame, strat_columns))
+            unknown = detail_frame[~known].drop(columns=["known"])
+            detail_writer.write(unknown)
+            counts.append(_screen_counts(unknown, group_columns))
 
         entity_summary = _combine_screen_counts(counts, group_columns)
-        summary_frame = (
+        group_summary = (
             _build_voltage_screen_summary(entity_summary)
             if target_kind == "volt"
             else _build_line_screen_summary(entity_summary)
         )
-        entity_summary.to_csv(
-            screen_dir / f"trust_screen_entity_{target_kind}.csv", index=False
+        groups.append(_screening_groups_long(group_summary))
+        element_file = f"screening_by_element_{family}.csv"
+        reports.write_csv(
+            reports.screening_long(
+                entity_summary.rename(columns={"n_samples": "n_values"}),
+                group_columns,
+                keep=["n_values"],
+            ),
+            screen_dir / element_file,
         )
-        summary_frame.to_csv(
-            screen_dir / f"trust_screen_summary_{target_kind}.csv", index=False
+        files.append(
+            (element_file, f"the same for every {_ELEMENT_NAMES[entity_column]}")
         )
-        _save_screen_figures(
-            entity_summary, summary_frame, figures_dir, target_kind=target_kind
+        files.append(
+            (
+                detail_name,
+                "one row per value screened: bounds, true value and the four flags",
+            )
         )
+        strata.append(_combine_screen_stratum_counts(stratum_counts))
+
+    by_stratum = reports.sort_by_stratum(pd.concat(strata, ignore_index=True))
+    reports.write_csv(
+        by_stratum.drop(columns=["stratification", "stratum_value"]),
+        screen_dir / "screening_by_stratum.csv",
+    )
+    reports.write_csv(
+        pd.concat(groups, ignore_index=True), screen_dir / "screening_by_group.csv"
+    )
+    save_figures = coalesce_option(args.save_figures, config, "save_figures")
+    figures = (
+        reports.save_screening_figures(by_stratum, screen_dir / "figures")
+        if save_figures is None or bool(save_figures)
+        else []
+    )
+    limits = "; ".join(
+        f"`{variable}` ≤ {bounds['upper']:g}"
+        if variable == "line_loading"
+        else f"`{variable}` in [{bounds['lower']:g}, {bounds['upper']:g}]"
+        for variable, bounds in bounds_by_variable.items()
+        if variable in variables
+    )
+    reports.write_screening_summary(
+        screen_dir / "summary.md",
+        by_stratum,
+        figures,
+        files,
+        context=[
+            f"- Limits: {limits}.",
+            *(f"- Calibrated predictions: `{path}`." for path in input_paths.values()),
+        ],
+        known_where=_BUS_KNOWN_WHERE,
+    )
+    _report_screening(by_stratum)
+    print(f"screen: reports in {screen_dir}", flush=True)
+
+
+def _screen_stratum_counts(
+    detail: pd.DataFrame, strat_columns: list[str]
+) -> pd.DataFrame:
+    """Confusion counts per variable and stratum of one block, known values apart."""
+
+    counts = reports.side_counts(detail)
+    count_columns = list(counts.columns)
+    known = detail["known"].to_numpy(dtype=bool)
+    counts.loc[known, count_columns] = 0
+    counts["n_values"] = (~known).astype(np.int64)
+    counts["n_known"] = known.astype(np.int64)
+    sums = [*count_columns, "n_values", "n_known"]
+    parts: list[pd.DataFrame] = []
+    for variable, index in detail.groupby("variable", sort=False).groups.items():
+        rows = detail.loc[index]
+        work = counts.loc[index]
+        overall = work[sums].sum().to_frame().T
+        overall["stratification"] = ""
+        overall["stratum_value"] = float("nan")
+        overall["stratum"] = "all"
+        overall["variable"] = variable
+        parts.append(overall)
+        for stratification in strat_columns:
+            if not _stratification_applies_to_variable(stratification, str(variable)):
+                continue
+            grouped = (
+                work[sums]
+                .groupby(rows[stratification].rename("stratum_value"), dropna=False)
+                .sum()
+                .reset_index()
+            )
+            grouped["stratification"] = stratification
+            grouped["stratum"] = [
+                _stratum_label(rows, stratification, value)
+                for value in grouped["stratum_value"].tolist()
+            ]
+            grouped["variable"] = variable
+            parts.append(grouped)
+    return pd.concat(parts, ignore_index=True)
+
+
+def _combine_screen_stratum_counts(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    combined = pd.concat(parts, ignore_index=True)
+    sums = [c for c in combined.columns if c.endswith(("_tp", "_fp", "_fn", "_tn"))]
+    sums += ["n_values", "n_known"]
+    totals = (
+        combined.groupby(
+            ["variable", "stratification", "stratum_value"], sort=False, dropna=False
+        )
+        .agg(stratum=("stratum", "first"), **{c: (c, "sum") for c in sums})
+        .reset_index()
+    )
+    totals = reports.sort_by_stratum(totals)
+    return reports.screening_long(
+        totals,
+        ["variable", "stratification", "stratum_value", "stratum"],
+        keep=["n_values", "n_known"],
+    )
+
+
+def _screening_groups_long(group_summary: pd.DataFrame) -> pd.DataFrame:
+    """Group rows (all, bus types or line ratings) in the long screening layout."""
+
+    frame = group_summary.copy()
+    value_column = "bus_type" if "bus_type" in frame.columns else "rate_a"
+    frame["group"] = [
+        "all"
+        if scope == "system"
+        else (
+            f"{value_column}={value:g}"
+            if value_column == "rate_a"
+            else f"{value_column}={value}"
+        )
+        for scope, value in zip(frame["scope"], frame[value_column], strict=True)
+    ]
+    frame = frame.rename(columns={"n_entities": "n_elements", "n_samples": "n_values"})
+    return reports.screening_long(
+        frame, ["variable", "group"], keep=["n_elements", "n_values"]
+    )
 
 
 def _partition_variables(
@@ -1338,34 +2115,16 @@ def _build_voltage_screen_detail_frame(
     bounds_by_variable: dict[str, dict[str, float]],
     *,
     bus_types: dict[int, str],
+    extra: Sequence[str] = (),
 ) -> pd.DataFrame:
     records: list[pd.DataFrame] = []
     for variable in variables:
-        target_column = f"{variable}_target"
-        lower_column = f"{variable}_pi_lower"
-        upper_column = f"{variable}_pi_upper"
-        required_columns = {
-            "scenario",
-            "bus",
-            target_column,
-            lower_column,
-            upper_column,
-        }
-        if not required_columns.issubset(frame.columns):
-            raise ValueError(
-                f"Missing required voltage-screen columns for {variable}: {sorted(required_columns - set(frame.columns))}"
-            )
-        variable_frame = frame.loc[
-            :, ["scenario", "bus", target_column, lower_column, upper_column]
-        ].copy()
-        variable_frame["variable"] = variable
-        variable_frame["bus_type"] = (
-            variable_frame["bus"].map(bus_types).fillna("Unknown").astype(object)
+        _require_screen_columns(frame, variable, ["scenario", "bus"])
+        rows = frame.loc[:, ["scenario", "bus", *extra]].copy()
+        rows["bus_type"] = rows["bus"].map(bus_types).fillna("Unknown").astype(object)
+        records.append(
+            _screen_detail_rows(rows, frame, variable, bounds_by_variable[variable])
         )
-        variable_frame = _append_screen_flag_columns(
-            variable_frame, variable, bounds_by_variable[variable]
-        )
-        records.append(variable_frame)
     return (
         pd.concat(records, ignore_index=True)
         .sort_values(["variable", "scenario", "bus"])
@@ -1377,46 +2136,23 @@ def _build_line_screen_detail_frame(
     frame: pd.DataFrame,
     variables: tuple[str, ...],
     bounds_by_variable: dict[str, dict[str, float]],
+    *,
+    extra: Sequence[str] = (),
 ) -> pd.DataFrame:
     records: list[pd.DataFrame] = []
+    columns = ["scenario", "branch", "from_bus", "to_bus", "rate_a"]
     for variable in variables:
-        target_column = f"{variable}_target"
-        lower_column = f"{variable}_pi_lower"
-        upper_column = f"{variable}_pi_upper"
-        required_columns = {
-            "scenario",
-            "branch",
-            "from_bus",
-            "to_bus",
-            "rate_a",
-            target_column,
-            lower_column,
-            upper_column,
-        }
-        if not required_columns.issubset(frame.columns):
-            raise ValueError(
-                f"Missing required line-screen columns for {variable}: {sorted(required_columns - set(frame.columns))}"
+        _require_screen_columns(frame, variable, columns)
+        # Out-of-service or unrated branches carry -1 and are not screened.
+        in_service = frame[frame[f"{variable}_target"] >= 0.0]
+        records.append(
+            _screen_detail_rows(
+                in_service.loc[:, [*columns, *extra]].copy(),
+                in_service,
+                variable,
+                bounds_by_variable[variable],
             )
-        variable_frame = frame.loc[
-            :,
-            [
-                "scenario",
-                "branch",
-                "from_bus",
-                "to_bus",
-                "rate_a",
-                target_column,
-                lower_column,
-                upper_column,
-            ],
-        ].copy()
-        valid_mask = variable_frame[target_column] >= 0.0
-        variable_frame = variable_frame[valid_mask].copy()
-        variable_frame["variable"] = variable
-        variable_frame = _append_screen_flag_columns(
-            variable_frame, variable, bounds_by_variable[variable]
         )
-        records.append(variable_frame)
     return (
         pd.concat(records, ignore_index=True)
         .sort_values(["variable", "scenario", "branch"])
@@ -1424,66 +2160,87 @@ def _build_line_screen_detail_frame(
     )
 
 
-def _append_screen_flag_columns(
+def _require_screen_columns(
+    frame: pd.DataFrame, variable: str, columns: list[str]
+) -> None:
+    required = {
+        *columns,
+        f"{variable}_target",
+        f"{variable}_pi_lower",
+        f"{variable}_pi_upper",
+    }
+    if not required.issubset(frame.columns):
+        raise ValueError(
+            f"Missing required screening columns for {variable}: "
+            f"{sorted(required - set(frame.columns))}"
+        )
+
+
+def _screen_detail_rows(
+    rows: pd.DataFrame,
     frame: pd.DataFrame,
     variable: str,
     bounds: dict[str, float],
 ) -> pd.DataFrame:
-    target_column = f"{variable}_target"
-    lower_column = f"{variable}_pi_lower"
-    upper_column = f"{variable}_pi_upper"
-    lower_bound = float(bounds["lower"])
-    upper_bound = float(bounds["upper"])
-    frame["target"] = frame[target_column].astype(float)
-    frame["pi_lower"] = frame[lower_column].astype(float)
-    frame["pi_upper"] = frame[upper_column].astype(float)
-    frame["lower_bound"] = lower_bound
-    frame["upper_bound"] = upper_bound
+    """Screening rows of one variable: true value, bounds and violation flags.
+
+    A violation is predicted when a bound crosses the limit, and true when the
+    true value does. The counts of caught, missed and false alarms are derived
+    from these four flags (see `_screen_counts`), so they are not stored.
+    """
+
+    target = frame[f"{variable}_target"]
+    lower = frame[f"{variable}_pi_lower"]
+    upper = frame[f"{variable}_pi_upper"]
+    rows["variable"] = variable
+    rows["target"] = target.to_numpy()
+    rows["pi_lower"] = lower.to_numpy()
+    rows["pi_upper"] = upper.to_numpy()
+    lower_limit = float(bounds["lower"]) - SCREEN_BOUND_TOLERANCE
+    upper_limit = float(bounds["upper"]) + SCREEN_BOUND_TOLERANCE
+    true_values = target.to_numpy(dtype=float)
     if variable == "line_loading":
-        frame["pred_lower_violation"] = False
-        frame["true_lower_violation"] = False
+        rows["pred_lower_violation"] = False
+        rows["true_lower_violation"] = False
     else:
-        frame["pred_lower_violation"] = frame["pi_lower"] < (
-            lower_bound - SCREEN_BOUND_TOLERANCE
-        )
-        frame["true_lower_violation"] = frame["target"] < (
-            lower_bound - SCREEN_BOUND_TOLERANCE
-        )
-    frame["pred_upper_violation"] = frame["pi_upper"] > (
-        upper_bound + SCREEN_BOUND_TOLERANCE
-    )
-    frame["true_upper_violation"] = frame["target"] > (
-        upper_bound + SCREEN_BOUND_TOLERANCE
-    )
-    frame["pred_any_violation"] = (
-        frame["pred_lower_violation"] | frame["pred_upper_violation"]
-    )
-    frame["true_any_violation"] = (
-        frame["true_lower_violation"] | frame["true_upper_violation"]
-    )
-    for side in ("lower", "upper", "any"):
-        pred = frame[f"pred_{side}_violation"]
-        true = frame[f"true_{side}_violation"]
-        frame[f"{side}_tp"] = (pred & true).astype(int)
-        frame[f"{side}_fp"] = (pred & (~true)).astype(int)
-        frame[f"{side}_fn"] = ((~pred) & true).astype(int)
-        frame[f"{side}_tn"] = ((~pred) & (~true)).astype(int)
-    return frame
+        rows["pred_lower_violation"] = lower.to_numpy(dtype=float) < lower_limit
+        rows["true_lower_violation"] = true_values < lower_limit
+    rows["pred_upper_violation"] = upper.to_numpy(dtype=float) > upper_limit
+    rows["true_upper_violation"] = true_values > upper_limit
+    rows["known"] = _known_mask(frame, variable)
+    return rows
 
 
 def _screen_counts(
     detail_frame: pd.DataFrame, group_columns: list[str]
 ) -> pd.DataFrame:
-    """Confusion counts and sample counts per entity of one block."""
+    """Confusion counts and sample counts per entity of one block.
 
-    return (
-        detail_frame.groupby(group_columns, sort=False, dropna=False)
-        .agg(
-            n_samples=("scenario", "size"),
-            **{column: (column, "sum") for column in _screen_count_columns()},
+    `tp`, `fp`, `fn` and `tn` count predicted against true violations on the
+    lower side, the upper side, and either side (`any`).
+    """
+
+    counts = detail_frame.loc[:, group_columns].copy()
+    flags = {
+        side: (
+            detail_frame[f"pred_{side}_violation"].to_numpy(dtype=bool),
+            detail_frame[f"true_{side}_violation"].to_numpy(dtype=bool),
         )
-        .reset_index()
+        for side in ("lower", "upper")
+    }
+    flags["any"] = (
+        flags["lower"][0] | flags["upper"][0],
+        flags["lower"][1] | flags["upper"][1],
     )
+    for side, (predicted, true) in flags.items():
+        counts[f"{side}_tp"] = (predicted & true).astype(np.int64)
+        counts[f"{side}_fp"] = (predicted & ~true).astype(np.int64)
+        counts[f"{side}_fn"] = (~predicted & true).astype(np.int64)
+        counts[f"{side}_tn"] = (~predicted & ~true).astype(np.int64)
+    grouped = counts.groupby(group_columns, sort=False, dropna=False)
+    summed = grouped.sum()
+    summed.insert(0, "n_samples", grouped.size())
+    return summed.reset_index()
 
 
 def _combine_screen_counts(
@@ -1607,87 +2364,6 @@ def _safe_ratio_array(numerator: np.ndarray, denominator: np.ndarray) -> np.ndar
     return result
 
 
-def _save_screen_figures(
-    entity_summary: pd.DataFrame,
-    summary_frame: pd.DataFrame,
-    figures_dir: Path,
-    *,
-    target_kind: str,
-) -> None:
-    entity_column = "bus" if target_kind == "volt" else "branch"
-    for variable, group in entity_summary.groupby("variable", sort=True):
-        entity_values = group[entity_column].to_numpy(dtype=int, copy=True)
-        for metric in ("precision", "recall"):
-            fig, ax = plt.subplots(figsize=(10, 4))
-            for side in ("lower", "upper", "any"):
-                values = group[f"{side}_{metric}"].to_numpy(dtype=float, copy=True)
-                ax.plot(entity_values, values, label=side)
-            ax.set_ylim(0.0, 1.05)
-            ax.set_title(f"{variable} {metric} by {entity_column}")
-            ax.set_xlabel(entity_column)
-            ax.set_ylabel(metric)
-            ax.legend()
-            fig.tight_layout()
-            fig.savefig(
-                figures_dir
-                / f"{variable.lower()}_{metric}_{entity_column}_summary.png",
-                dpi=150,
-            )
-            plt.close(fig)
-
-            finite_values = (
-                group[f"any_{metric}"].dropna().to_numpy(dtype=float, copy=True)
-            )
-            if finite_values.size > 0:
-                fig, ax = plt.subplots(figsize=(8, 4))
-                bins = min(max(len(finite_values) // 2, 5), 20)
-                ax.hist(finite_values, bins=bins, density=True, alpha=0.75)
-                ax.set_title(f"{variable} any-violation {metric} density")
-                ax.set_xlabel(metric)
-                ax.set_ylabel("density")
-                fig.tight_layout()
-                fig.savefig(
-                    figures_dir / f"{variable.lower()}_any_{metric}_density.png",
-                    dpi=150,
-                )
-                plt.close(fig)
-
-        system_row = summary_frame[
-            summary_frame["scope"].eq("system") & summary_frame["variable"].eq(variable)
-        ]
-        if system_row.empty:
-            continue
-        row = system_row.iloc[0]
-        for side in ("lower", "upper", "any"):
-            matrix = np.array(
-                [
-                    [float(row[f"{side}_tp"]), float(row[f"{side}_fp"])],
-                    [float(row[f"{side}_fn"]), float(row[f"{side}_tn"])],
-                ],
-                dtype=float,
-            )
-            fig, ax = plt.subplots(figsize=(4, 4))
-            image = ax.imshow(matrix, cmap="Blues")
-            ax.set_xticks([0, 1], labels=["Pred +", "Pred -"])
-            ax.set_yticks([0, 1], labels=["True +", "True -"])
-            ax.set_title(f"{variable} {side} confusion")
-            for row_index in range(2):
-                for column_index in range(2):
-                    ax.text(
-                        column_index,
-                        row_index,
-                        str(int(matrix[row_index, column_index])),
-                        ha="center",
-                        va="center",
-                    )
-            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-            fig.tight_layout()
-            fig.savefig(
-                figures_dir / f"{variable.lower()}_{side}_confusion.png", dpi=150
-            )
-            plt.close(fig)
-
-
 def _build_interval_frame(
     predictions: ChannelSet,
     intervals: dict[str, tuple[np.ndarray, np.ndarray]],
@@ -1715,7 +2391,7 @@ def _build_interval_frame(
 
 def _build_entity_output_frame(
     predictions: ChannelSet,
-    ground_truth: ChannelSet,
+    ground_truth: ChannelSet | None,
     intervals: dict[str, tuple[np.ndarray, np.ndarray]],
 ) -> pd.DataFrame:
     scenario_ids = predictions.scenario_ids
@@ -1737,9 +2413,10 @@ def _build_entity_output_frame(
         frame[column_name] = np.tile(values, len(scenario_ids))
     for channel_name, prediction_values in predictions.channels.items():
         frame[f"{channel_name}_pred"] = prediction_values.reshape(-1)
-        frame[f"{channel_name}_target"] = ground_truth.channels[channel_name].reshape(
-            -1
-        )
+        if ground_truth is not None:
+            frame[f"{channel_name}_target"] = ground_truth.channels[
+                channel_name
+            ].reshape(-1)
         lower, upper = intervals[channel_name]
         frame[f"{channel_name}_pi_lower"] = lower.reshape(-1)
         frame[f"{channel_name}_pi_upper"] = upper.reshape(-1)
@@ -1842,6 +2519,7 @@ def _build_bus_channel_set(
             channel_name: _prediction_channel(predictions, channel_name).copy()
             for channel_name in channel_names
         },
+        valid_masks=_unknown_masks(predictions, channel_names),
         entity_columns={
             "bus_type": _bus_type_labels_array(
                 predictions.bus_ids, predictions.bus_type_masks
@@ -1854,10 +2532,22 @@ def _build_bus_channel_set(
     )
 
 
-def _finalize_analysis_frame(frame: pd.DataFrame, entity_kind: str) -> pd.DataFrame:
-    sort_columns = ["variable", "analysis_scope", "stratification", "stratum_value"]
-    sort_columns.append("bus" if entity_kind == "bus" else "branch")
-    return frame.sort_values(sort_columns, na_position="first").reset_index(drop=True)
+def _unknown_masks(
+    predictions: PredictionSet, channel_names: tuple[str, ...]
+) -> dict[str, np.ndarray]:
+    """Per variable, the entries that are predicted rather than known set-points.
+
+    Known entries (e.g. `Vm` at PV buses) equal their set-point, so their
+    residual is zero. Fitting on them would shrink the bounds of a bus in the
+    scenarios where it is not PV (e.g. its generator is out); as invalid
+    entries they get no weight when fitting and keep their value when applied.
+    """
+
+    masks: dict[str, np.ndarray] = {}
+    for variable, bus_type in _SET_POINTS.get(predictions.task_name, ()):
+        if variable in channel_names and bus_type in predictions.bus_type_masks:
+            masks[variable] = ~predictions.bus_type_masks[bus_type]
+    return masks
 
 
 def _build_ground_truth_bus_channel_set(
@@ -2143,6 +2833,51 @@ def _build_system_load_bin_labels(
     )
 
 
+def _sparse_strata_context(
+    calibrators: Mapping[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
+) -> list[str]:
+    """A summary line on the strata whose elements use a fallback bound, if any."""
+
+    sparse = _sparse_strata_listing(calibrators)
+    if not sparse:
+        return []
+    if next(iter(calibrators.values())).sparse_strata == "pooled":
+        outcome = (
+            "They use their quantile over all calibration scenarios (`sparse_strata: "
+            "pooled`), which carries no guarantee within the stratum; `n_pooled` "
+            "counts the test values concerned and `<variable>_pooled` marks them."
+        )
+    else:
+        outcome = "They get infinite bounds (`sparse_strata: infinite`)."
+    return [f"- Too few calibration samples for a finite bound: {sparse}. {outcome}"]
+
+
+def _merge_pooled_columns(
+    frame: pd.DataFrame,
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
+    application: ChannelSet,
+) -> pd.DataFrame:
+    """`<variable>_pooled`: the bound used the quantile of all strata (sparse_strata: pooled)."""
+
+    masks = calibrator.pooled_masks
+    if not masks:
+        return frame
+    entity = application.entity_name
+    n_scenarios, n_entities = len(application.scenario_ids), len(application.entity_ids)
+    pooled_frame = pd.DataFrame(
+        {
+            "scenario": np.repeat(
+                np.asarray(application.scenario_ids, dtype=np.int64), n_entities
+            ),
+            entity: np.tile(
+                np.asarray(application.entity_ids, dtype=np.int64), n_scenarios
+            ),
+            **{f"{name}_pooled": mask.reshape(-1) for name, mask in masks.items()},
+        }
+    )
+    return frame.merge(pooled_frame, on=["scenario", entity], how="left")
+
+
 def _merge_kernel_diagnostics(
     frame: pd.DataFrame,
     calibrator,
@@ -2233,11 +2968,12 @@ def _analysis_partials(
     *,
     entity_column: str,
 ) -> pd.DataFrame:
-    """Additive per-entity statistics of one block of calibrated rows.
+    """Additive per-element statistics of one block of calibrated rows.
 
-    One row per variable, entity and stratum (plus the overall scope), with
+    One row per variable, element and stratum (plus the overall scope), with
     sums, counts and extremes, so that blocks combine exactly in
-    `_combine_analysis_partials`.
+    `_combine_analysis_partials`. Known values (the set-points marked by the
+    `<variable>_known` columns) are counted but left out of every statistic.
     """
 
     parts: list[pd.DataFrame] = []
@@ -2267,8 +3003,17 @@ def _analysis_partials(
         target = frame[target_column].to_numpy(dtype=float)
         lower = frame[lower_column].to_numpy(dtype=float)
         upper = frame[upper_column].to_numpy(dtype=float)
-        work["interval_width"] = upper - lower
-        work["covered"] = ((target >= lower) & (target <= upper)).astype(float)
+        known = _known_mask(frame, variable)
+        work["known"] = known.astype(np.int64)
+        work["pooled"] = (_flag(frame, f"{variable}_pooled") & ~known).astype(np.int64)
+        work["unknown"] = (~known).astype(np.int64)
+        work["width"] = np.where(known, np.nan, upper - lower)
+        work["covered"] = np.where(
+            known, 0.0, ((target >= lower) & (target <= upper)).astype(float)
+        )
+        work["scenario_unknown"] = np.where(
+            known, np.nan, frame["scenario"].to_numpy(dtype=float)
+        )
         if entity_column == "branch":
             # Out-of-service or unrated branches carry -1 and are not analysed.
             valid = (frame[f"{variable}_pred"].to_numpy() >= 0.0) & (target >= 0.0)
@@ -2279,7 +3024,6 @@ def _analysis_partials(
                 [entity_column],
                 static_columns,
                 variable=variable,
-                analysis_scope="overall",
                 stratification="",
             )
         )
@@ -2289,16 +3033,29 @@ def _analysis_partials(
                 [stratification, entity_column],
                 static_columns,
                 variable=variable,
-                analysis_scope="stratified",
                 stratification=stratification,
             )
             statistics["stratum_value"] = statistics.pop(stratification)
-            statistics["stratum_label"] = [
+            statistics["stratum"] = [
                 _stratum_label(work, stratification, value)
                 for value in statistics["stratum_value"].tolist()
             ]
             parts.append(statistics)
     return pd.concat(parts, ignore_index=True)
+
+
+def _known_mask(frame: pd.DataFrame, variable: str) -> np.ndarray:
+    """Rows whose value of `variable` is a known set-point (see `_SET_POINTS`)."""
+
+    return _flag(frame, f"{variable}_known")
+
+
+def _flag(frame: pd.DataFrame, column: str) -> np.ndarray:
+    """A boolean column of the frame, or all False when it is absent."""
+
+    if column not in frame.columns:
+        return np.zeros(len(frame), dtype=bool)
+    return frame[column].to_numpy(dtype=bool)
 
 
 def _entity_statistics(
@@ -2307,29 +3064,29 @@ def _entity_statistics(
     static_columns: list[str],
     *,
     variable: str,
-    analysis_scope: str,
     stratification: str,
 ) -> pd.DataFrame:
     statistics = (
         work.groupby(group_columns, sort=True, dropna=False)
         .agg(
-            width_sum=("interval_width", "sum"),
-            width_count=("interval_width", "count"),
-            width_min=("interval_width", "min"),
-            width_max=("interval_width", "max"),
+            width_sum=("width", "sum"),
+            width_count=("width", "count"),
+            min_width=("width", "min"),
+            max_width=("width", "max"),
             covered_sum=("covered", "sum"),
-            n_samples=("covered", "size"),
-            n_scenarios=("scenario", "nunique"),
+            n_values=("unknown", "sum"),
+            n_known=("known", "sum"),
+            n_pooled=("pooled", "sum"),
+            n_scenarios=("scenario_unknown", "nunique"),
             **{column: (column, "first") for column in static_columns},
         )
         .reset_index()
     )
-    statistics.insert(0, "analysis_scope", analysis_scope)
-    statistics.insert(1, "stratification", stratification)
-    statistics.insert(2, "variable", variable)
+    statistics.insert(0, "stratification", stratification)
+    statistics.insert(1, "variable", variable)
     if not stratification:
         statistics["stratum_value"] = float("nan")
-        statistics["stratum_label"] = _format_stratum_label("", None)
+        statistics["stratum"] = _format_stratum_label("", None)
     return statistics
 
 
@@ -2349,76 +3106,67 @@ def _combine_analysis_partials(
     entity_column: str,
     bus_types: dict[int, str],
 ) -> pd.DataFrame:
-    """Per-entity analysis rows (`trust_analysis_*.csv`) from the blocks' statistics."""
+    """Per-element coverage and width in every stratum, from the blocks' statistics."""
 
     static_columns = (
         ["from_bus", "to_bus", "rate_a"] if entity_column == "branch" else []
     )
-    keys = [
-        "analysis_scope",
-        "stratification",
-        "stratum_value",
-        "variable",
-        entity_column,
-    ]
+    keys = ["stratification", "stratum_value", "variable", entity_column]
     combined = (
         pd.concat(partials, ignore_index=True)
         .groupby(keys, sort=False, dropna=False)
         .agg(
-            stratum_label=("stratum_label", "first"),
+            stratum=("stratum", "first"),
             width_sum=("width_sum", "sum"),
             width_count=("width_count", "sum"),
-            width_min=("width_min", "min"),
-            width_max=("width_max", "max"),
+            min_width=("min_width", "min"),
+            max_width=("max_width", "max"),
             covered_sum=("covered_sum", "sum"),
-            n_samples=("n_samples", "sum"),
+            n_values=("n_values", "sum"),
+            n_known=("n_known", "sum"),
+            n_pooled=("n_pooled", "sum"),
             n_scenarios=("n_scenarios", "sum"),
             **{column: (column, "first") for column in static_columns},
         )
         .reset_index()
     )
     width_count = combined["width_count"].to_numpy(dtype=float)
+    n_values = combined["n_values"].to_numpy(dtype=float)
     with np.errstate(invalid="ignore", divide="ignore"):
-        width_mean = np.where(
+        mean_width = np.where(
             width_count > 0,
             combined["width_sum"].to_numpy(dtype=float) / width_count,
             np.nan,
         )
-    analysis = combined.loc[
-        :,
-        [
-            "analysis_scope",
-            "stratification",
-            "stratum_value",
-            "stratum_label",
-            "variable",
-            entity_column,
-        ],
+        coverage = np.where(
+            n_values > 0,
+            combined["covered_sum"].to_numpy(dtype=float) / n_values,
+            np.nan,
+        )
+    elements = combined.loc[
+        :, ["variable", "stratification", "stratum_value", "stratum", entity_column]
     ].copy()
-    analysis[entity_column] = analysis[entity_column].astype(np.int64)
+    elements[entity_column] = elements[entity_column].astype(np.int64)
     if entity_column == "branch":
-        analysis["from_bus"] = combined["from_bus"].astype(np.int64)
-        analysis["to_bus"] = combined["to_bus"].astype(np.int64)
-        analysis["rate_a"] = combined["rate_a"].astype(float)
+        elements["from_bus"] = combined["from_bus"].astype(np.int64)
+        elements["to_bus"] = combined["to_bus"].astype(np.int64)
+        elements["rate_a"] = combined["rate_a"].astype(float)
     else:
-        analysis["bus_type"] = [
-            bus_types.get(int(bus), "Unknown") for bus in analysis["bus"].tolist()
+        elements["bus_type"] = [
+            bus_types.get(int(bus), "Unknown") for bus in elements["bus"].tolist()
         ]
-    analysis["width_mean"] = width_mean
-    analysis["width_min"] = combined["width_min"].astype(float)
-    analysis["width_max"] = combined["width_max"].astype(float)
-    if entity_column == "bus":
-        is_angle = (analysis["variable"] == "Va").to_numpy()
-        for name in ("width_mean", "width_min", "width_max"):
-            analysis[f"{name}_degrees"] = np.where(
-                is_angle, np.rad2deg(analysis[name].to_numpy(dtype=float)), np.nan
-            )
-    analysis["empirical_coverage"] = combined["covered_sum"].to_numpy(
-        dtype=float
-    ) / combined["n_samples"].to_numpy(dtype=float)
-    analysis["n_samples"] = combined["n_samples"].astype(np.int64)
-    analysis["n_scenarios"] = combined["n_scenarios"].astype(np.int64)
-    return _finalize_analysis_frame(analysis, entity_column)
+    elements["n_values"] = combined["n_values"].astype(np.int64)
+    elements["n_known"] = combined["n_known"].astype(np.int64)
+    elements["n_pooled"] = combined["n_pooled"].astype(np.int64)
+    elements["n_scenarios"] = combined["n_scenarios"].astype(np.int64)
+    elements["coverage"] = coverage
+    elements["mean_width"] = mean_width
+    elements["min_width"] = combined["min_width"].astype(float)
+    elements["max_width"] = combined["max_width"].astype(float)
+    return elements.sort_values(
+        ["variable", "stratification", "stratum_value", entity_column],
+        na_position="first",
+    ).reset_index(drop=True)
 
 
 def _analysis_scenario_columns_from_frame(frame: pd.DataFrame) -> list[str]:
@@ -2508,16 +3256,6 @@ def _bus_type_labels_array(
     )
 
 
-def _entity_column_map(channel_set: ChannelSet, column_name: str) -> dict[int, object]:
-    if column_name not in channel_set.entity_columns:
-        return {}
-    values = channel_set.entity_columns[column_name]
-    return {
-        int(entity_id): values[index]
-        for index, entity_id in enumerate(channel_set.entity_ids.tolist())
-    }
-
-
 def _bus_type_label_from_values(
     *,
     ref: np.ndarray | None,
@@ -2540,648 +3278,6 @@ def _bus_type_label_from_flags(*, ref: float, pv: float, pq: float) -> str:
     if pq >= 0.5:
         return "PQ"
     return "Unknown"
-
-
-def _maybe_width_degrees(variable: str, width_value: float) -> float:
-    if variable != "Va":
-        return float("nan")
-    return float(np.rad2deg(float(width_value)))
-
-
-def _save_analysis_figures(
-    analysis_frame: pd.DataFrame,
-    figures_dir: Path,
-) -> None:
-    overall_frame = analysis_frame[analysis_frame["analysis_scope"].eq("overall")]
-    for variable, group in overall_frame.groupby("variable", sort=True):
-        bus_values = group["bus"].to_numpy(dtype=int, copy=True)
-        width_mean = group["width_mean"].to_numpy(dtype=float, copy=True)
-        width_min = group["width_min"].to_numpy(dtype=float, copy=True)
-        width_max = group["width_max"].to_numpy(dtype=float, copy=True)
-        empirical_coverage = group["empirical_coverage"].to_numpy(
-            dtype=float, copy=True
-        )
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(bus_values, width_mean, label="mean")
-        ax.plot(bus_values, width_min, label="min")
-        ax.plot(bus_values, width_max, label="max")
-        ax.set_title(f"{variable} interval width by bus")
-        ax.set_xlabel("bus")
-        ax.set_ylabel("interval width")
-        _style_axes(ax)
-        _place_legend(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_summary.png", dpi=150)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(bus_values, empirical_coverage, label="coverage")
-        ax.set_ylim(0.0, 1.05)
-        ax.set_title(f"{variable} empirical coverage by bus")
-        ax.set_xlabel("bus")
-        ax.set_ylabel("coverage")
-        _style_axes(ax)
-        _place_legend(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_summary.png", dpi=150)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        _plot_density_curve(ax, width_mean, show_mean=True)
-        ax.set_title(f"{variable} mean interval width density")
-        ax.set_xlabel("mean interval width")
-        ax.set_ylabel("density")
-        _style_axes(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_density.png", dpi=150)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        _plot_density_curve(ax, empirical_coverage, clip=(0.0, 1.0), show_mean=True)
-        ax.set_title(f"{variable} empirical coverage density")
-        ax.set_xlabel("empirical coverage")
-        ax.set_ylabel("density")
-        ax.set_xlim(0.0, 1.0)
-        ax.set_xticks(np.linspace(0.0, 1.0, num=6))
-        _style_axes(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_density.png", dpi=150)
-        plt.close(fig)
-
-    _save_stratified_entity_figures(
-        analysis_frame,
-        figures_dir,
-        entity_column="bus",
-        entity_label="bus",
-    )
-
-
-def _save_line_analysis_figures(
-    analysis_frame: pd.DataFrame,
-    figures_dir: Path,
-) -> None:
-    overall_frame = analysis_frame[analysis_frame["analysis_scope"].eq("overall")]
-    for variable, group in overall_frame.groupby("variable", sort=True):
-        branch_values = group["branch"].to_numpy(dtype=int, copy=True)
-        width_mean = group["width_mean"].to_numpy(dtype=float, copy=True)
-        width_min = group["width_min"].to_numpy(dtype=float, copy=True)
-        width_max = group["width_max"].to_numpy(dtype=float, copy=True)
-        empirical_coverage = group["empirical_coverage"].to_numpy(
-            dtype=float, copy=True
-        )
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(branch_values, width_mean, label="mean")
-        ax.plot(branch_values, width_min, label="min")
-        ax.plot(branch_values, width_max, label="max")
-        ax.set_title(f"{variable} interval width by branch")
-        ax.set_xlabel("branch")
-        ax.set_ylabel("interval width")
-        _style_axes(ax)
-        _place_legend(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_summary.png", dpi=150)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(branch_values, empirical_coverage, label="coverage")
-        ax.set_ylim(0.0, 1.05)
-        ax.set_title(f"{variable} empirical coverage by branch")
-        ax.set_xlabel("branch")
-        ax.set_ylabel("coverage")
-        _style_axes(ax)
-        _place_legend(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_summary.png", dpi=150)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        _plot_density_curve(ax, width_mean, show_mean=True)
-        ax.set_title(f"{variable} mean interval width density")
-        ax.set_xlabel("mean interval width")
-        ax.set_ylabel("density")
-        _style_axes(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_width_density.png", dpi=150)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        _plot_density_curve(ax, empirical_coverage, clip=(0.0, 1.0), show_mean=True)
-        ax.set_title(f"{variable} empirical coverage density")
-        ax.set_xlabel("empirical coverage")
-        ax.set_ylabel("density")
-        ax.set_xlim(0.0, 1.0)
-        ax.set_xticks(np.linspace(0.0, 1.0, num=6))
-        _style_axes(ax)
-        fig.tight_layout()
-        fig.savefig(figures_dir / f"{variable.lower()}_coverage_density.png", dpi=150)
-        plt.close(fig)
-
-    _save_stratified_entity_figures(
-        analysis_frame,
-        figures_dir,
-        entity_column="branch",
-        entity_label="branch",
-    )
-
-
-def _save_stratified_entity_figures(
-    analysis_frame: pd.DataFrame,
-    figures_dir: Path,
-    *,
-    entity_column: str,
-    entity_label: str,
-) -> None:
-    stratified_frame = analysis_frame[analysis_frame["analysis_scope"].eq("stratified")]
-    if stratified_frame.empty:
-        return
-
-    for (variable, stratification), group in stratified_frame.groupby(
-        ["variable", "stratification"], sort=True, dropna=False
-    ):
-        suffix = _normalize_output_segment(f"by_{stratification}")
-        ordered_group = group.sort_values(
-            ["stratum_value", entity_column], na_position="first"
-        )
-
-        legend_outside = ordered_group["stratum_value"].nunique(dropna=False) > 3
-        fig, ax = plt.subplots(figsize=(10, 4))
-        for stratum_value, stratum_group in ordered_group.groupby(
-            "stratum_value", sort=True, dropna=False
-        ):
-            stratum_label = _format_figure_stratum_label(
-                _resolve_stratum_label_from_frame(
-                    stratum_group,
-                    str(stratification),
-                    None if pd.isna(stratum_value) else int(stratum_value),
-                ),
-                str(stratification),
-            )
-            ax.plot(
-                stratum_group[entity_column].to_numpy(dtype=int, copy=True),
-                stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
-                label=stratum_label,
-            )
-        ax.set_title(
-            f"{variable} mean interval width by {entity_label} and {stratification}"
-        )
-        ax.set_xlabel(entity_label)
-        ax.set_ylabel("mean interval width")
-        _style_axes(ax)
-        _place_legend(ax, outside=legend_outside)
-        fig.tight_layout()
-        fig.savefig(
-            figures_dir / f"{variable.lower()}_width_summary_{suffix}.png", dpi=150
-        )
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        for stratum_value, stratum_group in ordered_group.groupby(
-            "stratum_value", sort=True, dropna=False
-        ):
-            stratum_label = _format_figure_stratum_label(
-                _resolve_stratum_label_from_frame(
-                    stratum_group,
-                    str(stratification),
-                    None if pd.isna(stratum_value) else int(stratum_value),
-                ),
-                str(stratification),
-            )
-            ax.plot(
-                stratum_group[entity_column].to_numpy(dtype=int, copy=True),
-                stratum_group["empirical_coverage"].to_numpy(dtype=float, copy=True),
-                label=stratum_label,
-            )
-        ax.set_ylim(0.0, 1.05)
-        ax.set_title(
-            f"{variable} empirical coverage by {entity_label} and {stratification}"
-        )
-        ax.set_xlabel(entity_label)
-        ax.set_ylabel("coverage")
-        _style_axes(ax)
-        _place_legend(ax, outside=legend_outside)
-        fig.tight_layout()
-        fig.savefig(
-            figures_dir / f"{variable.lower()}_coverage_summary_{suffix}.png", dpi=150
-        )
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        for stratum_value, stratum_group in ordered_group.groupby(
-            "stratum_value", sort=True, dropna=False
-        ):
-            stratum_label = _format_figure_stratum_label(
-                _resolve_stratum_label_from_frame(
-                    stratum_group,
-                    str(stratification),
-                    None if pd.isna(stratum_value) else int(stratum_value),
-                ),
-                str(stratification),
-            )
-            _plot_density_curve(
-                ax,
-                stratum_group["width_mean"].to_numpy(dtype=float, copy=True),
-                label=stratum_label,
-                fill_alpha=0.22,
-                show_mean=True,
-            )
-        ax.set_title(f"{variable} mean interval width density by {stratification}")
-        ax.set_xlabel("mean interval width")
-        ax.set_ylabel("density")
-        _style_axes(ax)
-        _place_legend(ax, outside=legend_outside)
-        fig.tight_layout()
-        fig.savefig(
-            figures_dir / f"{variable.lower()}_width_density_{suffix}.png", dpi=150
-        )
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        for stratum_value, stratum_group in ordered_group.groupby(
-            "stratum_value", sort=True, dropna=False
-        ):
-            stratum_label = _format_figure_stratum_label(
-                _resolve_stratum_label_from_frame(
-                    stratum_group,
-                    str(stratification),
-                    None if pd.isna(stratum_value) else int(stratum_value),
-                ),
-                str(stratification),
-            )
-            _plot_density_curve(
-                ax,
-                stratum_group["empirical_coverage"].to_numpy(dtype=float, copy=True),
-                label=stratum_label,
-                clip=(0.0, 1.0),
-                fill_alpha=0.22,
-                show_mean=True,
-            )
-        ax.set_title(f"{variable} empirical coverage density by {stratification}")
-        ax.set_xlabel("empirical coverage")
-        ax.set_ylabel("density")
-        ax.set_xlim(0.0, 1.0)
-        ax.set_xticks(np.linspace(0.0, 1.0, num=6))
-        _style_axes(ax)
-        _place_legend(ax, outside=legend_outside)
-        fig.tight_layout()
-        fig.savefig(
-            figures_dir / f"{variable.lower()}_coverage_density_{suffix}.png", dpi=150
-        )
-        plt.close(fig)
-
-        per_stratum = (
-            ordered_group.groupby("stratum_value", sort=True, dropna=False)
-            .agg(
-                stratum_label=("stratum_label", "first"),
-                width_mean_across_entities=("width_mean", "mean"),
-                empirical_coverage_across_entities=("empirical_coverage", "mean"),
-                n_entities=(entity_column, "nunique"),
-            )
-            .reset_index()
-        )
-        labels = [
-            _format_figure_stratum_label(str(value), str(stratification))
-            for value in per_stratum["stratum_label"].astype(str).tolist()
-        ]
-
-        fig_height = max(4.5, 1.0 + 0.7 * len(labels))
-        width_distributions = [
-            ordered_group.loc[
-                ordered_group["stratum_label"].eq(raw_label),
-                "width_mean",
-            ]
-            .dropna()
-            .to_numpy(dtype=float, copy=True)
-            for raw_label in per_stratum["stratum_label"].astype(str).tolist()
-        ]
-        fig, ax = plt.subplots(figsize=(10, fig_height))
-        positions = np.arange(1, len(labels) + 1, dtype=float)
-        width_box = _horizontal_boxplot(
-            ax,
-            width_distributions,
-            positions=positions,
-            meanprops={
-                "marker": "D",
-                "markerfacecolor": "#0f4c81",
-                "markeredgecolor": "#0f4c81",
-                "markersize": 4,
-            },
-        )
-        for patch in width_box["boxes"]:
-            patch.set_facecolor("#2f7db2")
-            patch.set_alpha(0.45)
-        ax.set_yticks(positions, labels=labels)
-        ax.set_title(
-            f"{variable} mean interval width distribution across {entity_label}s by {stratification}"
-        )
-        ax.set_xlabel("mean interval width")
-        ax.set_ylabel(stratification)
-        _style_axes(ax, axis="x")
-        fig.tight_layout()
-        fig.savefig(
-            figures_dir / f"{variable.lower()}_width_mean_{suffix}.png", dpi=150
-        )
-        plt.close(fig)
-
-        coverage_distributions = [
-            ordered_group.loc[
-                ordered_group["stratum_label"].eq(raw_label),
-                "empirical_coverage",
-            ]
-            .dropna()
-            .to_numpy(dtype=float, copy=True)
-            for raw_label in per_stratum["stratum_label"].astype(str).tolist()
-        ]
-        fig, ax = plt.subplots(figsize=(10, fig_height))
-        coverage_box = _horizontal_boxplot(
-            ax,
-            coverage_distributions,
-            positions=positions,
-            meanprops={
-                "marker": "D",
-                "markerfacecolor": "#1f6f4a",
-                "markeredgecolor": "#1f6f4a",
-                "markersize": 4,
-            },
-        )
-        for patch in coverage_box["boxes"]:
-            patch.set_facecolor("#4f9f7a")
-            patch.set_alpha(0.45)
-        ax.set_yticks(positions, labels=labels)
-        ax.set_title(
-            f"{variable} empirical coverage distribution across {entity_label}s by {stratification}"
-        )
-        ax.set_xlim(0.0, 1.05)
-        ax.set_xlabel("coverage")
-        ax.set_ylabel(stratification)
-        ax.set_xticks(np.linspace(0.0, 1.0, num=6))
-        _style_axes(ax, axis="x")
-        fig.tight_layout()
-        fig.savefig(
-            figures_dir / f"{variable.lower()}_coverage_mean_{suffix}.png", dpi=150
-        )
-        plt.close(fig)
-
-
-def _build_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
-    system_summary = _aggregate_summary_rows(
-        analysis_frame,
-        group_columns=["analysis_scope", "stratification", "stratum_value", "variable"],
-        scope="system",
-        include_bus_type=False,
-    )
-    bus_type_summary = _aggregate_summary_rows(
-        analysis_frame,
-        group_columns=[
-            "analysis_scope",
-            "stratification",
-            "stratum_value",
-            "variable",
-            "bus_type",
-        ],
-        scope="bus_type",
-        include_bus_type=True,
-    )
-    return pd.concat([system_summary, bus_type_summary], ignore_index=True)
-
-
-def _build_line_summary_frame(analysis_frame: pd.DataFrame) -> pd.DataFrame:
-    records: list[dict[str, object]] = []
-    grouped = analysis_frame.groupby(
-        ["analysis_scope", "stratification", "stratum_value", "variable"],
-        sort=True,
-        dropna=False,
-    )
-    for group_key, group in grouped:
-        if not isinstance(group_key, tuple):
-            group_key = (group_key,)
-        analysis_scope = str(group_key[0])
-        stratification = str(group_key[1])
-        stratum_value = group_key[2]
-        variable = str(group_key[3])
-        records.append(
-            {
-                "analysis_scope": analysis_scope,
-                "stratification": stratification,
-                "stratum_value": stratum_value,
-                "stratum_label": _resolve_stratum_label_from_group(
-                    group,
-                    stratification,
-                    stratum_value,
-                ),
-                "scope": "system",
-                "variable": variable,
-                "rate_a": float("nan"),
-                "n_lines": int(group["branch"].nunique()),
-                "n_samples_min": int(group["n_samples"].min()),
-                "n_samples_max": int(group["n_samples"].max()),
-                "n_scenarios_min": int(group["n_scenarios"].min()),
-                "n_scenarios_max": int(group["n_scenarios"].max()),
-                "width_mean_across_lines": float(group["width_mean"].mean()),
-                "width_min_across_lines": float(group["width_mean"].min()),
-                "width_max_across_lines": float(group["width_mean"].max()),
-                "empirical_coverage_mean_across_lines": float(
-                    group["empirical_coverage"].mean()
-                ),
-                "empirical_coverage_min_across_lines": float(
-                    group["empirical_coverage"].min()
-                ),
-                "empirical_coverage_max_across_lines": float(
-                    group["empirical_coverage"].max()
-                ),
-            },
-        )
-        grouped_by_rate = group.groupby("rate_a", sort=True, dropna=False)
-        for rate_a, rate_group in grouped_by_rate:
-            records.append(
-                {
-                    "analysis_scope": analysis_scope,
-                    "stratification": stratification,
-                    "stratum_value": stratum_value,
-                    "stratum_label": _resolve_stratum_label_from_group(
-                        rate_group,
-                        stratification,
-                        stratum_value,
-                    ),
-                    "scope": "rate_a",
-                    "variable": variable,
-                    "rate_a": float(rate_a),
-                    "n_lines": int(rate_group["branch"].nunique()),
-                    "n_samples_min": int(rate_group["n_samples"].min()),
-                    "n_samples_max": int(rate_group["n_samples"].max()),
-                    "n_scenarios_min": int(rate_group["n_scenarios"].min()),
-                    "n_scenarios_max": int(rate_group["n_scenarios"].max()),
-                    "width_mean_across_lines": float(rate_group["width_mean"].mean()),
-                    "width_min_across_lines": float(rate_group["width_mean"].min()),
-                    "width_max_across_lines": float(rate_group["width_mean"].max()),
-                    "empirical_coverage_mean_across_lines": float(
-                        rate_group["empirical_coverage"].mean()
-                    ),
-                    "empirical_coverage_min_across_lines": float(
-                        rate_group["empirical_coverage"].min()
-                    ),
-                    "empirical_coverage_max_across_lines": float(
-                        rate_group["empirical_coverage"].max()
-                    ),
-                },
-            )
-    return (
-        pd.DataFrame.from_records(records)
-        .sort_values(
-            [
-                "analysis_scope",
-                "stratification",
-                "stratum_value",
-                "scope",
-                "variable",
-                "rate_a",
-            ],
-            na_position="first",
-        )
-        .reset_index(drop=True)
-    )
-
-
-def _build_reliability_frame(
-    analysis_frame: pd.DataFrame,
-    *,
-    entity_column: str,
-    target_coverage: float,
-) -> pd.DataFrame:
-    records: list[dict[str, object]] = []
-    grouped = analysis_frame.groupby(
-        ["analysis_scope", "stratification", "stratum_value", "variable"],
-        sort=True,
-        dropna=False,
-    )
-    for group_key, group in grouped:
-        if not isinstance(group_key, tuple):
-            group_key = (group_key,)
-        analysis_scope = str(group_key[0])
-        stratification = str(group_key[1])
-        stratum_value = group_key[2]
-        variable = str(group_key[3])
-        weights = group["n_samples"].to_numpy(dtype=float, copy=True)
-        empirical = group["empirical_coverage"].to_numpy(dtype=float, copy=True)
-        widths = group["width_mean"].to_numpy(dtype=float, copy=True)
-        empirical_weighted = _weighted_average(empirical, weights)
-        width_weighted = _weighted_average(widths, weights)
-        records.append(
-            {
-                "analysis_scope": analysis_scope,
-                "stratification": stratification,
-                "stratum_value": stratum_value,
-                "stratum_label": _resolve_stratum_label_from_group(
-                    group,
-                    stratification,
-                    stratum_value,
-                ),
-                "variable": variable,
-                "target_coverage": float(target_coverage),
-                "n_entities": int(group[entity_column].nunique()),
-                "n_samples_total": int(group["n_samples"].sum()),
-                "n_scenarios_min": int(group["n_scenarios"].min()),
-                "n_scenarios_max": int(group["n_scenarios"].max()),
-                "empirical_coverage_mean_across_entities": float(
-                    group["empirical_coverage"].mean()
-                ),
-                "empirical_coverage_weighted": empirical_weighted,
-                "coverage_gap_weighted": empirical_weighted - float(target_coverage),
-                "width_mean_across_entities": float(group["width_mean"].mean()),
-                "width_mean_weighted": width_weighted,
-            }
-        )
-    return (
-        pd.DataFrame.from_records(records)
-        .sort_values(
-            ["variable", "analysis_scope", "stratification", "stratum_value"],
-            na_position="first",
-        )
-        .reset_index(drop=True)
-    )
-
-
-def _weighted_average(values: np.ndarray, weights: np.ndarray) -> float:
-    valid_mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
-    if not np.any(valid_mask):
-        return float("nan")
-    return float(np.average(values[valid_mask], weights=weights[valid_mask]))
-
-
-def _aggregate_summary_rows(
-    analysis_frame: pd.DataFrame,
-    *,
-    group_columns: list[str],
-    scope: str,
-    include_bus_type: bool,
-) -> pd.DataFrame:
-    records: list[dict[str, object]] = []
-    grouped = analysis_frame.groupby(group_columns, sort=True, dropna=False)
-    for group_key, group in grouped:
-        if not isinstance(group_key, tuple):
-            group_key = (group_key,)
-        analysis_scope = str(group_key[0])
-        stratification = str(group_key[1])
-        stratum_value = group_key[2]
-        variable = str(group_key[3])
-        bus_type = str(group_key[4]) if include_bus_type else "All"
-        records.append(
-            {
-                "analysis_scope": analysis_scope,
-                "stratification": stratification,
-                "stratum_value": stratum_value,
-                "stratum_label": _resolve_stratum_label_from_group(
-                    group,
-                    stratification,
-                    stratum_value,
-                ),
-                "scope": scope,
-                "variable": variable,
-                "bus_type": bus_type,
-                "n_buses": int(group["bus"].nunique()),
-                "n_samples_min": int(group["n_samples"].min()),
-                "n_samples_max": int(group["n_samples"].max()),
-                "n_scenarios_min": int(group["n_scenarios"].min()),
-                "n_scenarios_max": int(group["n_scenarios"].max()),
-                "width_mean_across_buses": float(group["width_mean"].mean()),
-                "width_min_across_buses": float(group["width_mean"].min()),
-                "width_max_across_buses": float(group["width_mean"].max()),
-                "empirical_coverage_mean_across_buses": float(
-                    group["empirical_coverage"].mean()
-                ),
-                "empirical_coverage_min_across_buses": float(
-                    group["empirical_coverage"].min()
-                ),
-                "empirical_coverage_max_across_buses": float(
-                    group["empirical_coverage"].max()
-                ),
-                "width_mean_degrees_across_buses": _summary_or_nan(
-                    group["width_mean_degrees"]
-                ),
-                "width_min_degrees_across_buses": _summary_or_nan(
-                    group["width_mean_degrees"], op="min"
-                ),
-                "width_max_degrees_across_buses": _summary_or_nan(
-                    group["width_mean_degrees"], op="max"
-                ),
-            },
-        )
-    return (
-        pd.DataFrame.from_records(records)
-        .sort_values(
-            [
-                "analysis_scope",
-                "stratification",
-                "stratum_value",
-                "scope",
-                "variable",
-                "bus_type",
-            ],
-            na_position="first",
-        )
-        .reset_index(drop=True)
-    )
 
 
 def _format_stratum_label(stratification: str, stratum_value: object) -> str:
@@ -3230,196 +3326,6 @@ def _format_system_load_bin_value(
     return f"{label} [{edges_array[int(value) - 1]:g}, {edges_array[int(value)]:g})"
 
 
-def _resolve_stratum_label_from_frame(
-    frame: pd.DataFrame,
-    stratification: str,
-    stratum_value: int | None,
-) -> str:
-    if not stratification:
-        return _format_stratum_label(stratification, stratum_value)
-    label_column = f"{stratification}_label"
-    if label_column in frame.columns:
-        labels = frame[label_column].dropna().astype(str).unique().tolist()
-        if labels:
-            return f"{stratification}={labels[0]}"
-    if "stratum_label" in frame.columns:
-        labels = frame["stratum_label"].dropna().astype(str).unique().tolist()
-        if labels:
-            return labels[0]
-    return _format_stratum_label(stratification, stratum_value)
-
-
-def _resolve_stratum_label_from_group(
-    group: pd.DataFrame,
-    stratification: str,
-    stratum_value: object,
-) -> str:
-    if "stratum_label" in group.columns:
-        labels = group["stratum_label"].dropna().astype(str).unique().tolist()
-        if labels:
-            return labels[0]
-    return _format_stratum_label(stratification, stratum_value)
-
-
-def _format_figure_stratum_label(label: str, stratification: str) -> str:
-    if not stratification:
-        return label
-    prefix = f"{stratification}="
-    if label.startswith(prefix):
-        return label[len(prefix) :]
-    return label
-
-
-def _plot_density_curve(
-    ax: plt.Axes,
-    values: np.ndarray,
-    *,
-    label: str | None = None,
-    clip: tuple[float, float] | None = None,
-    fill_alpha: float = 0.28,
-    show_mean: bool = False,
-) -> None:
-    finite_values = np.asarray(values, dtype=float)
-    finite_values = finite_values[np.isfinite(finite_values)]
-    if clip is not None:
-        lower_clip, upper_clip = clip
-        finite_values = finite_values[
-            (finite_values >= lower_clip) & (finite_values <= upper_clip)
-        ]
-    if finite_values.size == 0:
-        return
-
-    unique_values = np.unique(finite_values)
-    if unique_values.size < 2:
-        line = ax.axvline(
-            float(unique_values[0]),
-            label=label,
-            linewidth=2.0,
-            alpha=0.95,
-        )
-        ax.axvspan(
-            float(unique_values[0]),
-            float(unique_values[0]),
-            color=line.get_color(),
-            alpha=fill_alpha,
-        )
-        if show_mean:
-            ax.axvline(
-                float(unique_values[0]),
-                color=line.get_color(),
-                linestyle="--",
-                linewidth=1.4,
-                alpha=0.9,
-            )
-        return
-
-    value_min = float(finite_values.min())
-    value_max = float(finite_values.max())
-    span = max(value_max - value_min, 1e-6)
-    if clip is None:
-        grid_min = value_min - 0.1 * span
-        grid_max = value_max + 0.1 * span
-    else:
-        clip_min, clip_max = clip
-        padding = 0.02 * (clip_max - clip_min)
-        grid_min = max(clip_min, value_min - padding)
-        grid_max = min(clip_max, value_max + padding)
-
-    if np.isclose(grid_min, grid_max):
-        grid_min -= 0.5
-        grid_max += 0.5
-
-    grid = np.linspace(grid_min, grid_max, num=256)
-    density = gaussian_kde(finite_values)(grid)
-    (line,) = ax.plot(grid, density, linewidth=2.0, label=label)
-    ax.fill_between(grid, 0.0, density, color=line.get_color(), alpha=fill_alpha)
-    if show_mean:
-        ax.axvline(
-            float(finite_values.mean()),
-            color=line.get_color(),
-            linestyle="--",
-            linewidth=1.4,
-            alpha=0.9,
-        )
-
-
-def _style_axes(ax: plt.Axes, axis: Literal["both", "x", "y"] = "both") -> None:
-    ax.grid(True, axis=axis, linestyle="--", linewidth=0.7, alpha=0.25)
-    ax.set_axisbelow(True)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-
-def _place_legend(ax: plt.Axes, *, outside: bool = False) -> None:
-    handles, _labels = ax.get_legend_handles_labels()
-    if not handles:
-        return
-    if outside:
-        ax.legend(
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1.0),
-            borderaxespad=0.0,
-            frameon=True,
-        )
-        return
-    ax.legend(frameon=True)
-
-
-def _annotate_horizontal_bars(
-    ax: plt.Axes,
-    bars,
-    values: np.ndarray,
-    *,
-    fmt: str = "{:.4f}",
-) -> None:
-    max_value = float(np.nanmax(values)) if values.size else 0.0
-    x_min, x_max = ax.get_xlim()
-    x_span = max(float(x_max - x_min), 1e-12)
-    # Keep label offsets proportional to the current axis scale.
-    x_padding = max(0.01 * max_value, 0.01 * x_span)
-    x_padding = min(x_padding, 0.05 * x_span)
-    for bar, value in zip(bars, values.tolist(), strict=False):
-        ax.text(
-            float(bar.get_width()) + x_padding,
-            float(bar.get_y()) + float(bar.get_height()) / 2.0,
-            fmt.format(float(value)),
-            va="center",
-            ha="left",
-            fontsize=9,
-        )
-
-
-def _horizontal_boxplot(
-    ax: plt.Axes,
-    data: list[np.ndarray],
-    *,
-    positions: np.ndarray,
-    meanprops: dict[str, object],
-):
-    # A stratum with too few calibration samples has infinite bounds (and so
-    # infinite widths), which a box plot cannot draw: its percentiles turn into
-    # NaN. Plot the finite values; the CSV outputs keep the infinite entries.
-    data = [np.asarray(values)[np.isfinite(values)] for values in data]
-    try:
-        return ax.boxplot(
-            data,
-            orientation="horizontal",
-            positions=positions,
-            patch_artist=True,
-            showmeans=True,
-            meanprops=meanprops,
-        )
-    except TypeError:
-        return ax.boxplot(
-            data,
-            vert=False,
-            positions=positions,
-            patch_artist=True,
-            showmeans=True,
-            meanprops=meanprops,
-        )
-
-
 def _scenario_label_column(
     column_name: str,
     repeated_values: np.ndarray,
@@ -3456,17 +3362,6 @@ def _categorical_labels(
 
 def _pred_bin_column_name(channel_name: str) -> str:
     return f"pred_bins_{channel_name.lower()}"
-
-
-def _summary_or_nan(values: pd.Series, op: str = "mean") -> float:
-    non_na = values.dropna()
-    if non_na.empty:
-        return float("nan")
-    if op == "min":
-        return float(non_na.min())
-    if op == "max":
-        return float(non_na.max())
-    return float(non_na.mean())
 
 
 def _ground_truth_channel(ground_truth, channel_name: str) -> np.ndarray:

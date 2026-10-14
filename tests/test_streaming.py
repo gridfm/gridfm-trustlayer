@@ -235,10 +235,10 @@ def test_calibrate_and_screen_do_not_depend_on_the_block_size(
 
     whole_dir, split_dir = tmp_path / "whole", tmp_path / "split"
     assert len(
-        list((split_dir / "screen" / "trust_screen_detail_line.parquet").iterdir())
+        list((split_dir / "screen" / "screening_detail_line_loading.parquet").iterdir())
     ) == (N_SCENARIOS // FIRST_BLOCK)
     csv_files = sorted(path.relative_to(whole_dir) for path in whole_dir.rglob("*.csv"))
-    assert len(csv_files) == 10
+    assert len(csv_files) == 8
     for relative in csv_files:
         pd.testing.assert_frame_equal(
             pd.read_csv(split_dir / relative),
@@ -253,8 +253,12 @@ def test_calibrate_and_screen_do_not_depend_on_the_block_size(
             "scenario",
             "branch",
         ],
-        "screen/trust_screen_detail_volt.parquet": ["variable", "scenario", "bus"],
-        "screen/trust_screen_detail_line.parquet": ["variable", "scenario", "branch"],
+        "screen/screening_detail_voltage.parquet": ["variable", "scenario", "bus"],
+        "screen/screening_detail_line_loading.parquet": [
+            "variable",
+            "scenario",
+            "branch",
+        ],
     }
     for relative, keys in parquets.items():
         pd.testing.assert_frame_equal(
@@ -289,3 +293,27 @@ def test_block_loading_with_the_dataset_reference_matches_a_full_load(tmp_path) 
     )
     assert not np.array_equal(naive.n_outages, full.n_outages[first])
     assert not np.allclose(naive.Va, full.Va[first])
+
+
+def test_kernel_runs_read_embeddings_once_or_per_block_with_the_same_result(
+    tmp_path, monkeypatch
+) -> None:
+    once = _config(tmp_path, "once", METHODS["kernel_n_outages"])
+    assert main(["compute", "--config", str(once)]) == 0
+    _run(once)
+
+    per_block = Path(str(once).replace("once", "per_block"))
+    per_block.write_text(
+        once.read_text().replace("/once/", "/per_block/"), encoding="utf-8"
+    )
+    monkeypatch.setattr(cli_main, "_EMBEDDINGS_PRELOAD_BYTES", 0)
+    monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", FIRST_BLOCK)
+    monkeypatch.setattr(cli_main, "_BLOCK_ROWS", 1)
+    _run(per_block)
+
+    relative = "calibrated/predictions_vm_va_with_intervals.parquet"
+    keys = ["scenario", "bus"]
+    pd.testing.assert_frame_equal(
+        _read_rows(tmp_path / "per_block" / relative, keys),
+        _read_rows(tmp_path / "once" / relative, keys),
+    )

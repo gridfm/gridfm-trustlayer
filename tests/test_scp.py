@@ -297,6 +297,7 @@ def test_naive_interval_stratified_by_pred_bins_roundtrip() -> None:
         strat="pred_bins",
         pred_n_bins=2,
         pred_bin_edges={"Vm": np.array([1.025], dtype=np.float32)},
+        sparse_strata="infinite",
     )
 
     assert calibrator.strat == "pred_bins"

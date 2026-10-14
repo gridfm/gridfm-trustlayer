@@ -18,6 +18,8 @@ Every input can be a single parquet file, as graphkit writes, or a partitioned d
 
 Trustlayer uses the scenarios present in the **predictions** file and reads the matching rows from the ground truth, so the ground truth may contain more scenarios than were predicted. The exact columns are listed in [Data schemas](../reference/schemas.md).
 
+New scenarios for `apply`, which have no known solution, need less: the predictions (for power flow, with the set-points `Vm_target` at PV buses and `Va_target` at the reference bus), and the bus and branch files only when the layer needs the outages, loads or branch parameters. See the [CLI reference](../reference/cli.md#apply).
+
 The predictions do not have to come from a GridFM model. Any model works if its output is written in the same layout, or passed as arrays through the [Python API](python-api.md).
 
 ## Two separate datasets

@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from gridfm_trustlayer.conformal.calibrator import validate_sparse_strata
 from gridfm_trustlayer.conformal.kernel import (
     SUPPORTED_BANDWIDTHS,
     SUPPORTED_DISTANCES,
@@ -26,6 +27,7 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "strat",
     "system_load_n_bins",
     "pred_n_bins",
+    "sparse_strata",
     "k_nn",
     "n_eff_min",
     "bandwidth",
@@ -41,7 +43,7 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "commands",
 }
 
-_ALLOWED_COMMAND_NAMES = {"compute", "calibrate", "screen"}
+_ALLOWED_COMMAND_NAMES = {"compute", "calibrate", "screen", "apply"}
 
 _ALLOWED_COMMAND_OVERRIDE_KEYS = {
     "task_name",
@@ -50,6 +52,7 @@ _ALLOWED_COMMAND_OVERRIDE_KEYS = {
     "strat",
     "system_load_n_bins",
     "pred_n_bins",
+    "sparse_strata",
     "k_nn",
     "n_eff_min",
     "bandwidth",
@@ -75,7 +78,13 @@ _DATASET_KEYS = {
 
 # `compute` fits the layer on the calibration data; `calibrate` and `screen`
 # apply and evaluate it on the test data. The two are always distinct datasets.
-_COMMAND_DATASET = {"compute": "calibration", "calibrate": "test", "screen": "test"}
+# `apply` writes bounds for new scenarios, which need no known solution.
+_COMMAND_DATASET = {
+    "compute": "calibration",
+    "calibrate": "test",
+    "screen": "test",
+    "apply": "apply",
+}
 
 _OUTPUT_KEYS = {
     "output",
@@ -83,6 +92,10 @@ _OUTPUT_KEYS = {
     "calibrated_predictions",
     "calibrated_predictions_volt",
     "calibrated_predictions_line",
+    "applied_predictions",
+    "applied_predictions_volt",
+    "applied_predictions_line",
+    "coverage_dir",
     "screen_dir",
     "screened_predictions",
 }
@@ -166,13 +179,15 @@ def _validate_inputs(inputs: Any) -> None:
             "with its own predictions, pf_node, pf_edge (and embeddings for "
             "cp_type: kernel). See CHANGELOG.md for the 0.1.0 migration.",
         )
-    unknown = sorted(set(inputs).difference({"calibration", "test", "artifact"}))
+    unknown = sorted(
+        set(inputs).difference({"calibration", "test", "apply", "artifact"})
+    )
     if unknown:
         raise ValueError(
             f"Unsupported keys under inputs: {unknown}. Expected 'calibration', "
-            "'test' and optionally 'artifact'.",
+            "'test', and optionally 'apply' and 'artifact'.",
         )
-    for block in ("calibration", "test"):
+    for block in ("calibration", "test", "apply"):
         _validate_mapping_keys(
             inputs, key=block, allowed_keys=_DATASET_KEYS, context="inputs"
         )
@@ -212,6 +227,7 @@ def resolve_command_config(
         "strat",
         "system_load_n_bins",
         "pred_n_bins",
+        "sparse_strata",
         "k_nn",
         "n_eff_min",
         "bandwidth",
@@ -251,6 +267,7 @@ def resolve_command_config(
         "strat",
         "system_load_n_bins",
         "pred_n_bins",
+        "sparse_strata",
         "k_nn",
         "n_eff_min",
         "bandwidth",
@@ -276,6 +293,8 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
 
     cp_type = validate_cp_type(config.get("cp_type"))
     strat = validate_strat(config.get("strat"))
+    if config.get("sparse_strata") is not None:
+        validate_sparse_strata(str(config.get("sparse_strata")))
     validate_k_nn(config.get("k_nn"))
     validate_n_eff_min(config.get("n_eff_min"))
     validate_distance(config.get("distance"))

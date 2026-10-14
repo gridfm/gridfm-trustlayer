@@ -8,6 +8,7 @@
 #   gridfm_trustlayer compute   --config examples/config/element_n_outages_pf.yaml
 #   gridfm_trustlayer calibrate --config examples/config/element_n_outages_pf.yaml
 #   gridfm_trustlayer screen    --config examples/config/element_n_outages_pf.yaml
+#   gridfm_trustlayer apply     --config examples/config/element_n_outages_pf.yaml   # new scenarios
 #
 # Replace every `path/to/...` with your own artifacts before running.
 
@@ -16,6 +17,9 @@ version: 1
 task_name: PowerFlow
 cp_type: element
 strat: n_outages
+# Buses or lines with too few calibration samples in a stratum use their quantile
+# over all strata there (no guarantee within the stratum); `infinite` keeps it.
+# sparse_strata: infinite
 alpha: 0.1
 
 variables:
@@ -42,6 +46,14 @@ inputs:
     predictions: path/to/test/predictions.parquet
     pf_node: path/to/test/raw/bus_data.parquet
     pf_edge: path/to/test/raw/branch_data.parquet
+  # Optional: new scenarios without a known AC solution, for `apply`. The bus and
+  # branch files give their outages (for strat: n_outages) and branch parameters
+  # (for line_loading); no solved values are read. Power-flow predictions must
+  # carry the set-points (Vm_target at PV buses, Va_target at the reference bus).
+  # apply:
+  #   predictions: path/to/new/predictions.parquet
+  #   pf_node: path/to/new/raw/bus_data.parquet
+  #   pf_edge: path/to/new/raw/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/element/n_outages_pf.trustlayer
