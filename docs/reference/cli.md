@@ -1,6 +1,6 @@
-# CLI Reference
+# CLI reference
 
-This page documents the current `gridfm_trustlayer` command-line interface.
+The `gridfm_trustlayer` command has three subcommands. Each reads the YAML config given with `--config`; flags override individual config values for one run. `gridfm_trustlayer <command> --help` prints the same options.
 
 ## Command overview
 
@@ -16,17 +16,11 @@ Available commands:
 - `calibrate`
 - `screen`
 
-All commands require `--config`. CLI flags are overrides on top of the YAML config.
+The three run in this order:
 
-## Shared workflow
-
-The current workflow is:
-
-1. `compute` fits interval calibrators and writes a `.trustlayer` artifact.
-2. `calibrate` applies the artifact and writes calibrated prediction outputs plus analysis CSVs and figures.
-3. `screen` evaluates those calibrated intervals against operating bounds.
-
-Example:
+1. `compute` fits the calibrators on the calibration dataset (`inputs.calibration`) and writes a `.trustlayer` artifact.
+2. `calibrate` applies the artifact to the test dataset (`inputs.test`) and writes the predictions with their bounds, coverage reports and figures.
+3. `screen` compares the test bounds with the operating limits in `screen_bounds`.
 
 ```bash
 gridfm_trustlayer compute --config path/to/trust_config.yaml
@@ -38,9 +32,9 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 
 Purpose:
 
-- load prediction and ground-truth artifacts
-- fit one or more conformal interval calibrators (`element` or `kernel`)
-- optionally fit only on a calibration subset of scenarios
+- load the calibration predictions and ground truth (`inputs.calibration`)
+- fit one conformal calibrator per target family (`element` or `kernel`)
+- with `n_eff_target: auto`, choose the kernel bandwidth by cross-validation first
 - save the result as a `.trustlayer` artifact
 
 Syntax:
@@ -58,7 +52,7 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 | `--output` | `str` | Artifact output path. |
 | `--alpha` | `float` | Miscoverage level. |
 | `--cp-type` | `str` | `element` or `kernel`. |
-| `--strat` | `str` | Optional residual stratification. Current supported values are `n_outages`, `outage_type`, `system_load_bin`, and `pred_bins`. |
+| `--strat` | `str` | Optional stratification: `n_outages`, `outage_type`, `system_load_bin`, or `pred_bins`. |
 | `--system-load-n-bins` | `int` | Requested number of percentile bins when `--strat system_load_bin` is used. |
 | `--pred-n-bins` | `int` | Requested number of percentile bins when `--strat pred_bins` is used. |
 | `--variables` | `list[str]` | Any subset of `Vm`, `Va`, `line_loading`. |
@@ -74,7 +68,7 @@ gridfm_trustlayer compute --config path/to/trust_config.yaml
 
 Notes:
 
-- `compute` fits on every scenario of the calibration dataset; trustlayer never splits a dataset internally. Evaluate the result with `calibrate` on a separate test dataset (see [configuration.md](configuration.md#inputs)).
+- `compute` fits on every scenario of the calibration dataset; trustlayer never splits a dataset internally. Evaluate the result with `calibrate` on a separate test dataset (see [Preparing the data](../user-guide/data.md#two-separate-datasets)).
 - A mixed run such as `variables: [Vm, Va, line_loading]` still writes one artifact bundle.
 - The saved artifact may contain one calibrator or multiple calibrators keyed by target family.
 - With `--strat n_outages`, residual quantiles are fitted separately per scenario outage count.
@@ -103,14 +97,14 @@ Bandwidth selection:
 - `--bandwidth knn` instead sets `h^2` to the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum.
 - Prefer `n_eff` when the same configuration has to work across different embedding widths, stratum sizes, or networks: the `k_nn` that localizes well at one embedding width can be effectively uniform at another, whereas the `n_eff` target means the same thing everywhere.
 - Neither mode removes the need to choose a number. `k_nn` and `n_eff_target` are both hyperparameters, and picking one by looking at calibrated results on the application set invalidates the coverage guarantee. Use a tuning partition disjoint from the set you report on, or let `--n-eff-target auto` choose it by cross-validation inside the calibration data.
-- With `--n-eff-target auto`, `compute` writes `<artifact>_kernel_tuning.csv` and `<artifact>_kernel_tuning_details.csv` next to the artifact and prints the chosen value per target family. See [configuration.md](configuration.md#choosing-n_eff_target-automatically-n_eff_target-auto).
+- With `--n-eff-target auto`, `compute` writes `<artifact>_kernel_tuning.csv` and `<artifact>_kernel_tuning_details.csv` next to the artifact and prints the chosen value per target family. See [Kernel-weighted calibration](../user-guide/kernel.md#choosing-the-bandwidth-automatically).
 
 ## `calibrate`
 
 Purpose:
 
 - load a `.trustlayer` artifact
-- apply the fitted intervals to raw predictions
+- apply the fitted intervals to the test predictions (`inputs.test`)
 - write calibrated prediction outputs
 - emit analysis CSVs and figures
 
@@ -125,7 +119,7 @@ gridfm_trustlayer calibrate --config path/to/trust_config.yaml
 | `--config` | `str` | Required YAML config. |
 | `--predictions` | `str` | Test predictions parquet (overrides `inputs.test.predictions`). Rejected if identical to the calibration predictions the artifact was fitted on. |
 | `--artifact` | `str` | Saved `.trustlayer` artifact from `compute`. |
-| `--output` | `str` | Output parquet path for a single target family, or output directory for mixed voltage + loading runs. |
+| `--output` | `str` | Output dataset path for a single target family, or output directory for mixed voltage + loading runs. |
 | `--cp-type` | `str` | `element` or `kernel`. |
 | `--strat` | `str` | Optional stratification override. When provided, it must match the saved artifact. |
 | `--pf-node` | `str` | Test bus ground truth, used for analysis or target reconstruction (overrides `inputs.test.pf_node`). |
@@ -164,7 +158,7 @@ Kernel diagnostic columns:
 | `kcp_bandwidth_sq` | The squared bandwidth used. Under `bandwidth: knn` this is the squared distance to the `k_nn`-th nearest calibration scenario in the same stratum; under `bandwidth: n_eff` it is the solved value, and becomes the interesting diagnostic since `kcp_n_eff` is then near-constant by construction. |
 | `kcp_fallback` | `True` when the scenario reverted to the stratum-wide quantile, either because `kcp_n_eff` fell below `n_eff_min` or because the weighted quantile could not reach its target level. Elements with no valid calibration residual in the stratum (e.g. a branch out of service in every calibration scenario) always use the fallback bound and do not set this flag. |
 
-A high fallback rate or an `kcp_n_eff` near the stratum size means the kernel is not adding value at the current `k_nn`; lowering `k_nn` localizes harder, raising it moves behavior toward `element`. Under `bandwidth: n_eff`, `kcp_n_eff` is pinned to the target, so read `kcp_bandwidth_sq` and `kcp_fallback` instead.
+A `kcp_n_eff` near the stratum size means the kernel is barely localizing. A high fallback rate means it localizes too hard: raise `n_eff_target` (or `k_nn`). Under `bandwidth: n_eff`, `kcp_n_eff` is pinned to the target, so read `kcp_bandwidth_sq` and `kcp_fallback` instead. See [Kernel-weighted calibration](../user-guide/kernel.md#checking-that-it-works).
 
 One fallback mode is specific to concentrated embedding spaces. The unobserved test residual enters the weighted quantile as a point mass of weight 1, since the test scenario sits at distance zero from itself. When no calibration scenario is close in the kernel's own metric, every calibration weight is far below 1, that point mass dominates, and the target level becomes unreachable, so the scenario falls back. This is the guarantee refusing to extrapolate rather than a defect, but a rising `kcp_fallback` rate is a signal that the bandwidth has been driven too small for the geometry.
 
@@ -206,7 +200,7 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 | `--pf-edge` | `str` | Branch ground truth used when line targets are missing from the calibrated parquet. |
 | `--task-name` | `str` | Task name used for default path resolution. |
 
-Current semantics:
+Alarm rule (see [Reading the results](../user-guide/results.md#how-an-alarm-is-defined)):
 
 - lower violation alarm when `pi_lower < lower_bound` for variables that use a lower bound, such as `Vm`
 - upper violation alarm when `pi_upper > upper_bound`
@@ -215,15 +209,15 @@ Current semantics:
 
 Saved outputs:
 
-- `trust_screen_detail_volt.csv`
-- `trust_screen_detail_line.csv`
+- `trust_screen_detail_volt.parquet/` (partitioned dataset)
+- `trust_screen_detail_line.parquet/` (partitioned dataset)
 - `trust_screen_entity_volt.csv`
 - `trust_screen_entity_line.csv`
 - `trust_screen_summary_volt.csv`
 - `trust_screen_summary_line.csv`
 - `screen_figures/`
 
-## Current supported values
+## Supported values
 
 ### `cp_type`
 
@@ -260,12 +254,13 @@ Saved outputs:
 - `Va`
 - `line_loading`
 
-### Task names in active use
+### Task names
 
 - `PowerFlow`
 - `OptimalPowerFlow`
 
 ## See also
 
-- [Configuration](configuration.md)
-- [Schemas](schemas.md)
+- [Configuration reference](configuration.md)
+- [Data schemas](schemas.md)
+- [Reading the results](../user-guide/results.md)

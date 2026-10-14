@@ -1,12 +1,96 @@
 site_name: gridfm-trustlayer
 site_description: Conformal trustworthiness layer for GridFM foundation models
+site_url: https://gridfm.github.io/gridfm-trustlayer/
 repo_name: gridfm/gridfm-trustlayer
 repo_url: https://github.com/gridfm/gridfm-trustlayer
 
 nav:
   - Home: index.md
+  - Getting started:
+    - Installation: getting-started/installation.md
+    - Quick start: getting-started/quickstart.md
+    - Building the config: getting-started/config-builder.md
+  - User guide:
+    - Preparing the data: user-guide/data.md
+    - Choosing a setup: user-guide/choosing-a-setup.md
+    - Kernel-weighted calibration: user-guide/kernel.md
+    - Reading the results: user-guide/results.md
+    - Python API: user-guide/python-api.md
+    - Troubleshooting: user-guide/troubleshooting.md
+  - Reference:
+    - CLI: reference/cli.md
+    - Configuration: reference/configuration.md
+    - Data schemas: reference/schemas.md
+    - API: reference/api.md
   - Methodology: methodology.md
-  - Analysis and Figures: analysis_and_figures.md
-  - CLI Reference: cli.md
-  - Configuration: configuration.md
-  - Schemas: schemas.md
+  - Changelog: changelog.md
+
+theme:
+  name: material
+  palette:
+    primary: white
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.indexes
+    - navigation.tracking
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - navigation.instant
+    - navigation.instant.progress
+    - content.code.copy
+    - content.code.select
+  logo: figs/gridfm-trustlayer-logo-64.png
+  favicon: figs/gridfm-trustlayer-logo-32.png
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            heading_level: 3
+            show_root_heading: true
+            show_source: false
+            members_order: source
+            filters: ["!^_"]
+            merge_init_into_class: true
+            show_signature_annotations: true
+            separate_signature: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - javascripts/katex.js
+  - https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js
+  - https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js
+
+extra_css:
+  - https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css

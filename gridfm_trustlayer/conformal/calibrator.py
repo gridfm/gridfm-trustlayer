@@ -16,7 +16,26 @@ FLOAT32_DTYPE = np.dtype(np.float32)
 
 @dataclass
 class ChannelSet:
-    """Aligned scenario-by-entity channel arrays for calibration/application."""
+    """Variables of one dataset as aligned (scenario x entity) arrays.
+
+    The input of both calibrators: predictions and true values are two
+    `ChannelSet`s with the same `scenario_ids` and `entity_ids`, in the same order.
+
+    Attributes:
+        scenario_ids: Scenario identifiers, shape `(n_scenarios,)`.
+        entity_ids: Bus or branch identifiers, shape `(n_entities,)`.
+        entity_name: `"bus"` or `"branch"`.
+        channels: One `(n_scenarios, n_entities)` array per variable, e.g.
+            `{"Vm": ..., "Va": ...}`.
+        valid_masks: Optional boolean array per variable; `False` entries are
+            ignored when fitting and get no interval.
+        entity_columns: Optional per-entity metadata, e.g. `rate_a`.
+        scenario_columns: Per-scenario values used for stratification, e.g.
+            `{"n_outages": ...}`. Required for the chosen `strat`, both when
+            fitting and on the predictions passed to `predict_intervals`.
+        scenario_embeddings: `(n_scenarios, d)` scenario representations, for
+            `KernelIntervalCalibrator` only.
+    """
 
     scenario_ids: np.ndarray
     entity_ids: np.ndarray
@@ -43,13 +62,16 @@ _RANK_TOLERANCE = 1e-9
 
 @dataclass
 class NaiveIntervalCalibrator:
-    """Per-entity residual-quantile intervals for aligned prediction channels.
+    """Stratified split-conformal intervals (`cp_type: element`).
 
-    Each requested variable is calibrated independently per entity (and per
-    stratum when `strat` is set). Each tail uses the split-conformal order
-    statistic at level `alpha / 2` (see `_masked_column_quantile`), so the
-    interval has finite-sample coverage of at least `1 - alpha` under
-    exchangeability of calibration and test residuals.
+    Each variable is calibrated independently per entity, and per stratum when
+    `strat` is set. Each tail uses the split-conformal order statistic at level
+    `alpha / 2`, so the interval contains the true value with probability at
+    least `1 - alpha` (within each stratum) when calibration and test scenarios
+    are exchangeable, for any number of calibration samples. A stratum with too
+    few samples for that guarantee gets infinite bounds.
+
+    Create it with `fit`; the class is named "naive" for historical reasons.
     """
 
     alpha: float
@@ -88,7 +110,29 @@ class NaiveIntervalCalibrator:
         pred_n_bins: int | None = None,
         pred_bin_edges: dict[str, np.ndarray] | None = None,
     ) -> NaiveIntervalCalibrator:
-        """Fit naive residual-quantile intervals from aligned predictions and targets."""
+        """Fit per-entity (and per-stratum) residual quantiles on calibration data.
+
+        Args:
+            predictions: Calibration predictions.
+            ground_truth: True values for the same scenarios and entities.
+            alpha: Two-sided miscoverage level; `0.1` gives 90% intervals.
+            channel_names: Variables to calibrate.
+            strat: Optional stratification: `"n_outages"`, `"outage_type"`,
+                `"system_load_bin"` or `"pred_bins"`. Scenario strata are read
+                from `ground_truth.scenario_columns` (or the `GroundTruthSet`).
+            system_load_n_bins: Number of load bins, for `"system_load_bin"`.
+            system_load_bin_edges: Stored load-bin edges, for `"system_load_bin"`.
+            pred_n_bins: Number of prediction bins, for `"pred_bins"`.
+            pred_bin_edges: Bin edges per variable, for `"pred_bins"`.
+
+        Returns:
+            The fitted calibrator.
+
+        Raises:
+            ValueError: If the scenarios or entities of the two inputs are not
+                aligned, `alpha` is outside (0, 1), or a stratification input
+                is missing.
+        """
 
         _validate_alpha(alpha)
         _validate_entity_alignment(
@@ -232,7 +276,16 @@ class NaiveIntervalCalibrator:
         self,
         predictions: PredictionSet | ChannelSet,
     ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """Return lower and upper prediction-interval arrays for each channel."""
+        """Intervals for new predictions.
+
+        Args:
+            predictions: Predictions with the same entities as at fit time. With
+                scenario stratification, they must carry the stratum column.
+
+        Returns:
+            `{variable: (lower, upper)}`, two arrays of the predictions' shape.
+            Bounds are `inf` / `-inf` where the stratum had too few samples.
+        """
 
         _validate_entity_alignment(self.entity_ids, _get_entity_ids(predictions))
         intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}

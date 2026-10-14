@@ -23,7 +23,7 @@ variables:
   - Va
   - line_loading
 
-# Deliberately tighter than the physical limits; see docs/configuration.md.
+# Deliberately tighter than the physical limits; see docs/user-guide/data.md.
 screen_bounds:
   Vm:
     lower: 0.97

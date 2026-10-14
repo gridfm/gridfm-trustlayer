@@ -41,12 +41,14 @@ gridfm_trustlayer screen    --config examples/config/<file>.yaml
 operating bounds. `screen` otherwise defaults to the shared `variables` list, which includes `Va`,
 and voltage angle has no natural limit to screen against.
 
-**Output keys depend on how many target families you request.** A run covering one family
-(voltages only, or `line_loading` only) uses `outputs.calibrated_predictions`. A mixed run must use
-`outputs.calibrated_predictions_volt` and `outputs.calibrated_predictions_line`, because bus-level
-and branch-level results live on different entity axes and cannot share a parquet.
+**Mixed runs write two parquets.** Voltages are per bus and line loading per branch, so a run
+calibrating both writes one file for each. Name them with `outputs.calibrated_predictions_volt` and
+`outputs.calibrated_predictions_line` (as these examples do), or set `outputs.calibrated_predictions`
+to a directory. A run with one family can use either `outputs.calibrated_predictions` or its
+family-specific key.
 
 ## Reference
 
-Full key-by-key documentation is in [`docs/configuration.md`](../../docs/configuration.md);
-the CLI flags that override them are in [`docs/cli.md`](../../docs/cli.md).
+Full key-by-key documentation is in the [configuration reference](https://gridfm.github.io/gridfm-trustlayer/reference/configuration/);
+the CLI flags that override them are in the [CLI reference](https://gridfm.github.io/gridfm-trustlayer/reference/cli/).
+To build a config for your own choices instead, use the [config builder](../notebooks/config_builder.ipynb).

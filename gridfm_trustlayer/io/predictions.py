@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
+from gridfm_trustlayer.io.parquet import column_names, read_frame
 from gridfm_trustlayer.io.task_adapters import BusPredictionBundle, resolve_task_adapter
 
 FLOAT32_DTYPE = np.dtype(np.float32)
@@ -33,7 +34,20 @@ class GeneratorPredictionSet:
 
 @dataclass
 class PredictionSet:
-    """Direct prediction outputs aligned by scenario and bus."""
+    """Predictions of one dataset as (scenario x bus) arrays, from `load_predictions`.
+
+    Attributes:
+        task_name: `"PowerFlow"`, `"OptimalPowerFlow"` or another task name.
+        channel_names: Predicted variables found in the file.
+        scenario_ids: Scenario identifiers, sorted, shape `(n_scenarios,)`.
+        bus_ids: Bus identifiers, shape `(n_buses,)`.
+        Vm: Predicted voltage magnitudes, `(n_scenarios, n_buses)`.
+        Va: Predicted voltage angles in radians, `(n_scenarios, n_buses)`.
+        channels: Every predicted variable, including `Vm` and `Va`.
+        bus_type_masks: Boolean `PQ`, `PV` and `REF` masks.
+        generator_predictions: OPF generator predictions, when loaded.
+        scenario_embeddings: Pooled scenario embeddings, when attached.
+    """
 
     task_name: str
     channel_names: tuple[str, ...]
@@ -56,20 +70,36 @@ def load_predictions(
     generator_parquet_path: str | None = None,
     *,
     apply_pf_mask: bool | None = None,
+    scenario_ids: np.ndarray | None = None,
 ) -> PredictionSet:
-    """Load a graphkit predictions parquet into aligned scenario-by-bus arrays.
+    """Read a predictions parquet (one row per scenario and bus) into arrays.
 
-    The loader keeps parquet-schema handling inside the Phase 2 I/O boundary,
-    applies task-specific correction rules through explicit adapters, and loads
-    OPF generator artifacts when present.
+    Args:
+        parquet_path: Predictions file, e.g. graphkit's `<grid>_predictions.parquet`,
+            with `scenario`, `bus` and `<variable>_pred` columns.
+        apply_task_correction: Apply the task's conventions; for `PowerFlow`,
+            `Vm` is clamped on PV and reference buses and `Va` on the reference
+            bus.
+        task_name: `"PowerFlow"` or `"OptimalPowerFlow"`; inferred from the file
+            layout when not given.
+        generator_parquet_path: OPF generator predictions file, optional.
+        apply_pf_mask: Deprecated alias of `apply_task_correction`.
+        scenario_ids: Only these scenarios; all when not given. Reading a block
+            of scenarios at a time keeps memory bounded on large datasets.
+
+    Returns:
+        The predictions, with scenarios sorted by id.
     """
 
     if apply_pf_mask is not None:
         apply_task_correction = apply_pf_mask
 
-    frame = pd.read_parquet(parquet_path)
+    frame = read_frame(
+        parquet_path,
+        _prediction_columns(column_names(parquet_path)),
+        scenario_ids=scenario_ids,
+    )
     _require_columns(frame, ("scenario", "bus"))
-    frame = frame.copy()
     frame["scenario"] = frame["scenario"].astype(np.int64)
     frame["bus"] = frame["bus"].astype(np.int64)
 
@@ -192,6 +222,17 @@ def load_predictions(
     )
 
 
+def _prediction_columns(available: list[str]) -> list[str]:
+    """Columns the loader uses: ids, predictions, targets and bus types."""
+
+    keep = {"scenario", "bus", "pq", "pv", "ref"}
+    return [
+        name
+        for name in available
+        if name.lower() in keep or name.lower().endswith(("_pred", "_target"))
+    ]
+
+
 def _discover_prediction_channel_names(
     columns: pd.Index,
     lookup: dict[str, str],
@@ -273,6 +314,8 @@ def _sort_rectangular_frame(
             f"{len(scenario_ids)} scenarios and {len(entity_ids)} {entity_column} values.",
         )
 
+    if _in_rectangular_order(frame, scenario_ids, entity_ids, entity_column):
+        return frame.reset_index(drop=True)
     ordered = frame.copy()
     ordered["_scenario_order"] = pd.Categorical(
         ordered["scenario"],
@@ -308,14 +351,34 @@ def _reshape_column(
     entity_column: str,
     dtype: np.dtype[Any],
 ) -> np.ndarray:
-    ordered = _sort_rectangular_frame(
-        frame[["scenario", entity_column, column]],
-        scenario_ids,
-        entity_ids,
-        entity_column,
-    )
-    values = ordered[column].to_numpy(dtype=dtype, copy=True)
+    if not _in_rectangular_order(frame, scenario_ids, entity_ids, entity_column):
+        frame = _sort_rectangular_frame(
+            frame[["scenario", entity_column, column]],
+            scenario_ids,
+            entity_ids,
+            entity_column,
+        )
+    values = frame[column].to_numpy(dtype=dtype, copy=True)
     return values.reshape(len(scenario_ids), len(entity_ids))
+
+
+def _in_rectangular_order(
+    frame: pd.DataFrame,
+    scenario_ids: np.ndarray,
+    entity_ids: np.ndarray,
+    entity_column: str,
+) -> bool:
+    """Whether rows are already one per (scenario, entity), in that order."""
+
+    shape = (len(scenario_ids), len(entity_ids))
+    if len(frame) != shape[0] * shape[1]:
+        return False
+    scenarios = frame["scenario"].to_numpy().reshape(shape)
+    entities = frame[entity_column].to_numpy().reshape(shape)
+    return bool(
+        (scenarios == np.asarray(scenario_ids)[:, None]).all()
+        and (entities == np.asarray(entity_ids)[None, :]).all()
+    )
 
 
 def _load_generator_predictions(
@@ -325,7 +388,7 @@ def _load_generator_predictions(
     # Keep OPF generator artifacts in their exported long form. The current
     # graphkit export does not provide a stable cross-scenario generator ID, so
     # forcing `(scenario, idx)` into a rectangular matrix would misalign rows.
-    frame = pd.read_parquet(parquet_path)
+    frame = read_frame(parquet_path, scenario_ids=expected_scenario_ids)
     _require_columns(frame, ("scenario", "idx", "bus"))
     frame = frame.copy()
     frame["scenario"] = frame["scenario"].astype(np.int64)

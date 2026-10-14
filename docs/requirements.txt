@@ -1,0 +1,7 @@
+# Packages that build the documentation site (mkdocs.yml). Used by
+# .github/workflows/docs.yml; `pip install -e ".[dev]"` installs the same ones.
+# The API reference is read from the source with griffe, so the package itself
+# does not need to be installed.
+mkdocs>=1.6,<2
+mkdocs-material>=9.5
+mkdocstrings[python]>=0.26
