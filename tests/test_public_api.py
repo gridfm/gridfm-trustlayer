@@ -68,3 +68,30 @@ def test_fitted_calibrator_survives_an_artifact_roundtrip(tmp_path) -> None:
     np.testing.assert_array_equal(
         loaded.upper_residual_quantiles["Vm"], calibrator.upper_residual_quantiles["Vm"]
     )
+
+
+PYTHON_API_PAGE = Path(__file__).resolve().parents[1] / "docs/user-guide/python-api.md"
+
+
+def _runnable_doc_examples() -> list[str]:
+    # Plain ```python blocks are self-contained examples on synthetic data and are
+    # run here; blocks with a title (```python title="...") need the user's own
+    # files or are fragments, and are only rendered.
+    text = PYTHON_API_PAGE.read_text(encoding="utf-8")
+    return re.findall(r"```python\n(.*?)```", text, flags=re.DOTALL)
+
+
+def test_python_api_page_examples_run_and_print_what_the_page_shows(capsys) -> None:
+    examples = _runnable_doc_examples()
+    assert len(examples) == 2
+
+    for example in examples:
+        exec(compile(example, str(PYTHON_API_PAGE), "exec"), {})  # noqa: S102
+    printed = capsys.readouterr().out
+
+    coverage = float(printed.split("coverage:")[1].split()[0])
+    assert abs(coverage - 0.9) < 0.02
+    # The kernel comparison output is quoted verbatim on the page.
+    page = PYTHON_API_PAGE.read_text(encoding="utf-8")
+    for line in printed.splitlines()[1:]:
+        assert line in page, line

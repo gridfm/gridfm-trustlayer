@@ -16,12 +16,19 @@ def compute_line_loading(
     Va_rad: np.ndarray,
     gt: GroundTruthSet,
 ) -> np.ndarray:
-    """Compute branch loading ratios using datakit's branch-power helper.
+    """Line loading implied by bus voltages: `max(|S_from|, |S_to|) / rate_a`.
 
-    Trustlayer supplies aligned bus voltages and branch admittance parameters,
-    then delegates AC branch-flow computation to `gridfm_datakit` so datakit
-    remains the source of truth for the loading path. Inactive or unrated
-    branches are returned as `-1` to preserve the Phase 2 sentinel convention.
+    The AC branch flows are computed by datakit's branch-flow routine, so
+    `gridfm_datakit` must be installed (the `graphkit` extra).
+
+    Args:
+        Vm: Voltage magnitudes, `(n_scenarios, n_buses)`, predicted or true.
+        Va_rad: Voltage angles in radians, same shape.
+        gt: Ground truth of the same scenarios, for the branch parameters.
+
+    Returns:
+        `(n_scenarios, n_branches)` loading as a fraction of `rate_a`; `-1` for
+        out-of-service or unrated branches.
     """
 
     try:
@@ -29,7 +36,7 @@ def compute_line_loading(
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "gridfm_datakit is required for compute_line_loading(). Install the "
-            "datakit-backed extras before computing derived loading metrics.",
+            'graphkit extra: pip install "gridfm-trustlayer[graphkit]".',
         ) from exc
     compute_branch_powers_vectorized = cast(
         Any,

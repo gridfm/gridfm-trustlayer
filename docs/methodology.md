@@ -1,6 +1,6 @@
 # Methodology
 
-This page summarizes the current trustlayer workflow.
+This page states the methods precisely: what is computed during `compute` and `calibrate`, and under which assumptions the coverage statements hold. For a practical introduction, start with [Choosing a setup](user-guide/choosing-a-setup.md). The method and its application to N-k screening are described in the [paper](https://arxiv.org/abs/2602.07995).
 
 ## Goal
 
@@ -18,7 +18,7 @@ The repository is intentionally post-hoc and model-agnostic: it does not train G
 
 ## Target types
 
-The current implementation supports two target families.
+Two families of targets are supported.
 
 ### Direct prediction targets
 
@@ -33,15 +33,15 @@ Trustlayer reads these directly from graphkit prediction parquets and calibrates
 
 These are not direct model heads. They are computed from predictions plus topology and physical metadata.
 
-The current derived target is:
+The derived target is:
 
 - `line_loading`
 
 Trustlayer computes line loading through the datakit-backed branch-power path and then calibrates the derived quantity in the same conformal framework.
 
-## Current methods
+## Methods
 
-Two calibration families ship today:
+Two calibration methods are implemented:
 
 - `cp_type: element`: stratified conformal prediction (SCP)
 - `cp_type: kernel`: kernel-weighted conformal prediction (KCP)
@@ -58,9 +58,7 @@ They differ in *where the quantile comes from*, not in what is calibrated. Both 
 
 ## `cp_type: element`
 
-This is the residual-quantile conformal workflow used by the repository.
-
-Current characteristics:
+Characteristics:
 
 - separate calibration per target dimension
 - optional stratification by `n_outages`, where the outage count includes inactive branches and inactive generators per scenario
@@ -69,13 +67,12 @@ Current characteristics:
 - optional stratification by `pred_bins`, which groups individual predictions by percentile bins of the model's own outputs and exposes variable-specific columns such as `pred_bins_vm`, `pred_bins_va`, or `pred_bins_line_loading`
 - mixed bus-level and branch-level runs supported through separate target families
 
-`element` is the canonical name used by this workflow.
 
 ## `cp_type: kernel`
 
 Kernel-weighted conformal prediction replaces the fixed quantile with one estimated per test scenario, weighting calibration residuals by how similar their scenario is to the scenario being evaluated.
 
-Current characteristics:
+Characteristics:
 
 - one scenario representation `z(x)` per scenario, pooled from a per-entity embeddings parquet
 - a choice of Euclidean or cosine distance over those representations
@@ -115,7 +112,7 @@ $$
 d_j^2 = 2 - 2\cos(\tilde{z}_\ast, \tilde{z}_j),
 $$
 
-which is the same formula evaluated on normalized inputs. Since standardization has already centered the representations, cosine compares the *direction* in which two scenarios deviate from the mean scenario and discards the magnitude of that deviation. Whether that is desirable is dataset-specific: on IEEE-24 line loading it produced wider intervals than both Euclidean and plain SCP, suggesting the deviation magnitude does carry error information there.
+which is the same formula evaluated on normalized inputs. Since standardization has already centered the representations, cosine compares the *direction* in which two scenarios deviate from the mean scenario and discards the magnitude of that deviation. Whether that is desirable depends on whether the magnitude of the deviation carries information about the model's error, which varies by model and dataset.
 
 Because both metrics are functions of the covariates only, the choice affects efficiency but never validity.
 
@@ -137,7 +134,7 @@ $$
 
 This adapts to local density — tight in well-sampled regions, wider in sparse ones.
 
-Its limitation is that $k_{\mathrm{nn}}$ is not portable across representations. Squared Euclidean distances concentrate as dimension grows, so a fixed $k_{\mathrm{nn}}$ localizes very differently depending on embedding width. On synthetic data with about 1500 calibration scenarios per stratum, $k_{\mathrm{nn}} = 20$ produces a median $n_{\mathrm{eff}}$ of roughly 40 at 2 dimensions, 1045 at 16, and 1498 at 384. At the widest, $k_{\mathrm{nn}} = 20$ and $k_{\mathrm{nn}} = 50$ are indistinguishable: the knob no longer controls anything.
+Its limitation is that $k_{\mathrm{nn}}$ is not portable across representations. Squared Euclidean distances concentrate as dimension grows: the nearest and the farthest calibration scenarios end up at similar distances, so the weights implied by a fixed $k_{\mathrm{nn}}$ approach uniform in wide embeddings, while the same $k_{\mathrm{nn}}$ localizes sharply in narrow ones.
 
 **`bandwidth: n_eff` (default).** The bandwidth is instead solved, per test point, so the resulting weights reach a target effective sample size:
 
@@ -161,7 +158,7 @@ $$
 
 with $n_g$ the number of calibration scenarios behind the estimate (the default tolerance; a fixed tolerance can be set instead). Among eligible candidates the narrowest, relative to the largest candidate, is chosen. If none is eligible, the weights are made uniform within each stratum, which reproduces `cp_type: element`.
 
-Optionally, the distance (Euclidean or cosine) is chosen in the same way, as a second dimension, over a full grid or a random sample of a fixed budget. Folds keep scenarios that share a load profile together (datakit's `load_scenario_idx`). Near-duplicate scenarios split across folds would otherwise make localization look better than it is on new data. Because $n_{\mathrm{eff}}$ is an absolute effective sample size, a target chosen on folds holding $(K-1)/K$ of the data carries over to the final fit on all of it. The result is an empirical, not a formal, coverage check. Options and outputs are described in [configuration.md](configuration.md#choosing-n_eff_target-automatically-n_eff_target-auto).
+Optionally, the distance (Euclidean or cosine) is chosen in the same way, as a second dimension, over a full grid or a random sample of a fixed budget. Folds keep scenarios that share a load profile together (datakit's `load_scenario_idx`). Near-duplicate scenarios split across folds would otherwise make localization look better than it is on new data. Because $n_{\mathrm{eff}}$ is an absolute effective sample size, a target chosen on folds holding $(K-1)/K$ of the data carries over to the final fit on all of it. The result is an empirical, not a formal, coverage check. Options and outputs are described in [Kernel-weighted calibration](user-guide/kernel.md#choosing-the-bandwidth-automatically).
 
 ### Effective sample size and fallback
 
@@ -219,11 +216,11 @@ Under `bandwidth: knn` the lever is `k_nn`; under `bandwidth: n_eff` it is `n_ef
 
 Squared Euclidean distances concentrate as embedding width grows, which weakens localization for very wide representations. The `kcp_n_eff` column written by `calibrate` is the direct diagnostic: if it sits near the stratum size, the kernel is not localizing and the run is effectively `element`.
 
-Because KCP flattens conditional coverage, its *marginal* coverage can sit above `1 - alpha` on skewed difficulty distributions: the easy majority is already near full coverage, so raising coverage on the hard tail lifts the average. Raising `k_nn` is the correction.
+Because KCP flattens conditional coverage, its *marginal* coverage can sit above `1 - alpha` on skewed difficulty distributions: the easy majority is already near full coverage, so raising coverage on the hard tail lifts the average. A larger bandwidth (higher `n_eff_target` or `k_nn`) moves it back toward `element`.
 
 ## Implementation details
 
-This section describes the math the current code actually applies. It is intentionally limited to the quantities needed to understand the artifact and the outputs.
+This section describes the math the code applies. It is intentionally limited to the quantities needed to understand the artifact and the outputs.
 
 ### Notation
 
@@ -270,7 +267,7 @@ $$
 
 where $Q^{\mathrm{CP}}$ denotes the corrected order statistic above, computed over the $n_{e,g}$ residuals of the stratum. The guarantee then holds within each stratum (Mondrian conformal prediction), provided calibration and test scenarios are exchangeable within it.
 
-The currently supported strata are:
+The supported strata are:
 
 - `n_outages`
 - `outage_type`
@@ -421,7 +418,7 @@ Outputs:
 
 ## Screening interpretation
 
-The current screen implementation uses a possible-violation interpretation.
+`screen` uses a possible-violation interpretation.
 
 For an upper limit:
 
@@ -446,7 +443,7 @@ That distinction matters especially for OPF data:
 
 Trustlayer does not assume that all prediction parquets mean the same thing.
 
-Current task-aware behavior includes:
+Task-aware behavior includes:
 
 - PF-specific clamping/correction rules applied behind task adapters
 - OPF support for separate bus and generator prediction artifacts

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from pathlib import Path
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -1045,10 +1046,10 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     assert main(["calibrate", "--config", str(config_path)]) == 0
     assert main(["screen", "--config", str(config_path)]) == 0
 
-    volt_detail = pd.read_csv(screen_dir / "trust_screen_detail_volt.csv")
+    volt_detail = pd.read_parquet(screen_dir / "trust_screen_detail_volt.parquet")
     volt_entity = pd.read_csv(screen_dir / "trust_screen_entity_volt.csv")
     volt_summary = pd.read_csv(screen_dir / "trust_screen_summary_volt.csv")
-    line_detail = pd.read_csv(screen_dir / "trust_screen_detail_line.csv")
+    line_detail = pd.read_parquet(screen_dir / "trust_screen_detail_line.parquet")
     line_summary = pd.read_csv(screen_dir / "trust_screen_summary_line.csv")
 
     assert set(volt_detail["variable"].unique().tolist()) == {"Vm"}
@@ -1114,6 +1115,113 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     assert (
         screen_dir / "screen_figures" / "line_loading_recall_branch_summary.png"
     ).exists()
+
+
+def _screen_config(tmp_path, outputs: list[str]) -> Path:
+    predictions_path = tmp_path / "predictions.parquet"
+    test_predictions_path = tmp_path / "test_predictions.parquet"
+    pf_node_path = tmp_path / "pf_node.parquet"
+    pf_edge_path = tmp_path / "pf_edge.parquet"
+    _write_prediction_fixture(predictions_path)
+    _write_prediction_fixture(test_predictions_path, shift=0.01)
+    _write_ground_truth_fixture(pf_node_path, pf_edge_path)
+    config_path = tmp_path / "trust_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "task_name: StateEstimation",
+                "cp_type: element",
+                "alpha: 0.2",
+                "variables: [Vm, Va, line_loading]",
+                "screen_bounds:",
+                "  Vm: {lower: 0.95, upper: 1.05}",
+                "  line_loading: {upper: 1.0}",
+                *_inputs_yaml(
+                    predictions_path, test_predictions_path, pf_node_path, pf_edge_path
+                ),
+                "outputs:",
+                f"  artifact: {tmp_path / 'intervals.trustlayer'}",
+                *outputs,
+                "commands:",
+                "  screen:",
+                "    variables: [Vm, line_loading]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_screen_finds_mixed_outputs_in_a_shared_directory(tmp_path) -> None:
+    # calibrate writes test_predictions_vm_va_... into the directory, while only
+    # Vm is screened: screen must find the file by family, not by its own variables.
+    calibrated_dir = tmp_path / "calibrated"
+    screen_dir = tmp_path / "screen"
+    config_path = _screen_config(
+        tmp_path,
+        [
+            f"  calibrated_predictions: {calibrated_dir}",
+            f"  screen_dir: {screen_dir}",
+        ],
+    )
+
+    assert main(["compute", "--config", str(config_path)]) == 0
+    assert main(["calibrate", "--config", str(config_path)]) == 0
+    assert main(["screen", "--config", str(config_path)]) == 0
+
+    assert (screen_dir / "trust_screen_summary_volt.csv").exists()
+    assert (screen_dir / "trust_screen_summary_line.csv").exists()
+
+
+def test_screen_finds_mixed_outputs_in_the_default_directory(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = _screen_config(tmp_path, [])
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["compute", "--config", str(config_path)]) == 0
+    assert main(["calibrate", "--config", str(config_path)]) == 0
+    assert main(["screen", "--config", str(config_path)]) == 0
+
+    screen_dir = tmp_path / "trustlayer_outputs" / "stateestimation" / "element"
+    assert (screen_dir / "trust_screen_summary_volt.csv").exists()
+    assert (screen_dir / "trust_screen_summary_line.csv").exists()
+
+
+def test_single_family_run_honours_the_family_specific_output_key(tmp_path) -> None:
+    # calibrate and screen must agree on the path when only *_volt is set.
+    volt_path = tmp_path / "out" / "volt.parquet"
+    config_path = _screen_config(
+        tmp_path,
+        [
+            f"  calibrated_predictions_volt: {volt_path}",
+            f"  screen_dir: {tmp_path / 'screen'}",
+        ],
+    )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace("[Vm, Va, line_loading]", "[Vm, Va]").replace(
+            "[Vm, line_loading]", "[Vm]"
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["compute", "--config", str(config_path)]) == 0
+    assert main(["calibrate", "--config", str(config_path)]) == 0
+    assert volt_path.exists()
+    assert main(["screen", "--config", str(config_path)]) == 0
+    assert (tmp_path / "screen" / "trust_screen_summary_volt.csv").exists()
+
+
+def test_screen_explains_a_missing_calibrated_parquet(tmp_path) -> None:
+    config_path = _screen_config(
+        tmp_path, [f"  calibrated_predictions: {tmp_path / 'empty'}"]
+    )
+    (tmp_path / "empty").mkdir()
+
+    with pytest.raises(FileNotFoundError, match="Run calibrate first"):
+        main(["screen", "--config", str(config_path)])
 
 
 def test_normalize_variables_accepts_mixed_line_and_voltage_selection() -> None:

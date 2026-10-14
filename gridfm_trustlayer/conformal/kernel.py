@@ -102,7 +102,17 @@ class _StratumBank:
 
 @dataclass
 class KernelIntervalCalibrator:
-    """Kernel-weighted per-entity conformal intervals localized in embedding space."""
+    """Kernel-weighted conformal intervals (`cp_type: kernel`).
+
+    For each test scenario, calibration residuals are weighted by a Gaussian
+    kernel on the distance between scenario embeddings, within the scenario's
+    stratum, and the bound is a weighted quantile with a point mass for the
+    unseen test residual. The margin therefore adapts to each scenario.
+    Coverage is checked empirically, not guaranteed in finite samples.
+
+    Create it with `fit`; the artifact keeps all calibration residuals and
+    standardized embeddings.
+    """
 
     alpha: float
     entity_ids: np.ndarray
@@ -166,7 +176,37 @@ class KernelIntervalCalibrator:
         system_load_n_bins: int | None = None,
         system_load_bin_edges: np.ndarray | None = None,
     ) -> KernelIntervalCalibrator:
-        """Build the calibration bank used for kernel-weighted interval estimation."""
+        """Store the calibration residuals and embeddings that `predict_intervals` weights.
+
+        Args:
+            predictions: Calibration predictions.
+            ground_truth: True values for the same scenarios and entities.
+            alpha: Two-sided miscoverage level; `0.1` gives 90% intervals.
+            channel_names: Variables to calibrate.
+            strat: Optional scenario stratification (`"n_outages"`,
+                `"outage_type"` or `"system_load_bin"`); the kernel localizes
+                within each stratum. `"pred_bins"` is not supported.
+            embeddings: `(n_scenarios, d)` scenario embeddings of the
+                calibration scenarios, in the order of `predictions`.
+            embedding_pooling: Name of the pooling that produced `embeddings`,
+                stored so that test embeddings can be pooled the same way.
+            k_nn: Neighbour rank that sets the bandwidth, for `bandwidth="knn"`.
+            n_eff_min: Effective sample size below which a scenario falls back
+                to the stratum-wide quantile.
+            bandwidth: `"n_eff"` (solve for `n_eff_target`) or `"knn"`.
+            n_eff_target: Target effective sample size for `bandwidth="n_eff"`;
+                600 when not given.
+            distance: `"euclidean"` or `"cosine"`.
+            system_load_n_bins: Number of load bins, for `"system_load_bin"`.
+            system_load_bin_edges: Stored load-bin edges, for `"system_load_bin"`.
+
+        Returns:
+            The fitted calibrator.
+
+        Raises:
+            ValueError: If inputs are misaligned, an option is invalid, or
+                `strat="pred_bins"`.
+        """
 
         _validate_alpha(alpha)
         _validate_entity_alignment(
@@ -313,7 +353,17 @@ class KernelIntervalCalibrator:
         self,
         predictions: PredictionSet | ChannelSet,
     ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """Return kernel-weighted lower/upper interval arrays for each channel."""
+        """Scenario-specific intervals for new predictions.
+
+        Args:
+            predictions: Predictions with the same entities as at fit time, with
+                `scenario_embeddings` pooled like the calibration embeddings
+                and, with stratification, the stratum column.
+
+        Returns:
+            `{variable: (lower, upper)}`, two arrays of the predictions' shape.
+            Per-scenario diagnostics are available afterwards in `diagnostics`.
+        """
 
         _validate_entity_alignment(self.entity_ids, _get_entity_ids(predictions))
         test_embeddings = _require_scenario_embeddings(predictions)
@@ -401,7 +451,13 @@ class KernelIntervalCalibrator:
 
     @property
     def diagnostics(self) -> dict[str, np.ndarray]:
-        """Per-test-scenario KCP diagnostics from the last `predict_intervals` call."""
+        """Per-scenario diagnostics of the last `predict_intervals` call.
+
+        `{"n_eff": ..., "kernel_bandwidth_sq": ..., "kernel_fallback": ...}`, one
+        value per test scenario: the effective sample size of its weights, the
+        squared bandwidth used, and whether it fell back to the stratum-wide
+        quantile for at least one entity.
+        """
 
         return self._diagnostics
 
@@ -762,8 +818,9 @@ def _solve_bandwidth_for_n_eff(
 
     `n_eff` increases monotonically from 1 (all weight on the nearest
     calibration scenario) to the stratum size (uniform weights), so a
-    log-space bisection is well posed. All rows in the block are solved in
-    lockstep so the work stays vectorized.
+    log-space bisection is well posed. The rows of a block are solved together
+    so the work stays vectorized, but each row stops as soon as it converges,
+    so its bandwidth does not depend on the other rows of the block.
     """
 
     positive = np.where(distances > 0.0, distances, np.inf)
@@ -773,16 +830,20 @@ def _solve_bandwidth_for_n_eff(
 
     lower = nearest / _N_EFF_BRACKET_SPAN
     upper = farthest * _N_EFF_BRACKET_SPAN
-    midpoint = np.sqrt(lower * upper)
+    bandwidth = np.sqrt(lower * upper)
+    active = np.arange(distances.shape[0])
     for _ in range(_N_EFF_SOLVE_MAX_ITER):
-        midpoint = np.sqrt(lower * upper)
-        n_eff = _effective_sample_size(distances, midpoint)
-        if np.all(np.abs(n_eff - target) <= _N_EFF_SOLVE_RTOL * target):
-            break
+        midpoint = np.sqrt(lower[active] * upper[active])
+        bandwidth[active] = midpoint
+        n_eff = _effective_sample_size(distances[active], midpoint)
+        converged = np.abs(n_eff - target) <= _N_EFF_SOLVE_RTOL * target
         below_target = n_eff < target
-        lower = np.where(below_target, midpoint, lower)
-        upper = np.where(below_target, upper, midpoint)
-    return midpoint.astype(FLOAT32_DTYPE, copy=False)
+        lower[active] = np.where(below_target, midpoint, lower[active])
+        upper[active] = np.where(below_target, upper[active], midpoint)
+        active = active[~converged]
+        if active.size == 0:
+            break
+    return bandwidth.astype(FLOAT32_DTYPE, copy=False)
 
 
 def _resolve_chunk_size(n_calibration: int, n_elements: int) -> int:

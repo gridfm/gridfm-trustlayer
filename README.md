@@ -1,147 +1,98 @@
-# gridfm-trustlayer
+<p align="center">
+  <img src="https://raw.githubusercontent.com/gridfm/gridfm-trustlayer/refs/heads/main/docs/figs/gridfm-trustlayer-logo-1024.png" alt="gridfm-trustlayer logo" style="width: 40%; height: auto;"/>
+  <br/>
+</p>
 
-Conformal trustworthiness layer for GridFM foundation models.
+<p align="center" style="font-size: 25px;">
+    <b>gridfm-trustlayer</b>
+</p>
 
-**Statistically valid error bars on grid-state predictions, without retraining the model.** Give it a model's predictions on held-out scenarios with a known AC solution, and it returns calibrated bounds on bus voltages and line loadings that contain the true value with a chosen probability, for example 90%. It works on top of any trained model, including contingencies the model never saw in training. In N-k screening, a line is flagged when its upper bound exceeds its rating, which turns a point prediction into a conservative screen with a controlled miss rate.
+[![CI Build](https://github.com/gridfm/gridfm-trustlayer/actions/workflows/ci-build.yaml/badge.svg)](https://github.com/gridfm/gridfm-trustlayer/actions/workflows/ci-build.yaml)
+[![Docs](https://img.shields.io/badge/docs-available-brightgreen)](https://gridfm.github.io/gridfm-trustlayer/)
+![Python](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.12-blue)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
-The layer offers two methods: stratified split-conformal prediction (`cp_type: element`), with a finite-sample coverage guarantee under exchangeability of calibration and test scenarios, and kernel-weighted conformal prediction (`cp_type: kernel`), which adapts the margin to each scenario and whose coverage is verified empirically. See [`docs/methodology.md`](docs/methodology.md) and the paper listed under [Reference](#reference).
+**Statistically valid error bars on grid-state predictions, without retraining the model.**
 
-> [!NOTE]
-> This is a pre-1.0 release. The statistical core is tested, but the Python API, configuration keys and artifact formats may still change between minor versions; check [`CHANGELOG.md`](CHANGELOG.md) before upgrading.
+`gridfm-trustlayer` wraps the point predictions of a power-system foundation model, such as a GridFM power-flow model, in intervals that contain the true AC value with a probability you choose, for example 90%. It learns how large the model's errors are on scenarios with a known solution, and turns them into bounds on bus voltages and line loadings for new scenarios, including contingencies the model never saw in training.
 
-## Scope
+In N-k contingency screening, a line is flagged when the upper bound of its predicted loading exceeds its rating. Only flagged contingencies need a full AC power flow, and the share of real overloads that slip through is controlled by the coverage level.
 
-- Consume prediction parquet artifacts produced by GridFM model workflows.
-- Support direct calibration targets from task outputs, including quantities such as `Vm`, `Va`, and other task-specific continuous channels.
-- Support derived calibration targets computed from predictions and topology, including quantities such as line loading.
-- Use the established GridFM validation pipeline as the source of truth for line-loading computation.
-- Keep the statistical core independent from Lightning, PyG, and GPU-bound dependencies.
+📖 **Documentation: <https://gridfm.github.io/gridfm-trustlayer/>**
 
-## Current Status
+## Features
 
-The current implementation exposes two conformal method families:
-
-- `cp_type: element`
-- `cp_type: kernel`
-
-`element` is the canonical label for the residual-quantile interval workflow: residuals are reduced to a fixed quantile table at `compute` time and looked up at `calibrate` time.
-
-`kernel` is kernel-weighted conformal prediction (KCP). Instead of a fixed table, the artifact stores the calibration residual bank plus a scenario representation `z(x)`, and the quantile is estimated per test scenario by weighting calibration residuals with a Gaussian kernel over embedding distance. This yields tighter, approximately conditional bounds at the cost of a larger artifact and a small amount of work at application time. See `docs/methodology.md` for the math and `docs/configuration.md` for the keys.
-
-The distance over scenario representations is `distance: euclidean` (default) or `distance: cosine`. Cosine is squared Euclidean distance on unit-norm vectors, so it keeps only the *direction* in which a scenario deviates from the mean scenario and discards the size of that deviation.
-
-The kernel bandwidth can be selected two ways:
-
-- `bandwidth: n_eff` (default): `h^2` is solved per test scenario so the kernel weights reach a target effective sample size `n_eff_target`, 600 by default. This is invariant to embedding width and stratum size, which `k_nn` is not. `n_eff_target: auto` (off by default) chooses the target by cross-validation on the calibration set instead, requiring coverage first and then the narrowest intervals (see `docs/configuration.md`).
-- `bandwidth: knn`: `h^2` is the squared distance to the `k_nn`-th nearest calibration scenario.
-
-The two families compose with stratification rather than replacing it: with `cp_type: kernel` and `strat: n_outages`, the kernel localizes *within* each outage stratum.
-
-The current implementation also exposes optional residual-stratification modes:
-
-- `strat: n_outages`
-- `strat: outage_type`
-- `strat: system_load_bin`
-- `strat: pred_bins`
-
-When enabled, residual quantiles are fitted and applied per scenario outage count, where `n_outages` includes both inactive branches and inactive generators in the raw datakit scenario.
-
-`outage_type` groups scenarios into four coarse outage regimes: `none`, `branch_only`, `gen_only`, and `mixed`.
-
-`system_load_bin` groups scenarios by percentile bins of total active load, where `system_load_n_bins` controls the requested number of bins learned from the compute/calibration scenarios. Output labels are written as percentile ranges with stored cut-point hints, for example `p00-p20 (<1450)` or `p80-p100 (>=1920)`.
-
-`pred_bins` groups individual predictions by percentile bins of the model's own outputs. Trustlayer learns percentile cut points per calibrated variable from all calibration predictions during `compute`, stores them in the artifact, and reapplies them to each prediction value during `calibrate`. The calibrated outputs expose variable-specific columns such as `pred_bins_vm`, `pred_bins_va`, and `pred_bins_line_loading`.
-
-Today the repository supports three CLI verbs:
-
-- `compute`: fit interval calibrators and save a `.trustlayer` artifact
-- `calibrate`: apply saved intervals to prediction artifacts and write calibrated parquet outputs plus analysis CSVs and figures
-- `screen`: compare calibrated intervals against operating bounds and write confusion-matrix style summaries and plots
-
-The current implementation can run on:
-
-- direct voltage variables such as `Vm` and `Va`
-- derived branch loading via `line_loading`
-- mixed runs that request both voltage and loading variables from one YAML config
-
-### Kernel-weighted calibration inputs
-
-`cp_type: kernel` needs one scenario representation per scenario. Trustlayer reads a per-entity embeddings parquet (columns `scenario`, `bus`, and `emb_*`) such as the one graphkit writes with `predict --get_embeddings`, and pools it to one vector per scenario. `embedding_pooling` selects the strategy (`mean` by default, plus `max`, `meanmax`, and `concat`).
+- **Two conformal methods.** Stratified split-conformal prediction (`cp_type: element`), with a finite-sample coverage guarantee when calibration and test scenarios are exchangeable. Kernel-weighted conformal prediction (`cp_type: kernel`), which adapts the margin to each scenario using the model's embeddings and whose coverage is verified empirically.
+- **Stratification** by number of outages, outage type, system load or predicted value, so bounds widen where the model is less accurate.
+- **Voltages and line loading.** `Vm` and `Va` are calibrated directly; `line_loading` is derived from the predicted voltages with datakit's branch-flow routine.
+- **Screening** against operating limits, with caught, missed and false alarms counted against the true AC solution.
+- **Works with any model** whose predictions follow the GridFM parquet layout, or with plain NumPy arrays through the Python API. CPU only.
 
 ## Installation
 
-Requires Python 3.10-3.12. To use the package:
+Requires Python 3.10–3.12.
 
 ```bash
 python -m pip install "git+https://github.com/gridfm/gridfm-trustlayer"
 ```
 
-For development, clone the repository and install it in editable mode:
+Optional extras: `graphkit` (needed for `line_loading`) and `interactive` (the Jupyter config builder):
 
 ```bash
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev,test]"
+python -m pip install "gridfm-trustlayer[graphkit,interactive] @ git+https://github.com/gridfm/gridfm-trustlayer"
 ```
 
-If you also want the datakit-backed loading path available in the same environment, install the optional extras:
+For development: `python -m pip install -e ".[dev,test]"` in a clone, then `pre-commit install`.
 
-```bash
-python -m pip install -e ".[graphkit,dev,test]"
-```
+## Quick start
 
-## Quick Start
+You need two **separately generated** datasets with known AC solutions, for example two [gridfm-datakit](https://github.com/gridfm/gridfm-datakit) runs with different seeds, each predicted with your model through [gridfm-graphkit](https://github.com/gridfm/gridfm-graphkit). Trustlayer is fitted on the first (calibration) and evaluated on the second (test); it never splits one dataset itself.
 
-The CLI is config-first: every verb requires `--config`, and individual CLI flags act only as overrides of specific YAML values. To write the config, start from one of the [example configs](#example-configs) or generate it with the config-builder notebook, [`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb), which shows only the options that apply to your choices and validates the result (see [Building the config interactively](#building-the-config-interactively)).
-
-Minimal workflow:
-
-```bash
-gridfm_trustlayer compute --config path/to/trust_config.yaml
-gridfm_trustlayer calibrate --config path/to/trust_config.yaml
-gridfm_trustlayer screen --config path/to/trust_config.yaml
-```
-
-The layer is always fitted on one dataset and evaluated on another, so the config names two:
+Describe the run in a YAML config:
 
 ```yaml
+task_name: PowerFlow
+cp_type: element
+strat: n_outages          # separate bounds per contingency level
+alpha: 0.1                # 90% intervals
+variables: [Vm, Va, line_loading]
+screen_bounds:
+  Vm: {lower: 0.95, upper: 1.05}
+  line_loading: {upper: 1.0}
+
 inputs:
-  calibration:          # fitted on by `compute`
-    predictions: path/to/calibration/predictions.parquet
-    pf_node: path/to/calibration/raw/bus_data.parquet
-    pf_edge: path/to/calibration/raw/branch_data.parquet
-  test:                 # applied to and evaluated on by `calibrate` and `screen`
-    predictions: path/to/test/predictions.parquet
-    pf_node: path/to/test/raw/bus_data.parquet
-    pf_edge: path/to/test/raw/branch_data.parquet
+  calibration:
+    predictions: predictions/calibration/case118_ieee_predictions.parquet
+    pf_node: data_calibration/case118_ieee/raw/bus_data.parquet
+    pf_edge: data_calibration/case118_ieee/raw/branch_data.parquet
+  test:
+    predictions: predictions/test/case118_ieee_predictions.parquet
+    pf_node: data_test/case118_ieee/raw/bus_data.parquet
+    pf_edge: data_test/case118_ieee/raw/branch_data.parquet
+
+outputs:
+  artifact: trustlayer_outputs/case118.trustlayer
+  calibrated_predictions: trustlayer_outputs/calibrated
+  screen_dir: trustlayer_outputs/screen
+
+commands:
+  screen:
+    variables: [Vm, line_loading]
 ```
 
-Generate them independently, for example two GridFM-datakit runs with different seeds. Trustlayer never splits one dataset internally, and it refuses to evaluate on the data it was fitted on, because coverage measured there says nothing about new scenarios.
-
-Typical run structure:
-
-1. `compute` reads the calibration predictions and ground truth and fits one or more interval calibrators.
-2. `calibrate` loads the saved `.trustlayer` artifact, applies it to the test predictions, and reports coverage against the test ground truth.
-3. `screen` evaluates the calibrated test intervals against operating bounds such as `Vm in [0.95, 1.05]` or `line_loading <= 1.0`.
-
-### Building the config interactively
-
-The config has many options, and which ones apply depends on earlier choices (kernel options, bin counts, screening bounds, OPF generator files). A Jupyter form builds it for you:
+and run the three steps:
 
 ```bash
-python -m pip install "gridfm-trustlayer[interactive]"
+gridfm_trustlayer compute   --config trust_config.yaml   # fit on the calibration set
+gridfm_trustlayer calibrate --config trust_config.yaml   # bounds + coverage on the test set
+gridfm_trustlayer screen    --config trust_config.yaml   # caught / missed violations
 ```
 
-```python
-from gridfm_trustlayer.interactive import config_builder
-
-config_builder()
-```
-
-It is also available as [`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb). Options appear only when they apply, each choice has a one-line explanation, a live preview shows the YAML, and the config is checked with the CLI's own validation before it can be saved. The same logic is available without Jupyter as `gridfm_trustlayer.interactive.build_config(...)`.
+To write the config, use the Jupyter **config builder**, which shows only the options that apply to your choices and validates the result ([`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb)), or start from one of the ten [example configs](examples/config/). The [Quick start guide](https://gridfm.github.io/gridfm-trustlayer/getting-started/quickstart/) walks through every step, including data generation and how to read the results.
 
 ## Python API
 
-The calibrators can also be used directly from Python, with any model's predictions arranged as (scenario x entity) arrays:
+The calibrators also work directly on NumPy arrays, with any model's predictions arranged as (scenario × entity) arrays:
 
 ```python
 import numpy as np
@@ -167,7 +118,7 @@ def channel_set(values, rows):
 
 
 # Independent synthetic draws, so halving them is a valid calibration/test split.
-# With real data, use separately generated datasets (see Quick Start).
+# With real data, use separately generated datasets (see Quick start).
 calibration = np.arange(n_scenarios) < 1000
 calibrator = NaiveIntervalCalibrator.fit(
     channel_set(predicted, calibration),
@@ -187,90 +138,36 @@ print(f"coverage: {coverage:.3f}")  # about 0.90
 overloaded = upper > 1.0
 ```
 
-Two conventions worth knowing:
-
-- **`alpha` is two-sided.** Each tail gets `alpha / 2`, so `alpha=0.1` gives 90% intervals whose upper bound alone holds with probability at least 95%. For a one-sided screen at level `1 - a` (for example, an upper bound on line loading), pass `alpha = 2 * a` and use only the upper bound.
-- **Too few calibration samples give infinite bounds.** A stratum needs at least `ceil(1 / (alpha / 2)) - 1` valid residuals (19 at `alpha=0.1`) for a finite bound. With fewer, the bound is `+inf` / `-inf` rather than a falsely narrow interval; merge strata or add calibration scenarios if that happens.
-
-`load_predictions`, `load_ground_truth`, `load_scenario_embeddings` and `compute_line_loading` read GridFM parquet artifacts into these arrays (`compute_line_loading` uses datakit's branch-flow routine and needs the `graphkit` extra), and `save_interval_artifact` / `load_interval_artifact` persist a fitted calibrator.
-
-## CLI Summary
-
-Command entrypoint:
-
-```bash
-gridfm_trustlayer <command> [OPTIONS]
-```
-
-Available commands:
-
-- `compute`: fit one or more interval calibrators and save a `.trustlayer` artifact
-- `calibrate`: apply a saved artifact and write calibrated parquet outputs plus analysis CSVs and figures
-- `screen`: evaluate calibrated intervals against operating bounds and write screening summaries and figures
-
-For full option tables and command behavior, see:
-
-- `docs/cli.md`
-
-## Example Configs
-
-The repository ships a matrix of runnable example configs, one per option combination:
-
-- `examples/config/` — see [`examples/config/README.md`](examples/config/README.md) for the full table
-- `examples/notebooks/config_builder.ipynb` — a Jupyter form that builds and validates a config for your own choices (see [Building the config interactively](#building-the-config-interactively))
-
-| Config | Demonstrates |
-| --- | --- |
-| `element_global_pf.yaml` | Smallest useful run: one global quantile table |
-| `element_n_outages_pf.yaml` | Canonical N-k screening, stratified by contingency severity |
-| `element_outage_type_pf.yaml` | Stratified by outage regime instead of count |
-| `element_system_load_bin_pf.yaml` | Stratified by percentile bins of total demand |
-| `element_pred_bins_pf.yaml` | Stratified by percentile bins of the model's own predictions |
-| `kernel_knn_pf.yaml` | Kernel-weighted CP with the k-nearest-neighbour bandwidth |
-| `kernel_n_eff_pf.yaml` | Kernel-weighted CP with a dimension-portable bandwidth |
-| `kernel_n_eff_tuned_pf.yaml` | Same, with the target chosen by cross-validation on the calibration set |
-| `kernel_cosine_pf.yaml` | Kernel-weighted CP with cosine distance |
-| `element_n_outages_opf.yaml` | OPF artifacts with near-limit screening bounds |
-
-The YAML carries:
-
-- shared run metadata such as `task_name`, `cp_type`, `strat`, and `alpha`
-- input paths for predictions and ground truth
-- output paths for artifacts, calibrated parquets, and screening outputs
-- `screen_bounds` for bounded variables such as `Vm` and `line_loading`
-- optional command-specific overrides under `commands`
-
-For the full YAML reference, example structure, and mixed-run path rules, see:
-
-- `docs/configuration.md`
-
-## Generated Outputs
-
-The current workflow produces:
-
-- `.trustlayer` artifacts from `compute` (JSON for `element`, a compressed binary container for `kernel`)
-- calibrated voltage and/or line-loading parquet outputs from `calibrate`
-- voltage and line analysis CSVs plus figures from `calibrate`
-- voltage and line screening CSVs plus figures from `screen`
-
-## Current Limits
-
-- Only `cp_type: element` and `cp_type: kernel` are implemented today.
-- Only `strat: n_outages`, `strat: outage_type`, `strat: system_load_bin`, and `strat: pred_bins` are implemented today when stratification is requested.
-- `cp_type: kernel` requires `embeddings` in both datasets, and it does not support `strat: pred_bins` (prediction bins are element-wise while kernel localization is scenario-wise).
-- `bandwidth: knn` and `bandwidth: n_eff` are the two implemented bandwidth-selection modes. `n_eff_target` can be chosen automatically by cross-validation on the calibration set (`n_eff_target: auto`); `k_nn` cannot, and choosing it by hand requires a tuning partition disjoint from the evaluation set.
-- Mixed bus-level and branch-level workflows are supported, but their outputs remain intentionally split because they live on different entity axes.
+See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files.
 
 ## Documentation
 
-- `docs/index.md`: project overview
-- `docs/methodology.md`: current method, workflow, implementation details, and screening semantics
-- `docs/cli.md`: detailed CLI reference
-- `docs/configuration.md`: YAML configuration reference
-- `docs/schemas.md`: current schema and loading-path notes
-- `examples/notebooks/config_builder.ipynb`: interactive config builder
+- [Getting started](https://gridfm.github.io/gridfm-trustlayer/getting-started/installation/): installation, quick start, config builder
+- [User guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/data/): preparing the data, choosing a setup, kernel-weighted calibration, reading the results, troubleshooting
+- [Reference](https://gridfm.github.io/gridfm-trustlayer/reference/cli/): CLI, configuration keys, data schemas, Python API
+- [Methodology](https://gridfm.github.io/gridfm-trustlayer/methodology/): the statistics behind both methods
 
-## Reference
+The sources are in [`docs/`](docs/); `mkdocs serve` builds the site locally.
 
-- Paper: https://arxiv.org/pdf/2602.07995
-- If you use this software, please cite it as described in [`CITATION.cff`](CITATION.cff).
+> [!NOTE]
+> This is a pre-1.0 release. The statistical core is tested, but the Python API, configuration keys and artifact formats may still change between minor versions; check [`CHANGELOG.md`](CHANGELOG.md) before upgrading.
+
+## Citation
+
+If you use `gridfm-trustlayer` in your research, please cite:
+
+```bibtex
+@article{alcantara2026trustworthiness,
+  title={Trustworthiness Layer for Foundation Models in Power Systems: Application to N-k Contingency Screening},
+  author={Antonio Alcántara and Spyros Chatzivasileiadis},
+  journal={arXiv preprint arXiv:2602.07995},
+  year={2026},
+  url={https://arxiv.org/abs/2602.07995}
+}
+```
+
+GitHub's "Cite this repository" button uses [`CITATION.cff`](CITATION.cff).
+
+## License
+
+Apache License 2.0; see [`LICENSE`](LICENSE).

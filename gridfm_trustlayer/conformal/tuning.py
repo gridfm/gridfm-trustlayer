@@ -66,7 +66,19 @@ REASON_NO_CANDIDATE = (
 
 @dataclass(frozen=True)
 class TuningOptions:
-    """Validated `tuning:` block of the config."""
+    """Options of the cross-validated bandwidth choice (the config's `tuning:` block).
+
+    Attributes:
+        folds: Number of cross-validation folds within the calibration set.
+        grid: Candidate `n_eff_target` values for `search="grid"`.
+        distances: Distances to compare; `None` keeps the given distance.
+        search: `"grid"` or `"random"`.
+        budget: Number of settings tried by `search="random"`.
+        n_eff_range: `(low, high)` range for `search="random"`.
+        group_by: `"auto"`, `"load_scenario_idx"` or `"none"`.
+        seed: Seed of the fold assignment and the random search.
+        coverage_tolerance: Allowed shortfall below `1 - alpha`, or `"auto"`.
+    """
 
     folds: int = DEFAULT_TUNING_FOLDS
     grid: tuple[float, ...] = DEFAULT_TUNING_GRID

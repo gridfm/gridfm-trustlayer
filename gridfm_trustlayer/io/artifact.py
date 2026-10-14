@@ -36,7 +36,15 @@ def save_interval_artifact(
     calibrator: IntervalCalibrator,
     output_path: str,
 ) -> None:
-    """Persist a single interval calibrator to one artifact file."""
+    """Write a fitted calibrator to a `.trustlayer` file.
+
+    JSON for `NaiveIntervalCalibrator`, a compressed NumPy archive for
+    `KernelIntervalCalibrator`; the format the CLI writes.
+
+    Args:
+        calibrator: The fitted calibrator.
+        output_path: Destination file; parent directories are created.
+    """
 
     save_interval_artifacts({_artifact_key(calibrator): calibrator}, output_path)
 
@@ -76,7 +84,17 @@ def save_interval_artifacts(
 
 
 def load_interval_artifact(artifact_path: str) -> IntervalCalibrator:
-    """Load a single interval calibrator from an artifact file."""
+    """Read a calibrator from a `.trustlayer` file.
+
+    Args:
+        artifact_path: A file written by `save_interval_artifact` or `compute`.
+
+    Returns:
+        The calibrator, of the class it was saved from.
+
+    Raises:
+        ValueError: If the file holds several calibrators (a mixed CLI run).
+    """
 
     calibrators = load_interval_artifacts(artifact_path)
     if len(calibrators) != 1:

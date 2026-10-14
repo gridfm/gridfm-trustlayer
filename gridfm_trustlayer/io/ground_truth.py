@@ -10,16 +10,57 @@ from typing import Any
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
+from gridfm_trustlayer.io.parquet import open_dataset, read_frame
+
 FLOAT32_DTYPE = np.dtype(np.float32)
 OUTAGE_TYPE_NONE = np.int32(0)
 OUTAGE_TYPE_BRANCH_ONLY = np.int32(1)
 OUTAGE_TYPE_GEN_ONLY = np.int32(2)
 OUTAGE_TYPE_MIXED = np.int32(3)
 
+_BRANCH_COLUMNS = (
+    "scenario",
+    "idx",
+    "from_bus",
+    "to_bus",
+    "rate_a",
+    "br_status",
+    "Yff_r",
+    "Yff_i",
+    "Yft_r",
+    "Yft_i",
+    "Ytf_r",
+    "Ytf_i",
+    "Ytt_r",
+    "Ytt_i",
+)
+_BUS_COLUMNS = ("scenario", "bus", "Vm", "Va", "Pd", "PQ", "PV", "REF", "vn_kv")
+
 
 @dataclass
 class GroundTruthSet:
-    """Ground-truth state and topology aligned by scenario, bus, and branch."""
+    """True AC solution and network data of one dataset, from `load_ground_truth`.
+
+    Attributes:
+        scenario_ids: Scenario identifiers, shape `(n_scenarios,)`.
+        bus_ids: Bus identifiers, shape `(n_buses,)`.
+        branch_ids: Branch identifiers, shape `(n_branches,)`.
+        n_outages: Out-of-service branches plus generators, per scenario.
+        outage_type: Outage regime per scenario: 0 `none`, 1 `branch_only`,
+            2 `gen_only`, 3 `mixed`.
+        system_load: Total active load per scenario.
+        removed_mask: `(n_scenarios, n_branches)`, `True` for out-of-service branches.
+        Vm: True voltage magnitudes, `(n_scenarios, n_buses)`.
+        Va: True voltage angles in radians, `(n_scenarios, n_buses)`.
+        channels: Every true bus variable, including `Vm` and `Va`.
+        admittances: Branch admittance coefficients, `(n_scenarios, n_branches)` each.
+        f_bus: From-bus of each branch.
+        t_bus: To-bus of each branch.
+        rate_a: Rating of each branch.
+        base_kv: Base voltage of each bus.
+        sn_mva: System base power.
+        bus_type_masks: Boolean `PQ`, `PV` and `REF` masks.
+    """
 
     scenario_ids: np.ndarray
     bus_ids: np.ndarray
@@ -40,6 +81,83 @@ class GroundTruthSet:
     bus_type_masks: dict[str, np.ndarray]
 
 
+@dataclass(frozen=True)
+class GroundTruthReference:
+    """Dataset-wide facts that loading a subset of scenarios must not recompute.
+
+    `n_outages` counts the branches and generators out of service among those in
+    service in at least one scenario, and `Va` is converted from degrees when
+    some angle exceeds 2 pi. Both depend on which scenarios are loaded, so a
+    reader that loads a dataset block by block computes them once, with
+    `scan_ground_truth_reference`, and passes them to `load_ground_truth`.
+    """
+
+    branch_ids: np.ndarray
+    branch_in_service: np.ndarray
+    generator_ids: np.ndarray | None
+    generator_in_service: np.ndarray | None
+    va_in_degrees: bool
+
+
+def scan_ground_truth_reference(
+    pf_node_parquet: str,
+    pf_edge_parquet: str,
+) -> GroundTruthReference:
+    """Compute a `GroundTruthReference` over a whole dataset, one batch at a time."""
+
+    branch_ids, branch_in_service = _scan_in_service(pf_edge_parquet, "br_status")
+    generator_path = _default_generator_parquet_path(pf_node_parquet, pf_edge_parquet)
+    generator_ids = generator_in_service = None
+    if generator_path is not None:
+        generator_ids, generator_in_service = _scan_in_service(
+            generator_path, "in_service"
+        )
+    va_max = 0.0
+    for batch in open_dataset(pf_node_parquet).to_batches(columns=["Va"]):
+        values = np.abs(batch.column(0).to_numpy(zero_copy_only=False))
+        if values.size and np.isfinite(values).any():
+            va_max = max(va_max, float(np.nanmax(values)))
+    return GroundTruthReference(
+        branch_ids=branch_ids,
+        branch_in_service=branch_in_service,
+        generator_ids=generator_ids,
+        generator_in_service=generator_in_service,
+        va_in_degrees=va_max > float(2.0 * np.pi),
+    )
+
+
+def _scan_in_service(path: str, status_column: str) -> tuple[np.ndarray, np.ndarray]:
+    """Element ids, and whether each is in service in at least one scenario."""
+
+    in_service: dict[int, bool] = {}
+    for batch in open_dataset(path).to_batches(columns=["idx", status_column]):
+        ids = batch.column(0).to_numpy(zero_copy_only=False).astype(np.int64)
+        active = batch.column(1).to_numpy(zero_copy_only=False) == 1
+        unique_ids, inverse = np.unique(ids, return_inverse=True)
+        any_active = np.zeros(len(unique_ids), dtype=bool)
+        np.logical_or.at(any_active, inverse, active)
+        for element, flag in zip(unique_ids.tolist(), any_active.tolist(), strict=True):
+            in_service[element] = in_service.get(element, False) or flag
+    element_ids = np.array(sorted(in_service), dtype=np.int64)
+    return element_ids, np.array(
+        [in_service[i] for i in element_ids.tolist()], dtype=bool
+    )
+
+
+def _reference_in_service(
+    reference_ids: np.ndarray,
+    reference_in_service: np.ndarray,
+    element_ids: np.ndarray,
+) -> np.ndarray:
+    positions = np.searchsorted(reference_ids, element_ids)
+    positions = np.clip(positions, 0, max(len(reference_ids) - 1, 0))
+    if len(reference_ids) == 0 or not np.array_equal(
+        reference_ids[positions], element_ids
+    ):
+        raise ValueError("Ground-truth elements do not match the dataset reference.")
+    return reference_in_service[positions][None, :]
+
+
 def load_ground_truth(
     pf_node_parquet: str,
     pf_edge_parquet: str,
@@ -49,40 +167,41 @@ def load_ground_truth(
     scenario_ids: Iterable[int] | None = None,
     channel_names: Iterable[str] | None = None,
     sn_mva: float = 100.0,
+    reference: GroundTruthReference | None = None,
 ) -> GroundTruthSet:
-    """Load datakit raw bus and branch parquets into aligned arrays.
+    """Read datakit's raw bus and branch parquets into arrays.
 
-    The current datakit raw parquet files already contain the bus-level and
-    branch-level metadata required for Phase 2. Optional CSV paths are kept in
-    the signature for future compatibility, but the loader prefers the parquet
-    content when it is available.
+    Args:
+        pf_node_parquet: Bus ground truth, datakit `raw/bus_data.parquet`.
+        pf_edge_parquet: Branch ground truth, datakit `raw/branch_data.parquet`.
+        bus_params_csv: Unused; kept for compatibility.
+        edge_params_csv: Unused; kept for compatibility.
+        scenario_ids: Scenarios to load, e.g. `predictions.scenario_ids`, so
+            that the result is aligned with the predictions. All when not given.
+        channel_names: Bus variables to load besides `Vm` and `Va`.
+        sn_mva: System base power.
+        reference: Dataset-wide outage reference and angle unit, from
+            `scan_ground_truth_reference`, when loading a subset of a dataset
+            block by block. Computed from the loaded scenarios when not given.
+
+    Returns:
+        The ground truth. `Va` is converted to radians if stored in degrees.
     """
 
-    bus_frame = pd.read_parquet(pf_node_parquet)
-    branch_frame = pd.read_parquet(pf_edge_parquet)
-    _require_columns(bus_frame, ("scenario", "bus", "Vm", "Va"))
-    _require_columns(
-        branch_frame,
-        (
-            "scenario",
-            "idx",
-            "from_bus",
-            "to_bus",
-            "rate_a",
-            "br_status",
-            "Yff_r",
-            "Yff_i",
-            "Yft_r",
-            "Yft_i",
-            "Ytf_r",
-            "Ytf_i",
-            "Ytt_r",
-            "Ytt_i",
-        ),
+    requested_channels = (
+        ["Pg", "Qg"] if channel_names is None else [str(name) for name in channel_names]
     )
+    bus_frame = read_frame(
+        pf_node_parquet,
+        [*_BUS_COLUMNS, *requested_channels],
+        scenario_ids=scenario_ids,
+    )
+    branch_frame = read_frame(
+        pf_edge_parquet, _BRANCH_COLUMNS, scenario_ids=scenario_ids
+    )
+    _require_columns(bus_frame, ("scenario", "bus", "Vm", "Va"))
+    _require_columns(branch_frame, _BRANCH_COLUMNS)
 
-    bus_frame = bus_frame.copy()
-    branch_frame = branch_frame.copy()
     bus_frame["scenario"] = bus_frame["scenario"].astype(np.int64)
     bus_frame["bus"] = bus_frame["bus"].astype(np.int64)
     branch_frame["scenario"] = branch_frame["scenario"].astype(np.int64)
@@ -109,7 +228,9 @@ def load_ground_truth(
     va = _reshape_column(
         sorted_bus, "Va", selected_scenarios, bus_ids, "bus", FLOAT32_DTYPE
     )
-    va = _normalize_angle_units(va)
+    va = _normalize_angle_units(
+        va, in_degrees=None if reference is None else reference.va_in_degrees
+    )
 
     direct_channel_names = _resolve_direct_channel_names(
         sorted_bus.columns, channel_names
@@ -167,11 +288,19 @@ def load_ground_truth(
         FLOAT32_DTYPE,
     )
     removed_mask = br_status != 1.0
-    branch_outages = _count_reference_outages(br_status)
+    branch_outages = _count_reference_outages(
+        br_status,
+        None
+        if reference is None
+        else _reference_in_service(
+            reference.branch_ids, reference.branch_in_service, branch_ids
+        ),
+    )
     generator_outages = _load_generator_outage_counts(
         pf_node_parquet,
         pf_edge_parquet,
         selected_scenarios,
+        reference,
     )
     n_outages = (branch_outages + generator_outages).astype(np.int32, copy=False)
     outage_type = _classify_outage_type(branch_outages, generator_outages)
@@ -273,14 +402,16 @@ def _load_generator_outage_counts(
     pf_node_parquet: str,
     pf_edge_parquet: str,
     scenario_ids: np.ndarray,
+    reference: GroundTruthReference | None = None,
 ) -> np.ndarray:
     generator_path = _default_generator_parquet_path(pf_node_parquet, pf_edge_parquet)
     if generator_path is None:
         return np.zeros(len(scenario_ids), dtype=np.int32)
 
-    gen_frame = pd.read_parquet(generator_path)
+    gen_frame = read_frame(
+        generator_path, ("scenario", "idx", "in_service"), scenario_ids=scenario_ids
+    )
     _require_columns(gen_frame, ("scenario", "idx", "in_service"))
-    gen_frame = gen_frame.copy()
     gen_frame["scenario"] = gen_frame["scenario"].astype(np.int64)
     gen_frame["idx"] = gen_frame["idx"].astype(np.int64)
     gen_frame = gen_frame[gen_frame["scenario"].isin(scenario_ids)].copy()
@@ -297,7 +428,13 @@ def _load_generator_outage_counts(
         "idx",
         FLOAT32_DTYPE,
     )
-    return _count_reference_outages(gen_status)
+    reference_active = None
+    if reference is not None and reference.generator_ids is not None:
+        assert reference.generator_in_service is not None
+        reference_active = _reference_in_service(
+            reference.generator_ids, reference.generator_in_service, generator_ids
+        )
+    return _count_reference_outages(gen_status, reference_active)
 
 
 def _default_generator_parquet_path(
@@ -311,10 +448,20 @@ def _default_generator_parquet_path(
     return None
 
 
-def _count_reference_outages(status: np.ndarray) -> np.ndarray:
+def _count_reference_outages(
+    status: np.ndarray,
+    reference_active: np.ndarray | None = None,
+) -> np.ndarray:
+    """Elements out of service per scenario, among those in service somewhere.
+
+    `reference_active` (shape `(1, n_elements)`) marks the elements in service in
+    at least one scenario of the dataset; computed from `status` when not given.
+    """
+
     if status.size == 0:
         return np.zeros(status.shape[0], dtype=np.int32)
-    reference_active = np.nanmax(status, axis=0, keepdims=True) == 1.0
+    if reference_active is None:
+        reference_active = np.nanmax(status, axis=0, keepdims=True) == 1.0
     return np.sum(reference_active & (status != 1.0), axis=1).astype(np.int32)
 
 
@@ -331,7 +478,9 @@ def _classify_outage_type(
     return outage_type
 
 
-def _normalize_angle_units(values: np.ndarray) -> np.ndarray:
+def _normalize_angle_units(
+    values: np.ndarray, *, in_degrees: bool | None = None
+) -> np.ndarray:
     """Return voltage angles in radians.
 
     Datakit raw bus parquets store `Va` in degrees for the real OPF/PF exports
@@ -346,7 +495,9 @@ def _normalize_angle_units(values: np.ndarray) -> np.ndarray:
 
     if values.size == 0:
         return values
-    if float(np.nanmax(np.abs(values))) > float(2.0 * np.pi):
+    if in_degrees is None:
+        in_degrees = float(np.nanmax(np.abs(values))) > float(2.0 * np.pi)
+    if in_degrees:
         return np.deg2rad(values).astype(FLOAT32_DTYPE, copy=False)
     return values
 
@@ -389,6 +540,8 @@ def _sort_rectangular_frame(
             f"{len(scenario_ids)} scenarios and {len(entity_ids)} {entity_column} values.",
         )
 
+    if _in_rectangular_order(frame, scenario_ids, entity_ids, entity_column):
+        return frame.reset_index(drop=True)
     ordered = frame.copy()
     ordered["_scenario_order"] = pd.Categorical(
         ordered["scenario"],
@@ -426,11 +579,31 @@ def _reshape_column(
     entity_column: str,
     dtype: np.dtype[Any],
 ) -> np.ndarray:
-    ordered = _sort_rectangular_frame(
-        frame[["scenario", entity_column, column]],
-        scenario_ids,
-        entity_ids,
-        entity_column,
-    )
-    values = ordered[column].to_numpy(dtype=dtype, copy=True)
+    if not _in_rectangular_order(frame, scenario_ids, entity_ids, entity_column):
+        frame = _sort_rectangular_frame(
+            frame[["scenario", entity_column, column]],
+            scenario_ids,
+            entity_ids,
+            entity_column,
+        )
+    values = frame[column].to_numpy(dtype=dtype, copy=True)
     return values.reshape(len(scenario_ids), len(entity_ids))
+
+
+def _in_rectangular_order(
+    frame: pd.DataFrame,
+    scenario_ids: np.ndarray,
+    entity_ids: np.ndarray,
+    entity_column: str,
+) -> bool:
+    """Whether rows are already one per (scenario, entity), in that order."""
+
+    shape = (len(scenario_ids), len(entity_ids))
+    if len(frame) != shape[0] * shape[1]:
+        return False
+    scenarios = frame["scenario"].to_numpy().reshape(shape)
+    entities = frame[entity_column].to_numpy().reshape(shape)
+    return bool(
+        (scenarios == np.asarray(scenario_ids)[:, None]).all()
+        and (entities == np.asarray(entity_ids)[None, :]).all()
+    )

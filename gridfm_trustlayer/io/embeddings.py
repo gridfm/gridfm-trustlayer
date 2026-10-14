@@ -13,7 +13,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd  # type: ignore[import-untyped]
+
+from gridfm_trustlayer.io.parquet import column_names, read_frame
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 
@@ -109,16 +110,32 @@ def load_scenario_embeddings(
     pooling: str = DEFAULT_POOLING,
     scenario_ids: np.ndarray | None = None,
 ) -> ScenarioEmbeddingSet:
-    """Load a graphkit embeddings parquet and pool it to one vector per scenario.
+    """Read an embeddings parquet and pool it to one vector per scenario.
 
-    The parquet is expected to be rectangular (every scenario carries the same
-    entity ids), which lets the pooling run as a single reshape plus reduction
-    instead of a per-scenario groupby.
+    Args:
+        parquet_path: Embeddings file with `scenario`, `bus` and `emb_*`
+            columns, e.g. graphkit's `<grid>_bus_embeddings.parquet`. Every
+            scenario must have the same buses.
+        pooling: `"mean"`, `"max"`, `"meanmax"` or `"concat"`.
+        scenario_ids: Scenarios to return, in this order; all when not given.
+
+    Returns:
+        A `ScenarioEmbeddingSet` with `scenario_ids` and an
+        `(n_scenarios, d)` array `embeddings`.
     """
 
     pooling = validate_pooling(pooling)
-    columns_needed = None
-    frame = pd.read_parquet(parquet_path, columns=columns_needed)
+    available = column_names(parquet_path)
+    frame = read_frame(
+        parquet_path,
+        [
+            name
+            for name in available
+            if name in {"scenario", "bus"}
+            or str(name).startswith(EMBEDDING_COLUMN_PREFIX)
+        ],
+        scenario_ids=scenario_ids,
+    )
     if "scenario" not in frame.columns:
         raise ValueError(
             f"Embedding parquet {parquet_path!r} must contain a 'scenario' column.",
