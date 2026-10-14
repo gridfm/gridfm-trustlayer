@@ -47,7 +47,7 @@ from typing import Any
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from gridfm_trustlayer.conformal.calibrator import ChannelSet
+from gridfm_trustlayer.conformal.calibrator import DEFAULT_SPARSE_STRATA, ChannelSet
 from gridfm_trustlayer.conformal.kernel import (
     SUPPORTED_DISTANCES,
     KernelIntervalCalibrator,
@@ -296,6 +296,7 @@ def tune_n_eff_target(
     groups: np.ndarray | None = None,
     system_load_n_bins: int | None = None,
     system_load_bin_edges: np.ndarray | None = None,
+    sparse_strata: str = DEFAULT_SPARSE_STRATA,
 ) -> BandwidthTuningResult:
     """Choose `n_eff_target` (and optionally `distance`) by K-fold cross-validation.
 
@@ -304,7 +305,8 @@ def tune_n_eff_target(
     `options.distances` lists the distances to compare. `groups` (one value per
     scenario, e.g. the datakit `load_scenario_idx`) keeps related scenarios in
     the same fold; without it, near-duplicate scenarios on both sides of a fold
-    make localization look better than it is.
+    make localization look better than it is. `sparse_strata` is passed to every
+    fold's calibrator, so the candidates are compared as they will be applied.
     """
 
     options = options or TuningOptions()
@@ -359,6 +361,7 @@ def tune_n_eff_target(
                 distance=setting_distance,
                 system_load_n_bins=system_load_n_bins,
                 system_load_bin_edges=system_load_bin_edges,
+                sparse_strata=sparse_strata,
             )
             intervals = calibrator.predict_intervals(held_predictions)
             fallbacks[setting] = fallbacks.get(setting, 0) + int(

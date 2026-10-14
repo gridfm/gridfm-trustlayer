@@ -425,3 +425,44 @@ def test_form_preselects_and_lists_the_default_bandwidth_first() -> None:
     assert next(iter(bandwidth.options)) == "n_eff"
     preview = " ".join(str(getattr(x, "value", "")) for x in widgets)
     assert "n_eff_target: 600.0" in preview
+
+
+def test_build_config_adds_new_scenarios_for_apply(tmp_path) -> None:
+    from gridfm_trustlayer.interactive import build_config, save_config, to_yaml
+
+    datasets = {
+        name: {
+            "predictions": f"{name}/predictions.parquet",
+            "pf_node": f"{name}/bus.parquet",
+            "pf_edge": f"{name}/branch.parquet",
+        }
+        for name in ("cal", "test")
+    }
+    without = build_config(calibration=datasets["cal"], test=datasets["test"])
+    assert "apply" not in without["inputs"]
+    assert not any(key.startswith("applied") for key in without["outputs"])
+
+    config = build_config(
+        calibration=datasets["cal"],
+        test=datasets["test"],
+        variables=["Vm", "line_loading"],
+        apply={
+            "predictions": "new/predictions.parquet",
+            "pf_node": "new/bus.parquet",
+            "pf_edge": "new/branch.parquet",
+        },
+    )
+    assert config["inputs"]["apply"]["predictions"] == "new/predictions.parquet"
+    assert {"applied_predictions_volt", "applied_predictions_line"} <= set(
+        config["outputs"]
+    )
+    assert "gridfm_trustlayer apply" in to_yaml(config)
+    save_config(config, str(tmp_path / "config.yaml"))  # passes validation
+
+
+def test_sparse_strata_is_written_only_when_not_default_and_stratified() -> None:
+    assert "sparse_strata" not in _config(strat="n_outages")
+    config = _config(strat="n_outages", sparse_strata="infinite")
+    assert config["sparse_strata"] == "infinite"
+    validate_config(config)
+    assert "sparse_strata" not in _config(sparse_strata="infinite")

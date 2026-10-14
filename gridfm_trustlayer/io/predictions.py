@@ -78,7 +78,7 @@ def load_predictions(
         parquet_path: Predictions file, e.g. graphkit's `<grid>_predictions.parquet`,
             with `scenario`, `bus` and `<variable>_pred` columns.
         apply_task_correction: Apply the task's conventions; for `PowerFlow`,
-            `Vm` is clamped on PV and reference buses and `Va` on the reference
+            `Vm` is replaced by its set-point on PV buses and `Va` on the reference
             bus.
         task_name: `"PowerFlow"` or `"OptimalPowerFlow"`; inferred from the file
             layout when not given.

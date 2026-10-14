@@ -120,7 +120,7 @@ tuning:
 
 `search: grid` tries every combination of `grid` and `distances`; `search: random` tries `budget` pairs drawn at random, which bounds the cost when both vary. With a small budget spread over two distances, each distance gets only a few targets; prefer `search: grid` when only the target varies.
 
-**Cost.** Roughly one kernel run per fold and candidate, each on $(K-1)/K$ of the calibration data: `folds × len(grid) × len(distances)` runs for a grid search, `folds × budget` for a random one. The weighted quantiles dominate, so the cost grows with the number of calibration scenarios and of buses or lines. On a laptop CPU, the default grid takes minutes for tens of thousands of calibration scenarios on a network with a few hundred lines.
+**Cost.** Roughly one kernel run per fold and candidate, each on $(K-1)/K$ of the calibration data: `folds × len(grid) × len(distances)` runs for a grid search, `folds × budget` for a random one. The weighted quantiles dominate, so the cost grows with the number of calibration scenarios and of buses or lines. On a laptop CPU, the default grid takes about ten seconds for 10,000 calibration scenarios on a network with 186 lines.
 
 All options are listed in the [configuration reference](../reference/configuration.md#tuning).
 
@@ -165,6 +165,6 @@ Under `bandwidth: n_eff` the effective sample size is pinned to the target, so t
 
 Then compare with an `element` run on the same data:
 
-- **Coverage** in `trust_reliability_*.csv` should be close to $1-\alpha$ in every stratum. Kernel coverage is checked empirically, and it can land above target when difficulty is very uneven: raising coverage on the hard scenarios lifts the average.
+- **Coverage** in `coverage/summary.md` (or `coverage_by_stratum.csv`) should be close to $1-\alpha$ in every stratum. Kernel coverage is checked empirically, and it can land above target when difficulty is very uneven: raising coverage on the hard scenarios lifts the average.
 - **Width** should be lower on average, or at least redistributed: narrower on easy scenarios, wider on hard ones.
 - **Screening**: at similar recall, fewer false alarms means the kernel is paying off.

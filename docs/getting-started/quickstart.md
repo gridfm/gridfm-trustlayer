@@ -33,7 +33,7 @@ Each run writes its ground truth to `<data_dir>/<grid>/raw/`, including `bus_dat
 !!! warning "Why not split one dataset?"
     Datakit usually solves several topologies for each load profile. A random split of one dataset puts near-identical scenarios on both sides, which makes the measured coverage look better than it will be on new data. Trustlayer therefore never splits a dataset itself, and it refuses to evaluate on the data it was fitted on. See [Preparing the data](../user-guide/data.md).
 
-How many scenarios? Coverage is checked per bus or line and per group of scenarios, so each group needs enough of them. A few thousand calibration scenarios is a reasonable start. A group with fewer than $2/\alpha - 1$ scenarios (19 at $\alpha = 0.1$) gets infinite bounds instead of misleadingly narrow ones.
+How many scenarios? Coverage is checked per bus or line and per group of scenarios, so each group needs enough of them. A few thousand calibration scenarios is a reasonable start. A bus or line with fewer than $\lceil 2/\alpha \rceil - 1$ samples in a group (19 at $\alpha = 0.1$) gets bounds learned from all groups together there, and the reports say where ([Sparse strata](../user-guide/choosing-a-setup.md#sparse-strata-sparse_strata)).
 
 ## 2. Predict both sets with your model
 
@@ -104,53 +104,78 @@ gridfm_trustlayer screen    --config trust_config.yaml
 
 **`compute`** reads the calibration set and writes `trustlayer_outputs/case118.trustlayer`. This small file is all you need to apply the layer later.
 
-**`calibrate`** applies it to the test set. It writes one parquet per target family with the bounds appended (`Vm_pi_lower`, `Vm_pi_upper`, ..., `line_loading_pi_upper`), plus coverage reports and figures:
+**`calibrate`** applies it to the test set. It writes one partitioned parquet per target family with the bounds appended (`Vm_pi_lower`, `Vm_pi_upper`, ..., `line_loading_pi_upper`), and a coverage report:
 
 ```text
 trustlayer_outputs/calibrated/
-├── case118_ieee_predictions_vm_va_with_intervals.parquet/       partitioned, one row per scenario and bus
+├── case118_ieee_predictions_vm_va_with_intervals.parquet/         one row per scenario and bus
 ├── case118_ieee_predictions_line_loading_with_intervals.parquet/  one row per scenario and branch
-├── trust_reliability_volt.csv   trust_reliability_line.csv    <- start here
-├── trust_summary_volt.csv       trust_summary_line.csv
-├── trust_analysis_volt.csv      trust_analysis_line.csv
-└── figures/                     coverage and width plots, overall and by stratum
+└── coverage/
+    ├── summary.md                  <- start here
+    ├── coverage_by_stratum.csv     coverage_by_group.csv
+    ├── coverage_by_element_voltage.csv   coverage_by_element_line_loading.csv
+    └── figures/                    coverage and width by stratum, coverage per bus and line
 ```
 
-**`screen`** compares the test intervals with `screen_bounds` and counts true and false alarms against the true AC solution:
+**`screen`** compares the test intervals with `screen_bounds` and counts caught and missed violations and false alarms against the true AC solution:
 
 ```text
 trustlayer_outputs/screen/
-├── trust_screen_summary_volt.csv   trust_screen_summary_line.csv   <- start here
-├── trust_screen_entity_volt.csv    trust_screen_entity_line.csv
-├── trust_screen_detail_volt.parquet/  trust_screen_detail_line.parquet/   per row, partitioned
-└── screen_figures/                 precision, recall and confusion plots
+├── summary.md                      <- start here
+├── screening_by_stratum.csv        screening_by_group.csv
+├── screening_by_element_voltage.csv   screening_by_element_line_loading.csv
+├── screening_detail_voltage.parquet/  screening_detail_line_loading.parquet/   one row per value
+└── figures/                        confusion matrix, recall and precision by stratum
 ```
+
+Each command also prints its headline numbers when it ends.
 
 !!! tip "Large test sets"
     `calibrate` and `screen` read, process and write the test set one block of scenarios at a time, so their memory use is set mainly by the block size, not by the number of scenarios. The per-row outputs are partitioned parquet datasets, like datakit's: directories with one `scenario_partition=k/` folder per 200 scenarios, which `pd.read_parquet(path)` reads as one table. See [Reading the results](../user-guide/results.md).
 
 ## 5. Check the results
 
-Open `trust_reliability_line.csv`. Each row is one variable in one stratum:
+Open `calibrated/coverage/summary.md`. For each variable, a table gives one row per stratum:
 
-- `target_coverage` is $1-\alpha$, here 0.9;
-- `empirical_coverage_weighted` is the share of true test values inside their interval;
-- `coverage_gap_weighted` is the difference. It should be close to zero or positive in every stratum.
+- **coverage** is the share of true test values inside their bounds, with an approximate 95% interval. It should be close to the target, $1-\alpha$ = 0.9, or above, in every stratum;
+- **worst element** is the lowest coverage of a single bus or line;
+- **mean width** is the average size of the bounds: narrower bounds at the same coverage mean a sharper screen.
 
-If coverage holds, look at `width_mean_weighted`: narrower intervals at the same coverage mean a sharper screen.
+Then open `screen/summary.md`. With an upper limit, a line is flagged when `line_loading_pi_upper > 1.0`:
 
-Then open `trust_screen_summary_line.csv` and read the `scope = system` row. With an upper limit, a line is flagged when `line_loading_pi_upper > 1.0`:
+- **caught**: real overloads that were flagged;
+- **missed**: real overloads that were not. Keeping these rare is the point of the layer;
+- **false alarms**: flagged lines that were not overloaded, which cost an unnecessary AC power flow;
+- **recall** and **precision** summarize the three.
 
-- `upper_tp`: real overloads that were flagged;
-- `upper_fn`: real overloads that were missed. Keeping these rare is the point of the layer;
-- `upper_fp`: flagged lines that were not overloaded, which cost an unnecessary AC power flow;
-- `upper_recall` and `upper_precision` summarize the three.
+!!! note "Known values are not counted"
+    In a power flow, `Vm` at PV buses and `Va` at the reference bus are set-points: inputs of the model, not predictions. They are left out of every number above, and the reports say how many were set aside. See [Known values](../user-guide/results.md#known-values-are-not-counted).
 
 [Reading the results](../user-guide/results.md) explains every column and figure.
 
 ## 6. Use it on new scenarios
 
-The coverage you measured on the test set carries over to new scenarios drawn the same way. To apply the artifact to scenarios without a known solution, point `inputs.test.predictions` at their predictions and run `calibrate` again. The bounds are written as before; coverage figures are only meaningful where ground truth exists.
+The coverage you measured on the test set carries over to new scenarios drawn the same way. To get bounds for scenarios **without a known AC solution**, add their files under `inputs.apply` and run `apply`:
+
+```yaml title="trust_config.yaml (addition)"
+inputs:
+  apply:                  # read by `apply`; no AC solution needed
+    predictions: predictions/new/case118_ieee_predictions.parquet
+    pf_node: data_new/case118_ieee/raw/bus_data.parquet
+    pf_edge: data_new/case118_ieee/raw/branch_data.parquet
+```
+
+```bash
+gridfm_trustlayer apply --config trust_config.yaml
+```
+
+`apply` computes the same bounds as `calibrate` and writes them, as partitioned datasets named `<predictions>_<variables>_bounds.parquet`, to `outputs.applied_predictions` (or `trustlayer_outputs/<task>/<cp_type>/` by default). There is no coverage report, since there is nothing to compare with. It reads only what the layer needs:
+
+- the predictions, which for power flow must carry the **set-points** of each scenario: `Vm_target` at PV buses and `Va_target` at the reference bus, as graphkit writes them. They are inputs of a power flow, not results; other buses may have no target;
+- the bus and branch files, for the outages (`strat: n_outages`, `outage_type`), the total load (`strat: system_load_bin`) and the branch parameters (`line_loading`); only the topology, loads and parameters are read, never the solved voltages;
+- the embeddings, for `cp_type: kernel`.
+
+A voltage layer without stratification needs only the predictions.
 
 ## Next steps
 

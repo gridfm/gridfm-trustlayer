@@ -42,7 +42,7 @@ flowchart LR
 2. **`calibrate`** applies the artifact to the test set: every prediction gets a lower and an upper bound. Because the test set also has true values, it reports how often the bounds actually contain them (the *coverage*).
 3. **`screen`** compares the bounds with operating limits, for example $V_m \in [0.95, 1.05]$ p.u. or loading $\le 100\%$, and counts the violations it catches and misses.
 
-Once you trust the coverage on the test set, the same artifact can be applied to new scenarios that have no known solution.
+Once you trust the coverage on the test set, **`apply`** gives bounds for new scenarios that have no known solution, with the same artifact ([Quick start, step 6](getting-started/quickstart.md#6-use-it-on-new-scenarios)).
 
 ## Two methods
 
@@ -61,6 +61,12 @@ Once you trust the coverage on the test set, the same artifact can be applied to
 - **Writing a config?** The [config builder](getting-started/config-builder.md) is a Jupyter form that shows only the options that apply, or start from one of the [example configs](https://github.com/gridfm/gridfm-trustlayer/tree/main/examples/config).
 - **Calling it from your own code?** See the [Python API](user-guide/python-api.md).
 - **Want the statistics?** Read the [Methodology](methodology.md).
+
+## About
+
+`gridfm-trustlayer` was initially developed by [Antonio Alcántara](https://antonioalcantara.com) for the [OpenGridFM](https://gridfm.org/) community, as a common trustworthiness layer for its foundation models to build on.
+
+Contributions are welcome, from bug reports to new methods: see [CONTRIBUTING.md](https://github.com/gridfm/gridfm-trustlayer/blob/main/CONTRIBUTING.md) for how to get started, or open an issue to discuss an idea.
 
 ## Citation
 

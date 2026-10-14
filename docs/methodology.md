@@ -142,7 +142,7 @@ $$
 h^2 : \quad n_{\mathrm{eff}}(h^2) = n^{\mathrm{target}}_{\mathrm{eff}}.
 $$
 
-$n_{\mathrm{eff}}$ increases monotonically from 1 (all weight on the nearest calibration scenario) to the stratum size (uniform weights), so this is a well-posed one-dimensional root find, solved by log-space bisection across a whole block of test points at once. Because $n_{\mathrm{eff}}$ is invariant to a common rescaling of the weights, the solve shifts the exponent by each row's minimum distance, which avoids underflow at small bandwidths without changing the result.
+$n_{\mathrm{eff}}$ increases monotonically from 1 (all weight on the nearest calibration scenario) to the stratum size (uniform weights), so this is a well-posed one-dimensional root find. $n_{\mathrm{eff}}$ behaves close to a power of $h^2$, so it is solved with Newton steps on $\log n_{\mathrm{eff}}$ against $\log h^2$, inside a bracket that falls back to bisection on any step leaving it; a few iterations reach the target to a relative $10^{-6}$. The tolerance is tight on purpose: a weighted quantile is a step function of the weights, so a looser solve could move a bound to a neighbouring residual depending on where the solver happened to stop. Each test point stops as soon as it converges, so its bandwidth does not depend on the other points solved alongside it. Because $n_{\mathrm{eff}}$ is invariant to a common rescaling of the weights, the solve shifts the exponent by each row's minimum distance, which avoids underflow at small bandwidths without changing the result.
 
 This parameterization is invariant to embedding width and stratum size. The default target is $n^{\mathrm{target}}_{\mathrm{eff}} = 600$. A stratum with fewer calibration scenarios than the target gets uniform weights (equivalent to `cp_type: element`), and `n_eff_target: auto` chooses the target from the calibration data.
 
@@ -191,6 +191,8 @@ q^-_{\ast,e} = \sup\left\{ r : \sum_{j : r_{j,e} \ge r} u_j \;\ge\; \left(1 - \t
 $$
 
 Masked or invalid calibration entries receive zero weight for that entity, so they never enter either sum.
+
+**Computation.** Both bounds depend only on the weight in the tails. With $T = \sum_j u_j$ over the valid residuals, $q^+$ is the smallest residual such that the weight of the residuals above it is at most $T - (1-\tfrac{\alpha}{2})(T+1)$, and symmetrically for $q^-$. Trustlayer therefore takes $T$ for every entity from one matrix product of the weights with the validity mask, and scans only the ends of each entity's sorted residuals: a few times the tail share $\alpha/2$ of the positions, widened where that does not settle the bound. The result is identical to accumulating the weights over all residuals (verified against that definition in the test suite), at a fraction of the cost. A test point whose total weight is below $2/\alpha - 1$ cannot reach the level for any entity and goes straight to the fallback.
 
 The interval is then formed exactly as in the `element` case, but with test-scenario-specific offsets:
 
@@ -266,6 +268,8 @@ q^+_{e,g} = Q^{\mathrm{CP}}_{1-\alpha/2}(\{r_{s,e} : g_s = g\}),
 $$
 
 where $Q^{\mathrm{CP}}$ denotes the corrected order statistic above, computed over the $n_{e,g}$ residuals of the stratum. The guarantee then holds within each stratum (Mondrian conformal prediction), provided calibration and test scenarios are exchangeable within it.
+
+When $n_{e,g} < \lceil 2/\alpha \rceil - 1$, including a test stratum with no calibration scenario at all ($n_{e,g} = 0$), the stratified quantiles of $e$ in $g$ are infinite. By default (`sparse_strata: pooled`) they are replaced by the unstratified quantiles $q^-_e$, $q^+_e$ wherever those are finite; with `sparse_strata: infinite` they are kept. The pooled quantiles are calibrated on all strata together, so they carry no guarantee within the sparse stratum itself, whose errors can be larger than average (rare N-k states often are); the coverage report shows how those strata fare. The same rule applies to the stratum fallback quantiles of `cp_type: kernel`.
 
 The supported strata are:
 
@@ -349,19 +353,17 @@ $$
 
 For invalid or masked entries, the implementation does not expand an interval and leaves the lower and upper endpoints equal to the original prediction.
 
-### Analysis quantities written to CSV
+Known values are treated the same way. In a power flow, $V_m$ at PV buses and $V_a$ at the reference bus are set-points given to the model; the prediction is replaced by the set-point and both endpoints equal it. Their residuals are zero by construction, so they are excluded from the calibration residuals: a bus that is PV in some calibration scenarios is calibrated on its PQ scenarios only, which keeps its quantiles from shrinking towards zero.
 
-The trust-analysis outputs are derived directly from those interval endpoints.
+### Quantities in the coverage reports
 
-For each scenario-entity pair, the interval width is $u_{s,e} - \ell_{s,e}$.
+The coverage reports are derived directly from those interval endpoints, over the entries that are neither masked nor known.
 
-Coverage is recorded as a binary indicator: it is `1` when $\ell_{s,e} \le y_{s,e} \le u_{s,e}$ and `0` otherwise.
+For each scenario-entity pair, the interval width is $u_{s,e} - \ell_{s,e}$, and coverage is the indicator $\mathbf{1}\{\ell_{s,e} \le y_{s,e} \le u_{s,e}\}$.
 
-The entity-level `empirical_coverage` reported in the analysis CSV is the average of that indicator over scenarios for each bus or branch, and the reported width summaries are the mean, min, and max interval widths over scenarios.
-
-The analysis figures are built from those same entity-level rows. In particular, the width-density plots use the distribution of `width_mean` across entities within each stratum, so they visualize per-entity average interval widths rather than raw per-sample interval-width values.
-
-The reliability CSV outputs (`trust_reliability_volt.csv` and `trust_reliability_line.csv`) aggregate those analysis rows by variable and stratum, reporting expected coverage (`1 - alpha`), weighted empirical coverage, coverage gap, and width aggregates.
+- Per element (`coverage_by_element_*.csv`): the mean of the indicator over the test scenarios of the stratum, and the mean, minimum and maximum width.
+- Per stratum (`coverage_by_stratum.csv`): the indicator pooled over all scenario-entity pairs of the stratum, and the mean width over pairs with finite bounds. The 95% interval is $\hat c \pm 1.96 \sqrt{\hat c (1-\hat c)/n}$ with $n$ the number of test scenarios in the stratum: it treats each scenario as one draw. The average coverage of a scenario varies no more than a single indicator does, so the interval is conservative, and close to exact when the errors within a scenario are strongly correlated.
+- `worst_element_coverage` is the minimum per-element coverage among elements with at least 50 values in the stratum.
 
 ## Workflow
 
@@ -381,7 +383,7 @@ Outputs:
 
 - one `.trustlayer` artifact containing one or more fitted calibrators
 
-For `cp_type: element` the artifact holds a quantile table. For `cp_type: kernel` it holds the calibration residual bank, the standardized calibration embeddings, the standardization statistics, the per-stratum fallback quantiles, and the kernel settings. `compute` also precomputes the per-entity residual sort order so the weighted quantile at application time is a permute-and-accumulate pass rather than a sort per test point.
+For `cp_type: element` the artifact holds a quantile table. For `cp_type: kernel` it holds the calibration residual bank, the standardized calibration embeddings, the standardization statistics, the per-stratum fallback quantiles, and the kernel settings. `calibrate` sorts each entity's residuals once per stratum and reuses that order for every test point.
 
 ### `calibrate`
 
