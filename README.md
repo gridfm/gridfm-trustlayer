@@ -1,11 +1,10 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/gridfm/gridfm-trustlayer/main/docs/figs/gridfm-trustlayer-logo-1024.png" alt="gridfm-trustlayer logo" style="width: 40%; height: auto;"/>
+    <img src="https://github.com/gridfm/gridfm-trustlayer/raw/main/docs/figs/gridfm-trustlayer-logo-1024.png" alt="gridfm-trustlayer logo" style="width: 40%; height: auto;"/>
   <br/>
 </p>
 
-<p align="center" style="font-size: 25px;">
-    <b>gridfm-trustlayer</b>
-</p>
+<h1 align="center">gridfm-trustlayer</h1>
+
 
 [![CI Build](https://github.com/gridfm/gridfm-trustlayer/actions/workflows/ci-build.yaml/badge.svg)](https://github.com/gridfm/gridfm-trustlayer/actions/workflows/ci-build.yaml)
 [![Docs](https://img.shields.io/badge/docs-available-brightgreen)](https://gridfm.github.io/gridfm-trustlayer/)
