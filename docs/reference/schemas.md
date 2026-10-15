@@ -357,11 +357,17 @@ Widths are in the model's units (`Va` in radians); `summary.md` and the figures 
 Produced by `screen` in `outputs.screen_dir`:
 
 - `summary.md`
+- `scenarios.csv`: one row per operating scenario, with its statuses
+- `status_by_stratum.csv`: one row per level (`scenario`, `element`), variable, stratum, method (`interval`, `point`) and status
 - `screening_by_stratum.csv`, `screening_by_group.csv`, `screening_by_element_voltage.csv`, `screening_by_element_line_loading.csv`: one row per screened side (`lower`, `upper`, `any` for `Vm`; `upper` for `line_loading`)
 - `screening_detail_voltage.parquet/`, `screening_detail_line_loading.parquet/` (partitioned datasets): one row per screened value
 - `figures/`
 
 See [Reading the results](../user-guide/results.md#outputs-of-screen).
+
+### Status reports of `apply`
+
+Produced by `apply` in `outputs.status_dir` when `screen_bounds` is set: `summary.md`, `scenarios.csv` and `status_by_stratum.csv`, with the columns of `screen`'s except the true status (`true_status`, `truly_violated`). The applied datasets gain `<variable>_status` and `<variable>_point_status`. See [Reading the results](../user-guide/results.md#outputs-of-apply).
 
 ### Known values
 

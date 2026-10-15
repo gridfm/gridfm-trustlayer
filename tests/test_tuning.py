@@ -512,3 +512,42 @@ def test_compute_tunes_n_eff_target_and_records_it(tmp_path, capsys) -> None:
 
     assert main(["calibrate", "--config", str(config_path)]) == 0
     assert (tmp_path / "out" / "calibrated.parquet").exists()
+
+
+def test_cross_validation_in_parallel_gives_the_serial_result() -> None:
+    predictions, truth = _synthetic()
+    options = TuningOptions(
+        folds=3, grid=(50.0, 200.0), distances=("euclidean", "cosine")
+    )
+    serial, parallel = (
+        tune_n_eff_target(
+            predictions,
+            truth,
+            alpha=0.2,
+            channel_names=("Vm",),
+            strat="n_outages",
+            options=options,
+            n_jobs=n_jobs,
+        )
+        for n_jobs in (1, 2)
+    )
+    pd.testing.assert_frame_equal(parallel.candidates, serial.candidates)
+    pd.testing.assert_frame_equal(parallel.details, serial.details)
+    assert parallel.summary() == serial.summary()
+
+
+def test_auto_target_works_with_the_default_bandwidth() -> None:
+    # `bandwidth` defaults to `n_eff`, so it need not be written for `auto`.
+    from gridfm_trustlayer.cli.config import validate_command_config
+
+    config = {
+        "cp_type": "kernel",
+        "n_eff_target": "auto",
+        "embeddings": "embeddings.parquet",
+    }
+    validate_command_config("compute", config)
+    with pytest.raises(ValueError, match="below n_eff_min"):
+        validate_command_config(
+            "compute",
+            {"cp_type": "kernel", "n_eff_target": 3, "n_eff_min": 5, "embeddings": "e"},
+        )

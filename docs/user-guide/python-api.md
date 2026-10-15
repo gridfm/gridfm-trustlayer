@@ -13,6 +13,7 @@ from gridfm_trustlayer import (
     compute_line_loading,
     save_interval_artifact,
     load_interval_artifact,
+    load_interval_artifacts,
 )
 ```
 
@@ -37,7 +38,12 @@ A `ChannelSet` holds one or more variables ("channels") as arrays of shape `(n_s
 
 ```python
 import numpy as np
-from gridfm_trustlayer import ChannelSet, NaiveIntervalCalibrator
+from gridfm_trustlayer import (
+    ChannelSet,
+    NaiveIntervalCalibrator,
+    classify_status,
+    scenario_status,
+)
 
 # Synthetic stand-in for model outputs: 2,000 contingency scenarios x 50 lines,
 # with prediction errors that grow with the contingency level k = 1..5.
@@ -75,8 +81,10 @@ test_true = true[~calibration]
 coverage = ((lower <= test_true) & (test_true <= upper)).mean()
 print(f"coverage: {coverage:.3f}")  # about 0.90
 
-# Conservative screen: flag a line if its upper bound exceeds its rating.
-overloaded = upper > 1.0
+# Status against the rating (1.0 = 100%): per line and test scenario, then per
+# scenario (the worst of its lines). Same rule as `screen` and `apply`.
+line_status = classify_status(lower, upper, upper_limit=1.0)
+scenario = scenario_status(line_status, axis=1)  # secure, uncertain or insecure
 ```
 
 `fit` takes the predictions, the true values, `alpha` and the variables to calibrate. With `strat`, both `ChannelSet`s must carry that column in `scenario_columns`, and so must the predictions passed to `predict_intervals`: the stratum of a new scenario has to be known to pick its bounds. `predict_intervals` returns `{variable: (lower, upper)}`, each of the same shape as the predictions.
@@ -85,6 +93,8 @@ Two conventions worth knowing:
 
 - **`alpha` is two-sided.** Each tail gets `alpha / 2`, so `alpha=0.1` gives 90% intervals whose upper bound alone holds with probability at least 95%. For a one-sided screen at level `1 - a`, pass `alpha = 2 * a` and use only the upper bound.
 - **Too few calibration samples.** An element needs at least `ceil(2 / alpha) - 1` valid residuals (19 at `alpha=0.1`) in a stratum for a finite bound from that stratum. With fewer, or in a stratum absent from the calibration data, it uses its quantile over all strata (`sparse_strata="pooled"`, the default; `calibrator.pooled_masks` marks those entries after `predict_intervals`), or gets `+inf` / `-inf` with `fit(..., sparse_strata="infinite")`. Too few over all strata together always gives infinite bounds rather than a falsely narrow interval.
+
+`classify_status` and `scenario_status` apply the screening rule of the CLI to any bounds: a value is `within_limits` when its whole interval lies inside the limits, a `violation` when it lies entirely beyond a limit, and `uncertain` otherwise; a scenario takes the worst status of its values (`secure`, `uncertain`, `insecure`). Pass the prediction as both bounds, `classify_status(pred, pred, upper_limit=1.0)`, to classify the point prediction alone, and `valid=` to `scenario_status` to leave out entries such as out-of-service lines. Unlike `screen`, no tolerance is added to the limits.
 
 ## Kernel-weighted intervals
 
@@ -220,6 +230,16 @@ calibrator = load_interval_artifact("intervals.trustlayer")
 
 The file format is the one the CLI writes: JSON for `NaiveIntervalCalibrator`, a compressed NumPy archive for `KernelIntervalCalibrator`.
 
+A CLI run with both bus voltages and line loading writes one calibrator per family into the same artifact. `load_interval_artifact` raises on such a file; `load_interval_artifacts` reads any artifact and returns its calibrators by family, `"volt"` and `"line"`:
+
+```python title="A mixed CLI artifact"
+from gridfm_trustlayer import load_interval_artifacts
+
+calibrators = load_interval_artifacts("outputs/case14_ieee.trustlayer")
+line_calibrator = calibrators["line"]  # line_loading
+volt_calibrator = calibrators["volt"]  # Vm, Va
+```
+
 ## Choosing the kernel bandwidth from Python
 
-The cross-validated choice of `n_eff_target` behind `n_eff_target: auto` is available as `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`. It takes the calibration `ChannelSet`s and a `TuningOptions` object, and returns the chosen target and distance with a table of all candidates. See [Kernel-weighted calibration](kernel.md#choosing-the-bandwidth-automatically) for the procedure.
+The cross-validated choice of `n_eff_target` behind `n_eff_target: auto` is available as `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`. It takes the calibration `ChannelSet`s and a `TuningOptions` object, and returns the chosen target and distance with a table of all candidates. It runs in one process unless you pass `n_jobs` (e.g. `n_jobs=4`, as the CLI does); the result is the same either way. The worker processes are spawned, so a script that uses them must start from an `if __name__ == "__main__":` block. See [Kernel-weighted calibration](kernel.md#choosing-the-bandwidth-automatically) for the procedure.

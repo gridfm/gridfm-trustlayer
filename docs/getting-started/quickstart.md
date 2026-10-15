@@ -1,10 +1,10 @@
 # Quick start
 
-This page takes you from a trained GridFM model to calibrated intervals and screening results for an N-k contingency study. It uses the command-line interface; the [Python API](../user-guide/python-api.md) offers the same methods on plain arrays.
+This page takes you from a trained GridFM model to calibrated intervals and screening results for an N-k contingency study. It uses the command-line interface; the [Python API](../user-guide/python-api.md) offers the same methods on plain arrays. The [demo notebook](demo.md) runs the same steps on ready-made IEEE 14-bus data, if you want to see them work first.
 
 You need:
 
-- `gridfm-trustlayer` installed with the `graphkit` extra, since this example calibrates line loading ([Installation](installation.md));
+- `gridfm-trustlayer` installed with the `datakit` extra, since this example calibrates line loading ([Installation](installation.md));
 - [gridfm-datakit](https://github.com/gridfm/gridfm-datakit) to generate scenarios;
 - [gridfm-graphkit](https://github.com/gridfm/gridfm-graphkit) and a trained power-flow model to predict them.
 
@@ -24,8 +24,8 @@ settings:
 ```
 
 ```bash
-gridfm-datakit generate datakit_calibration.yaml
-gridfm-datakit generate datakit_test.yaml
+gridfm_datakit generate datakit_calibration.yaml
+gridfm_datakit generate datakit_test.yaml
 ```
 
 Each run writes its ground truth to `<data_dir>/<grid>/raw/`, including `bus_data.parquet` and `branch_data.parquet`.
@@ -94,17 +94,27 @@ What the main keys mean:
 
 Rather than editing YAML by hand, you can also generate this file with the [config builder](config-builder.md), or start from one of the [example configs](https://github.com/gridfm/gridfm-trustlayer/tree/main/examples/config).
 
-## 4. Run the three steps
+## 4. Fit the layer: `compute`
 
 ```bash
-gridfm_trustlayer compute   --config trust_config.yaml
+gridfm_trustlayer compute --config trust_config.yaml
+```
+
+`compute` reads the calibration set and writes `trustlayer_outputs/case118.trustlayer`. This small file is the layer: everything after it, on test or new scenarios, uses it. You always run `compute` first, then either or both of the next two steps.
+
+| Step | Commands | Needs the AC solution | Gives |
+| --- | --- | --- | --- |
+| Validate | `calibrate`, `screen` | yes (test set) | how well the layer works: coverage, caught and missed violations |
+| Operate | `apply` | **no** | bounds and statuses for new scenarios |
+
+## 5. Validate on the test set: `calibrate` and `screen`
+
+```bash
 gridfm_trustlayer calibrate --config trust_config.yaml
 gridfm_trustlayer screen    --config trust_config.yaml
 ```
 
-**`compute`** reads the calibration set and writes `trustlayer_outputs/case118.trustlayer`. This small file is all you need to apply the layer later.
-
-**`calibrate`** applies it to the test set. It writes one partitioned parquet per target family with the bounds appended (`Vm_pi_lower`, `Vm_pi_upper`, ..., `line_loading_pi_upper`), and a coverage report:
+**`calibrate`** applies the layer to the test set. It writes one partitioned parquet per target family with the bounds appended (`Vm_pi_lower`, `Vm_pi_upper`, ..., `line_loading_pi_upper`), and a coverage report:
 
 ```text
 trustlayer_outputs/calibrated/
@@ -117,11 +127,13 @@ trustlayer_outputs/calibrated/
     └── figures/                    coverage and width by stratum, coverage per bus and line
 ```
 
-**`screen`** compares the test intervals with `screen_bounds` and counts caught and missed violations and false alarms against the true AC solution:
+**`screen`** compares the test intervals with `screen_bounds`, gives every value and every operating scenario a status, and checks both against the true AC solution:
 
 ```text
 trustlayer_outputs/screen/
 ├── summary.md                      <- start here
+├── scenarios.csv                   status of every operating scenario
+├── status_by_stratum.csv           scenarios and values per status
 ├── screening_by_stratum.csv        screening_by_group.csv
 ├── screening_by_element_voltage.csv   screening_by_element_line_loading.csv
 ├── screening_detail_voltage.parquet/  screening_detail_line_loading.parquet/   one row per value
@@ -131,9 +143,9 @@ trustlayer_outputs/screen/
 Each command also prints its headline numbers when it ends.
 
 !!! tip "Large test sets"
-    `calibrate` and `screen` read, process and write the test set one block of scenarios at a time, so their memory use is set mainly by the block size, not by the number of scenarios. The per-row outputs are partitioned parquet datasets, like datakit's: directories with one `scenario_partition=k/` folder per 200 scenarios, which `pd.read_parquet(path)` reads as one table. See [Reading the results](../user-guide/results.md).
+    `calibrate`, `screen` and `apply` read, process and write the scenarios one block at a time, so their memory use is set mainly by the block size, not by the number of scenarios. The per-row outputs are partitioned parquet datasets, like datakit's: directories with one `scenario_partition=k/` folder per 200 scenarios, which `pd.read_parquet(path)` reads as one table. See [Reading the results](../user-guide/results.md).
 
-## 5. Check the results
+### Check the results
 
 Open `calibrated/coverage/summary.md`. For each variable, a table gives one row per stratum:
 
@@ -141,21 +153,28 @@ Open `calibrated/coverage/summary.md`. For each variable, a table gives one row 
 - **worst element** is the lowest coverage of a single bus or line;
 - **mean width** is the average size of the bounds: narrower bounds at the same coverage mean a sharper screen.
 
-Then open `screen/summary.md`. With an upper limit, a line is flagged when `line_loading_pi_upper > 1.0`:
+Then open `screen/summary.md`. It reports the screen in two ways.
 
-- **caught**: real overloads that were flagged;
-- **missed**: real overloads that were not. Keeping these rare is the point of the layer;
-- **false alarms**: flagged lines that were not overloaded, which cost an unnecessary AC power flow;
-- **recall** and **precision** summarize the three.
+**Per operating scenario and per value**, with three statuses:
+
+| Status of a value | of a scenario | When |
+| --- | --- | --- |
+| `within_limits` | `secure` | the whole interval is inside the limits (for a scenario: every value is) |
+| `uncertain` | `uncertain` | the interval straddles a limit (for a scenario: no violation, but at least one uncertain value) |
+| `violation` | `insecure` | the whole interval is beyond a limit (for a scenario: at least one value is) |
+
+Each count comes with how many were wrong according to the true solution: secure scenarios that were actually insecure, insecure ones that were actually secure. The same statuses computed from the **point prediction** alone are shown next to them, so you can see what the intervals add.
+
+**As alarms per value**, the classic screening view: a value raises an alarm when its bound crosses the limit, e.g. `line_loading_pi_upper > 1.0`. Alarms are counted as **caught** (real violations flagged), **missed** (real violations not flagged; keeping these rare is the point of the layer) and **false alarms**, with recall and precision.
 
 !!! note "Known values are not counted"
     In a power flow, `Vm` at PV buses and `Va` at the reference bus are set-points: inputs of the model, not predictions. They are left out of every number above, and the reports say how many were set aside. See [Known values](../user-guide/results.md#known-values-are-not-counted).
 
 [Reading the results](../user-guide/results.md) explains every column and figure.
 
-## 6. Use it on new scenarios
+## 6. Operate on new scenarios: `apply`
 
-The coverage you measured on the test set carries over to new scenarios drawn the same way. To get bounds for scenarios **without a known AC solution**, add their files under `inputs.apply` and run `apply`:
+The coverage you measured on the test set carries over to new scenarios drawn the same way. For scenarios **without a known AC solution**, add their files under `inputs.apply` and run `apply`:
 
 ```yaml title="trust_config.yaml (addition)"
 inputs:
@@ -169,7 +188,21 @@ inputs:
 gridfm_trustlayer apply --config trust_config.yaml
 ```
 
-`apply` computes the same bounds as `calibrate` and writes them, as partitioned datasets named `<predictions>_<variables>_bounds.parquet`, to `outputs.applied_predictions` (or `trustlayer_outputs/<task>/<cp_type>/` by default). There is no coverage report, since there is nothing to compare with. It reads only what the layer needs:
+`apply` computes the same bounds as `calibrate`, and, when `screen_bounds` is set, the same statuses as `screen`, with no truth to check them against. With `outputs.applied_predictions: trustlayer_outputs/applied`:
+
+```text
+trustlayer_outputs/applied/
+├── case118_ieee_predictions_vm_va_bounds.parquet/         bounds, Vm_status, Vm_point_status
+├── case118_ieee_predictions_line_loading_bounds.parquet/  bounds, line_loading_status, ...
+└── status/
+    ├── summary.md                  <- start here: secure, uncertain, insecure scenarios
+    ├── scenarios.csv               status of every operating scenario
+    └── status_by_stratum.csv       scenarios and values per status
+```
+
+The report goes to `outputs.status_dir`, by default `status/` next to the data; without `outputs.applied_predictions`, the data go to `trustlayer_outputs/<task>/<cp_type>/`. Since the rule is the one `screen` uses, the error rates `screen` measured on the test set are the ones to expect here. Without `screen_bounds`, `apply` writes the bounds only.
+
+`apply` reads only what the layer needs:
 
 - the predictions, which for power flow must carry the **set-points** of each scenario: `Vm_target` at PV buses and `Va_target` at the reference bus, as graphkit writes them. They are inputs of a power flow, not results; other buses may have no target;
 - the bus and branch files, for the outages (`strat: n_outages`, `outage_type`), the total load (`strat: system_load_bin`) and the branch parameters (`line_loading`); only the topology, loads and parameters are read, never the solved voltages;

@@ -15,6 +15,7 @@ import gridfm_trustlayer.conformal.kernel as kernel_module
 from gridfm_trustlayer.conformal import ChannelSet, KernelIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import (
     BANDWIDTH_N_EFF,
+    _effective_sample_size_and_slope,
     _prepare_embeddings,
     _solve_bandwidth_for_n_eff,
     _squared_distances,
@@ -138,13 +139,15 @@ def _reference_predict(calibrator: KernelIntervalCalibrator, test: ChannelSet):
         )
         if calibrator.bandwidth == BANDWIDTH_N_EFF:
             target = min(calibrator.n_eff_target, float(len(bank_rows)))
-            bandwidth = _solve_bandwidth_for_n_eff(distances, target)
+            bandwidth, _ = _solve_bandwidth_for_n_eff(distances, target)
         else:
             k = min(calibrator.k_nn, len(bank_rows)) - 1
             bandwidth = np.partition(distances, k, axis=1)[:, k]
         bandwidth = np.maximum(bandwidth, np.float32(1e-12))
         weights = np.exp(-distances / bandwidth[:, None]).astype(np.float32)
-        n_eff = weights.sum(1) ** 2 / np.einsum("ij,ij->i", weights, weights)
+        n_eff = _effective_sample_size_and_slope(
+            distances, bandwidth.astype(np.float64)
+        )[0]
         degenerate = n_eff < calibrator.n_eff_min
         fallback[rows] |= degenerate
         for name in calibrator.channel_names:

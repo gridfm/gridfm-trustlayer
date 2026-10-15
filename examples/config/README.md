@@ -6,10 +6,16 @@ and `inputs.test` (read by `calibrate` and `screen`). They all point at `path/to
 placeholders — substitute your own artifacts, then:
 
 ```bash
-gridfm_trustlayer compute   --config examples/config/<file>.yaml
-gridfm_trustlayer calibrate --config examples/config/<file>.yaml
+gridfm_trustlayer compute   --config examples/config/<file>.yaml   # fit, always
+gridfm_trustlayer calibrate --config examples/config/<file>.yaml   # validate on the test set
 gridfm_trustlayer screen    --config examples/config/<file>.yaml
+gridfm_trustlayer apply     --config examples/config/<file>.yaml   # operate on new scenarios
 ```
+
+`apply` needs an `inputs.apply` block with the new scenarios, which have no known AC solution
+(`element_n_outages_pf.yaml` shows it, commented out). With `screen_bounds` set, as in every
+example, it gives the bounds and the status of every new value (within limits, uncertain,
+violation) and operating scenario (secure, uncertain, insecure).
 
 ## What each one shows
 

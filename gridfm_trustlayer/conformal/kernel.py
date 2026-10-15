@@ -36,6 +36,7 @@ from gridfm_trustlayer.conformal.calibrator import (
     _masked_column_quantile,
     _validate_alpha,
     _validate_entity_alignment,
+    _with_finite,
     pool_sparse_strata,
     validate_sparse_strata,
 )
@@ -168,6 +169,10 @@ class KernelIntervalCalibrator:
     # SHA-256 of the calibration predictions, so that applying the artifact to the
     # very same data (in-sample evaluation) can be detected and refused.
     calibration_fingerprint: str | None = None
+    # Which branches and generators are in service in the calibration set, and
+    # the units of its voltage angles (`GroundTruthReference.to_dict`), set by
+    # the CLI: the other commands count outages and convert angles the same way.
+    ground_truth_reference: dict[str, Any] | None = None
     # How n_eff_target was chosen when `n_eff_target: auto` (cross-validation
     # summary from gridfm_trustlayer.conformal.tuning); None when set by hand.
     tuning: dict[str, Any] | None = None
@@ -322,12 +327,16 @@ class KernelIntervalCalibrator:
             channel_residuals = (target_values - prediction_values).astype(
                 FLOAT32_DTYPE, copy=False
             )
-            valid_mask = _combine_valid_masks(
-                _get_valid_mask(predictions, channel_name),
-                _get_valid_mask(ground_truth, channel_name),
+            valid_mask = _with_finite(
+                _combine_valid_masks(
+                    _get_valid_mask(predictions, channel_name),
+                    _get_valid_mask(ground_truth, channel_name),
+                ),
+                channel_residuals,
             )
             if valid_mask is None:
                 valid_mask = np.ones(channel_residuals.shape, dtype=bool)
+            # Masked out above; zeroed so that they cannot reach any sum.
             channel_residuals = np.nan_to_num(
                 channel_residuals, nan=0.0, posinf=0.0, neginf=0.0
             )
@@ -436,6 +445,9 @@ class KernelIntervalCalibrator:
             name: _get_prediction_channel(predictions, name)
             for name in self.channel_names
         }
+        test_valid = {
+            name: _get_valid_mask(predictions, name) for name in self.channel_names
+        }
         # Scenarios of a stratum the calibration data lacks keep infinite offsets.
         lower_offsets = {
             name: np.full(values.shape, -np.inf, dtype=FLOAT32_DTYPE)
@@ -470,6 +482,7 @@ class KernelIntervalCalibrator:
                 banks=banks,
                 test_rows=test_rows,
                 test_embeddings=standardized_test,
+                test_valid=test_valid,
                 lower_offsets=lower_offsets,
                 upper_offsets=upper_offsets,
                 n_eff_out=n_eff_out,
@@ -639,6 +652,7 @@ class KernelIntervalCalibrator:
         banks: dict[str, _StratumBank],
         test_rows: np.ndarray,
         test_embeddings: np.ndarray,
+        test_valid: dict[str, np.ndarray | None],
         lower_offsets: dict[str, np.ndarray],
         upper_offsets: dict[str, np.ndarray],
         n_eff_out: np.ndarray,
@@ -675,22 +689,29 @@ class KernelIntervalCalibrator:
         def _process(block_rows: np.ndarray) -> None:
             block = test_embeddings[block_rows]
             distances = _squared_distances(block, calibration, calibration_sq)
+            solved_n_eff: np.ndarray | None = None
             if self.bandwidth == BANDWIDTH_N_EFF:
-                bandwidth = _solve_bandwidth_for_n_eff(distances, n_eff_target)
+                solved, solved_n_eff = _solve_bandwidth_for_n_eff(
+                    distances, n_eff_target
+                )
             else:
-                bandwidth = np.partition(distances, neighbor_index, axis=1)[
+                solved = np.partition(distances, neighbor_index, axis=1)[
                     :, neighbor_index
                 ]
-            bandwidth = np.maximum(bandwidth, np.float32(1e-12))
+            bandwidth = np.maximum(solved, np.float32(1e-12))
+            # Unshifted: the total weight is compared with the test point's own
+            # unit weight, so its scale matters (see `_weighted_tail_offsets`).
             weights = np.exp(-distances / bandwidth[:, None]).astype(
                 FLOAT32_DTYPE, copy=False
             )
-
-            weight_sum = weights.sum(axis=1)
-            weight_sq_sum = np.einsum("ij,ij->i", weights, weights)
-            n_eff = np.where(
-                weight_sq_sum > 0.0, (weight_sum**2) / weight_sq_sum, 0.0
-            ).astype(FLOAT32_DTYPE, copy=False)
+            # n_eff does not depend on the scale of the weights, and is computed
+            # on shifted ones: far from every calibration scenario, the squares
+            # of these weights underflow in float32.
+            if solved_n_eff is None or not np.array_equal(bandwidth, solved):
+                solved_n_eff = _effective_sample_size_and_slope(
+                    distances, bandwidth.astype(np.float64)
+                )[0]
+            n_eff = solved_n_eff.astype(FLOAT32_DTYPE, copy=False)
             n_eff_out[block_rows] = n_eff
             bandwidth_out[block_rows] = bandwidth
             # Too few effective neighbours: the stratum quantile. With too little
@@ -725,8 +746,13 @@ class KernelIntervalCalibrator:
                 # An element with no valid calibration residual in this stratum
                 # (e.g. a branch out of service in every calibration scenario)
                 # always takes the fallback bound. That is a property of the data,
-                # not of the kernel, so it must not flag every test scenario.
+                # not of the kernel, so it must not flag every test scenario;
+                # nor must an element that has no interval in this test scenario
+                # (a known set-point, an out-of-service line).
                 usable = reached | ~bank.has_data[None, :]
+                valid = test_valid[name]
+                if valid is not None:
+                    usable |= ~np.asarray(valid[block_rows], dtype=bool)
                 fallback_out[block_rows] |= degenerate | ~usable.all(axis=1)
                 lower_offsets[name][block_rows] = lower
                 upper_offsets[name][block_rows] = upper
@@ -769,6 +795,7 @@ class KernelIntervalCalibrator:
                 key: values.tolist() for key, values in self.pred_bin_edges.items()
             },
             "calibration_fingerprint": self.calibration_fingerprint,
+            "ground_truth_reference": self.ground_truth_reference,
             "tuning": self.tuning,
             "sparse_strata": self.sparse_strata,
         }
@@ -864,6 +891,9 @@ class KernelIntervalCalibrator:
                 for key, values in cast(dict, data.get("pred_bin_edges") or {}).items()
             },
             calibration_fingerprint=_optional_str(data.get("calibration_fingerprint")),
+            ground_truth_reference=cast(
+                dict[str, Any] | None, data.get("ground_truth_reference")
+            ),
             tuning=cast(dict[str, Any] | None, data.get("tuning")),
             sparse_strata=validate_sparse_strata(
                 str(data.get("sparse_strata", DEFAULT_SPARSE_STRATA))
@@ -921,8 +951,12 @@ def _prepare_embeddings(
 def _solve_bandwidth_for_n_eff(
     distances: np.ndarray,
     target: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Return the per-row bandwidth whose kernel weights hit `target` n_eff.
+
+    Also returns the `n_eff` of each row at that bandwidth, computed on the
+    shifted weights of `_effective_sample_size_and_slope`, which do not
+    underflow.
 
     `n_eff` increases monotonically from 1 (all weight on the nearest
     calibration scenario) to the stratum size (uniform weights). It behaves
@@ -944,6 +978,7 @@ def _solve_bandwidth_for_n_eff(
     log_target = np.log(target)
     log_bandwidth = 0.5 * (log_lower + log_upper)
     bandwidth = np.exp(log_bandwidth)
+    reached = np.zeros(distances.shape[0], dtype=np.float64)
     active = np.arange(distances.shape[0])
     step = log_bandwidth.copy()
     for _ in range(_N_EFF_SOLVE_MAX_ITER):
@@ -952,20 +987,23 @@ def _solve_bandwidth_for_n_eff(
         n_eff, slope = _effective_sample_size_and_slope(
             distances[active], np.exp(point)
         )
+        reached[active] = n_eff
         converged = np.abs(n_eff - target) <= _N_EFF_SOLVE_RTOL * target
         below_target = n_eff < target
         lower = np.where(below_target, point, log_lower[active])
         upper = np.where(below_target, log_upper[active], point)
         log_lower[active] = lower
         log_upper[active] = upper
-        with np.errstate(divide="ignore", invalid="ignore"):
+        # A flat n_eff (slope near 0) gives no usable Newton step: the step is
+        # non-finite or outside the bracket, and bisection takes over below.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             newton = point - (np.log(n_eff) - log_target) / slope
         inside = np.isfinite(newton) & (newton > lower) & (newton < upper)
         step[active] = np.where(inside, newton, 0.5 * (lower + upper))
         active = active[~converged]
         if active.size == 0:
             break
-    return bandwidth.astype(FLOAT32_DTYPE, copy=False)
+    return bandwidth.astype(FLOAT32_DTYPE, copy=False), reached
 
 
 def _effective_sample_size_and_slope(

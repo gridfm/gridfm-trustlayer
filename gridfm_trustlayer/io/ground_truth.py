@@ -92,6 +92,11 @@ class GroundTruthReference:
     some angle exceeds 2 pi. Both depend on which scenarios are loaded, so a
     reader that loads a dataset block by block computes them once, with
     `scan_ground_truth_reference`, and passes them to `load_ground_truth`.
+
+    `compute` stores the reference of the calibration set in the artifact, and
+    the other commands apply it to their data: a scenario has the same outage
+    count and angle units whatever other scenarios it is processed with (a
+    single N-1 scenario would otherwise count as N-0).
     """
 
     branch_ids: np.ndarray
@@ -99,6 +104,42 @@ class GroundTruthReference:
     generator_ids: np.ndarray | None
     generator_in_service: np.ndarray | None
     va_in_degrees: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly form, as stored in the artifact."""
+
+        return {
+            "branch_ids": self.branch_ids.tolist(),
+            "branch_in_service": self.branch_in_service.tolist(),
+            "generator_ids": None
+            if self.generator_ids is None
+            else self.generator_ids.tolist(),
+            "generator_in_service": None
+            if self.generator_in_service is None
+            else self.generator_in_service.tolist(),
+            "va_in_degrees": bool(self.va_in_degrees),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GroundTruthReference:
+        def ids(key: str) -> np.ndarray | None:
+            values = data.get(key)
+            return None if values is None else np.asarray(values, dtype=np.int64)
+
+        def flags(key: str) -> np.ndarray | None:
+            values = data.get(key)
+            return None if values is None else np.asarray(values, dtype=bool)
+
+        branch_ids, branch_in_service = ids("branch_ids"), flags("branch_in_service")
+        if branch_ids is None or branch_in_service is None:
+            raise ValueError("The stored ground-truth reference has no branches.")
+        return cls(
+            branch_ids=branch_ids,
+            branch_in_service=branch_in_service,
+            generator_ids=ids("generator_ids"),
+            generator_in_service=flags("generator_in_service"),
+            va_in_degrees=bool(data.get("va_in_degrees", False)),
+        )
 
 
 def scan_ground_truth_reference(

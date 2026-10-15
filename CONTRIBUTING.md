@@ -2,11 +2,28 @@
 
 Contributions are welcome: bug reports, fixes, new conformal methods or stratifications, support for new targets or tasks, documentation and examples. For anything larger than a small fix, please open an issue first so the approach can be agreed before you start.
 
+All participants follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities privately, as described in [SECURITY.md](SECURITY.md), not in public issues.
+
 ## What belongs here
 
 `gridfm-trustlayer` is a library: the calibration methods, the loaders for GridFM data, the command-line interface, and their documentation. Code tied to one specific study or deployment (experiment scripts, paper figures, one-off pipelines) belongs in its own repository and can use trustlayer as a dependency.
 
 The statistical core (`gridfm_trustlayer/conformal/`) works on plain NumPy arrays and must stay free of PyTorch, Lightning and GPU dependencies.
+
+Where things are:
+
+| Path | Contents |
+| --- | --- |
+| `gridfm_trustlayer/conformal/` | the two calibrators and the bandwidth tuning |
+| `gridfm_trustlayer/io/` | loaders for predictions, ground truth and embeddings; partitioned parquet; artifacts |
+| `gridfm_trustlayer/screening.py` | the status rule (within limits, uncertain, violation) |
+| `gridfm_trustlayer/parallel.py` | process pools for the bandwidth tuning and, on request, blocks of scenarios |
+| `gridfm_trustlayer/cli/main.py` | the argument parser and the dispatch to the commands |
+| `gridfm_trustlayer/cli/{compute,calibrate,screen,apply}.py` | one module per command |
+| `gridfm_trustlayer/cli/common.py` | helpers shared by the commands |
+| `gridfm_trustlayer/cli/reports.py`, `status.py` | the CSV tables, figures and `summary.md` files |
+| `gridfm_trustlayer/cli/config.py` | config loading and validation |
+| `gridfm_trustlayer/interactive.py` | the Jupyter config builder |
 
 ## Checklist
 
@@ -48,7 +65,7 @@ If you add or change a config key:
 
 ### 5. Tests
 
-- [ ] Unit tests for the new behaviour and its edge cases, on small synthetic data. Do not commit datasets or large files.
+- [ ] Unit tests for the new behaviour and its edge cases, on small synthetic data. Do not commit datasets or large files (the demo data in `examples/demo/data` is the one exception).
 - [ ] The full suite passes:
 
   ```bash

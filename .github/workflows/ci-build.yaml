@@ -15,8 +15,8 @@ concurrency:
 
 # Supported Python versions are 3.10-3.12 (requires-python in pyproject.toml).
 # The newest is checked by pre-commit, which also runs the test suite; the
-# oldest gets its own test run, since pip installs older dependency versions
-# there (e.g. numpy 2.2).
+# others get their own test runs (on 3.10, pip installs older dependency
+# versions, e.g. numpy 2.2).
 jobs:
   pre-commit:
     name: Pre-commit (ruff, mypy, tests) on Python 3.12
@@ -29,6 +29,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -39,16 +41,22 @@ jobs:
         run: pre-commit run --all-files
 
   pytests:
-    name: Tests on Python 3.10 (oldest supported)
+    name: Tests on Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |

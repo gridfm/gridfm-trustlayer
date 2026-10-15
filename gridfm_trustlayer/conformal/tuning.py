@@ -52,6 +52,7 @@ from gridfm_trustlayer.conformal.kernel import (
     SUPPORTED_DISTANCES,
     KernelIntervalCalibrator,
 )
+from gridfm_trustlayer.parallel import process_pool, resolve_jobs, threads_per_worker
 
 DEFAULT_TUNING_GRID = (100.0, 200.0, 400.0, 600.0, 800.0, 1200.0)
 DEFAULT_TUNING_FOLDS = 5
@@ -134,6 +135,11 @@ class TuningOptions:
             if len(bounds) != 2 or bounds[0] > bounds[1]:
                 raise ValueError(
                     "tuning.n_eff_range must be [low, high] with low <= high."
+                )
+            # Candidates are whole numbers of scenarios.
+            if math.ceil(bounds[0]) > math.floor(bounds[1]):
+                raise ValueError(
+                    f"tuning.n_eff_range must contain a whole number; got {bounds}."
                 )
             n_eff_range = (bounds[0], bounds[1])
         group_by = str(raw.get("group_by", "auto")).strip().lower()
@@ -297,6 +303,7 @@ def tune_n_eff_target(
     system_load_n_bins: int | None = None,
     system_load_bin_edges: np.ndarray | None = None,
     sparse_strata: str = DEFAULT_SPARSE_STRATA,
+    n_jobs: int | None = 1,
 ) -> BandwidthTuningResult:
     """Choose `n_eff_target` (and optionally `distance`) by K-fold cross-validation.
 
@@ -307,6 +314,12 @@ def tune_n_eff_target(
     the same fold; without it, near-duplicate scenarios on both sides of a fold
     make localization look better than it is. `sparse_strata` is passed to every
     fold's calibrator, so the candidates are compared as they will be applied.
+
+    The fold x candidate fits are independent and run in `n_jobs` processes
+    (see `gridfm_trustlayer.parallel`; `None` for the default of 4); the result
+    is the same as with `n_jobs=1`. A script that passes `n_jobs` other than 1
+    must start from an `if __name__ == "__main__":` block, as processes are
+    spawned.
     """
 
     options = options or TuningOptions()
@@ -335,54 +348,44 @@ def tune_n_eff_target(
     infinite: dict[tuple[Setting, str], int] = {}
     fallbacks: dict[Setting, int] = {}
 
-    for f in range(options.folds):
-        train, held = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
-        bank_predictions, bank_truth = (
-            _rows(predictions, train),
-            _rows(ground_truth, train),
-        )
-        held_predictions, held_truth = (
-            _rows(predictions, held),
-            _rows(ground_truth, held),
-        )
-        for setting in settings:
-            target, setting_distance = setting
-            calibrator = KernelIntervalCalibrator.fit(
-                bank_predictions,
-                bank_truth,
-                alpha=alpha,
-                channel_names=channel_names,
-                strat=strat,
-                embeddings=embeddings[train],
-                embedding_pooling=embedding_pooling,
-                n_eff_min=n_eff_min,
-                bandwidth="n_eff",
-                n_eff_target=target,
-                distance=setting_distance,
-                system_load_n_bins=system_load_n_bins,
-                system_load_bin_edges=system_load_bin_edges,
-                sparse_strata=sparse_strata,
-            )
-            intervals = calibrator.predict_intervals(held_predictions)
-            fallbacks[setting] = fallbacks.get(setting, 0) + int(
-                np.asarray(calibrator.diagnostics["kernel_fallback"]).sum()
-            )
-            for channel in channel_names:
-                lower, upper = intervals[channel]
-                truth = held_truth.channels[channel]
-                valid = _valid(held_predictions, held_truth, channel)
-                hit = (lower <= truth) & (truth <= upper) & valid
-                for scope in (None, *stratum_values.tolist()):
-                    rows = slice(None) if scope is None else strata[held] == scope
-                    key = (setting, channel, scope)
-                    covered[key] = covered.get(key, 0) + int(hit[rows].sum())
-                    counted[key] = counted.get(key, 0) + int(valid[rows].sum())
-                width = (upper - lower)[valid]
-                finite = np.isfinite(width)
-                wkey = (setting, channel)
-                width_sum[wkey] = width_sum.get(wkey, 0.0) + float(width[finite].sum())
-                width_n[wkey] = width_n.get(wkey, 0) + int(finite.sum())
-                infinite[wkey] = infinite.get(wkey, 0) + int((~finite).sum())
+    context = _FoldContext(
+        predictions=predictions,
+        ground_truth=ground_truth,
+        embeddings=embeddings,
+        fold=fold,
+        strata=strata,
+        stratum_values=stratum_values,
+        alpha=alpha,
+        channel_names=channel_names,
+        strat=strat,
+        embedding_pooling=embedding_pooling,
+        n_eff_min=n_eff_min,
+        system_load_n_bins=system_load_n_bins,
+        system_load_bin_edges=system_load_bin_edges,
+        sparse_strata=sparse_strata,
+    )
+    tasks = [(f, setting) for f in range(options.folds) for setting in settings]
+    workers = min(resolve_jobs(n_jobs), len(tasks))
+    if workers <= 1:
+        results = [_evaluate_fold(context, f, setting) for f, setting in tasks]
+    else:
+        context.threads = threads_per_worker(workers)
+        with process_pool(
+            workers, initializer=_set_fold_context, initargs=(context,)
+        ) as pool:
+            results = list(pool.map(_evaluate_fold_task, tasks))
+    # Added up in the order of the serial loop, so that sums are identical.
+    for (_, setting), result in zip(tasks, results, strict=True):
+        fallbacks[setting] = fallbacks.get(setting, 0) + result.fallbacks
+        for (channel, scope), value in result.covered.items():
+            key = (setting, channel, scope)
+            covered[key] = covered.get(key, 0) + value
+            counted[key] = counted.get(key, 0) + result.counted[(channel, scope)]
+        for channel in channel_names:
+            wkey = (setting, channel)
+            width_sum[wkey] = width_sum.get(wkey, 0.0) + result.width_sum[channel]
+            width_n[wkey] = width_n.get(wkey, 0) + result.width_n[channel]
+            infinite[wkey] = infinite.get(wkey, 0) + result.infinite[channel]
 
     def mean_width(setting: Setting, channel: str) -> float:
         return width_sum[(setting, channel)] / max(width_n[(setting, channel)], 1)
@@ -496,6 +499,105 @@ def _tolerance(setting: float | str, alpha: float, n_scenarios: int) -> float:
     if setting == "auto":
         return 2.0 * math.sqrt(alpha * (1.0 - alpha) / max(n_scenarios, 1))
     return float(setting)
+
+
+@dataclass
+class _FoldContext:
+    """Everything a fold x candidate evaluation needs; sent once to each worker."""
+
+    predictions: ChannelSet
+    ground_truth: ChannelSet
+    embeddings: np.ndarray
+    fold: np.ndarray
+    strata: np.ndarray
+    stratum_values: np.ndarray
+    alpha: float
+    channel_names: tuple[str, ...]
+    strat: str | None
+    embedding_pooling: str
+    n_eff_min: float
+    system_load_n_bins: int | None
+    system_load_bin_edges: np.ndarray | None
+    sparse_strata: str
+    threads: int | None = None
+
+
+@dataclass
+class _FoldResult:
+    """Coverage and width counts of one candidate on one held-out fold."""
+
+    covered: dict[tuple[str, int | None], int]
+    counted: dict[tuple[str, int | None], int]
+    width_sum: dict[str, float]
+    width_n: dict[str, int]
+    infinite: dict[str, int]
+    fallbacks: int
+
+
+_CONTEXT: _FoldContext | None = None
+
+
+def _set_fold_context(context: _FoldContext) -> None:
+    global _CONTEXT
+    _CONTEXT = context
+
+
+def _evaluate_fold_task(task: tuple[int, tuple[float, str]]) -> _FoldResult:
+    assert _CONTEXT is not None
+    return _evaluate_fold(_CONTEXT, *task)
+
+
+def _evaluate_fold(
+    context: _FoldContext, f: int, setting: tuple[float, str]
+) -> _FoldResult:
+    """Fit the kernel on all folds but `f` with one candidate; count on fold `f`."""
+
+    train = np.flatnonzero(context.fold != f)
+    held = np.flatnonzero(context.fold == f)
+    held_predictions = _rows(context.predictions, held)
+    held_truth = _rows(context.ground_truth, held)
+    target, setting_distance = setting
+    calibrator = KernelIntervalCalibrator.fit(
+        _rows(context.predictions, train),
+        _rows(context.ground_truth, train),
+        alpha=context.alpha,
+        channel_names=context.channel_names,
+        strat=context.strat,
+        embeddings=context.embeddings[train],
+        embedding_pooling=context.embedding_pooling,
+        n_eff_min=context.n_eff_min,
+        bandwidth="n_eff",
+        n_eff_target=target,
+        distance=setting_distance,
+        system_load_n_bins=context.system_load_n_bins,
+        system_load_bin_edges=context.system_load_bin_edges,
+        sparse_strata=context.sparse_strata,
+    )
+    calibrator.n_jobs = context.threads
+    intervals = calibrator.predict_intervals(held_predictions)
+    result = _FoldResult(
+        covered={},
+        counted={},
+        width_sum={},
+        width_n={},
+        infinite={},
+        fallbacks=int(np.asarray(calibrator.diagnostics["kernel_fallback"]).sum()),
+    )
+    for channel in context.channel_names:
+        lower, upper = intervals[channel]
+        truth = held_truth.channels[channel]
+        valid = _valid(held_predictions, held_truth, channel)
+        hit = (lower <= truth) & (truth <= upper) & valid
+        for scope in (None, *context.stratum_values.tolist()):
+            rows = slice(None) if scope is None else context.strata[held] == scope
+            result.covered[(channel, scope)] = int(hit[rows].sum())
+            result.counted[(channel, scope)] = int(valid[rows].sum())
+        width = (upper - lower)[valid]
+        finite = np.isfinite(width)
+        result.width_sum[channel] = float(width[finite].sum())
+        result.width_n[channel] = int(finite.sum())
+        result.infinite[channel] = int((~finite).sum())
+    return result
 
 
 def _valid(

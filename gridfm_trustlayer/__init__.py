@@ -12,7 +12,10 @@ Data loading:
     load_predictions, load_ground_truth, load_scenario_embeddings, compute_line_loading
 
 Artifacts:
-    save_interval_artifact, load_interval_artifact
+    save_interval_artifact, load_interval_artifact, load_interval_artifacts
+
+Screening:
+    classify_status, scenario_status  status of values and operating scenarios
 """
 
 from gridfm_trustlayer._version import __version__
@@ -28,8 +31,13 @@ from gridfm_trustlayer.io import (
     load_ground_truth,
     load_predictions,
 )
-from gridfm_trustlayer.io.artifact import load_interval_artifact, save_interval_artifact
+from gridfm_trustlayer.io.artifact import (
+    load_interval_artifact,
+    load_interval_artifacts,
+    save_interval_artifact,
+)
 from gridfm_trustlayer.io.embeddings import load_scenario_embeddings
+from gridfm_trustlayer.screening import classify_status, scenario_status
 
 __all__ = [
     "ChannelSet",
@@ -38,10 +46,13 @@ __all__ = [
     "NaiveIntervalCalibrator",
     "PredictionSet",
     "__version__",
+    "classify_status",
     "compute_line_loading",
     "load_ground_truth",
     "load_interval_artifact",
+    "load_interval_artifacts",
     "load_predictions",
     "load_scenario_embeddings",
     "save_interval_artifact",
+    "scenario_status",
 ]

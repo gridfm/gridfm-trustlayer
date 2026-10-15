@@ -105,7 +105,18 @@ def load_interval_artifact(artifact_path: str) -> IntervalCalibrator:
 
 
 def load_interval_artifacts(artifact_path: str) -> dict[str, IntervalCalibrator]:
-    """Load one or more interval calibrators from an artifact file."""
+    """Read every calibrator of a `.trustlayer` file.
+
+    A CLI run with both bus voltages and line loading stores one calibrator
+    per family in the same file; a single-family file holds one.
+
+    Args:
+        artifact_path: A file written by `save_interval_artifact` or `compute`.
+
+    Returns:
+        The calibrators by family: `"volt"` (bus variables) and `"line"`
+        (`line_loading`).
+    """
 
     path = Path(artifact_path)
     raw = path.read_bytes()
@@ -127,6 +138,32 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, IntervalCalibrator]
         }
     calibrator = NaiveIntervalCalibrator.from_dict(data)
     return {_artifact_key(calibrator): calibrator}
+
+
+def load_ground_truth_reference(artifact_path: str) -> dict[str, Any] | None:
+    """The calibration set's ground-truth reference stored in an artifact, if any.
+
+    Reads only the metadata, not the residual bank of a kernel artifact.
+    """
+
+    raw = Path(artifact_path).read_bytes()
+    if raw[: len(_NPZ_MAGIC)] == _NPZ_MAGIC:
+        with np.load(io.BytesIO(raw), allow_pickle=False) as payload:
+            if _META_KEY not in payload:
+                return None
+            meta = json.loads(bytes(payload[_META_KEY]).decode("utf-8"))
+        entries = list((meta.get("artifacts") or {}).values())
+    else:
+        data = json.loads(raw.decode("utf-8"))
+        entries = (
+            list((data.get("artifacts") or {}).values())
+            if data.get("version") == BUNDLE_VERSION
+            else [data]
+        )
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("ground_truth_reference"):
+            return cast(dict[str, Any], entry["ground_truth_reference"])
+    return None
 
 
 def _save_kernel_artifacts(

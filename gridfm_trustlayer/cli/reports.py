@@ -1,7 +1,7 @@
 """Reports of `calibrate` and `screen`: tables, figures and a summary page.
 
-The per-element statistics are computed in `cli.main`; this module turns them
-into the files a user reads: CSV tables (rounded, one row per variable and
+The per-element statistics are computed in `cli.calibrate` and `cli.screen`;
+this module turns them into the files a user reads: CSV tables (rounded, one row per variable and
 stratum, group or element), a few figures per variable, and `summary.md`, a
 one-page overview that links to the rest.
 
@@ -12,10 +12,11 @@ every statistic here; the tables report how many there were (`n_known`).
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import matplotlib  # type: ignore[import-untyped]
 import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -46,6 +47,15 @@ def write_csv(frame: pd.DataFrame, path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False, float_format="%.6g")
+
+
+# Horizontal box plots: `orientation` exists from matplotlib 3.10, and `vert`,
+# its predecessor, is deprecated from 3.11 and removed in 3.13.
+_HORIZONTAL: dict[str, Any] = (
+    {"orientation": "horizontal"}
+    if tuple(int(part) for part in matplotlib.__version__.split(".")[:2]) >= (3, 10)
+    else {"vert": False}
+)
 
 
 def unit_of(variable: str) -> tuple[str, float]:
@@ -240,43 +250,65 @@ def coverage_by_element(elements: pd.DataFrame, entity_column: str) -> pd.DataFr
     return sort_by_stratum(elements).loc[:, columns]
 
 
-def save_coverage_figures(
+# A figure to draw: a function and its arguments, the last of which is the
+# output path. The figures of a report take under a second together, less than
+# starting worker processes, so they are drawn one after the other.
+FigureTask = tuple[Callable[..., Path], tuple[Any, ...]]
+
+
+def render_figures(tasks: Sequence[FigureTask]) -> list[Path]:
+    """Draw the figures; returns their paths in task order."""
+
+    for _, arguments in tasks:
+        Path(arguments[-1]).parent.mkdir(parents=True, exist_ok=True)
+    return [function(*arguments) for function, arguments in tasks]
+
+
+def coverage_figure_tasks(
     by_stratum: pd.DataFrame,
     elements: pd.DataFrame,
     directory: Path,
     *,
     entity_column: str,
-) -> list[Path]:
+) -> list[FigureTask]:
     """Three figures per variable: coverage by stratum, per element, width by stratum."""
 
-    directory.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
+    tasks: list[FigureTask] = []
     entity_label = "line" if entity_column == "branch" else "bus"
     for variable, rows in by_stratum.groupby("variable", sort=False):
         variable_elements = elements[
             (elements["variable"] == variable) & (elements["n_values"] > 0)
         ]
         stem = variable.lower()
-        paths.append(
-            _coverage_by_stratum_figure(
-                rows, directory / f"{stem}_coverage_by_stratum.png"
+        tasks.append(
+            (
+                _coverage_by_stratum_figure,
+                (rows, directory / f"{stem}_coverage_by_stratum.png"),
             )
         )
-        paths.append(
-            _coverage_by_element_figure(
-                variable,
-                variable_elements[variable_elements["stratification"] == ""],
-                float(rows["target_coverage"].iloc[0]),
-                entity_label,
-                directory / f"{stem}_coverage_by_{entity_label}.png",
+        tasks.append(
+            (
+                _coverage_by_element_figure,
+                (
+                    variable,
+                    variable_elements[variable_elements["stratification"] == ""],
+                    float(rows["target_coverage"].iloc[0]),
+                    entity_label,
+                    directory / f"{stem}_coverage_by_{entity_label}.png",
+                ),
             )
         )
-        paths.append(
-            _width_by_stratum_figure(
-                variable, variable_elements, directory / f"{stem}_width_by_stratum.png"
+        tasks.append(
+            (
+                _width_by_stratum_figure,
+                (
+                    variable,
+                    variable_elements,
+                    directory / f"{stem}_width_by_stratum.png",
+                ),
             )
         )
-    return paths
+    return tasks
 
 
 def _coverage_by_stratum_figure(rows: pd.DataFrame, path: Path) -> Path:
@@ -395,7 +427,7 @@ def _width_by_stratum_figure(variable: str, elements: pd.DataFrame, path: Path) 
     box = ax.boxplot(
         data,
         positions=positions,
-        vert=False,
+        **_HORIZONTAL,
         patch_artist=True,
         widths=0.55,
         showmeans=True,
@@ -480,29 +512,39 @@ def screening_long(
     return pd.DataFrame.from_records(records)
 
 
-def save_screening_figures(by_stratum: pd.DataFrame, directory: Path) -> list[Path]:
+def screening_figure_tasks(
+    by_stratum: pd.DataFrame, directory: Path
+) -> list[FigureTask]:
     """Per variable: the confusion matrix, and recall and precision by stratum."""
 
-    directory.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
+    tasks: list[FigureTask] = []
     for variable, rows in by_stratum.groupby("variable", sort=False):
         side = "upper" if variable == "line_loading" else "any"
         rows = rows[rows["side"] == side]
         overall = rows[rows["stratification"] == ""].iloc[0]
-        paths.append(
-            _confusion_figure(
-                variable, side, overall, directory / f"{variable.lower()}_confusion.png"
+        tasks.append(
+            (
+                _confusion_figure,
+                (
+                    variable,
+                    side,
+                    overall,
+                    directory / f"{variable.lower()}_confusion.png",
+                ),
             )
         )
         if (rows["stratification"] != "").any():
-            paths.append(
-                _screening_by_stratum_figure(
-                    variable,
-                    rows,
-                    directory / f"{variable.lower()}_screening_by_stratum.png",
+            tasks.append(
+                (
+                    _screening_by_stratum_figure,
+                    (
+                        variable,
+                        rows,
+                        directory / f"{variable.lower()}_screening_by_stratum.png",
+                    ),
                 )
             )
-    return paths
+    return tasks
 
 
 CONFUSION_ROWS = ("true violation", "no violation")
@@ -569,7 +611,6 @@ def _confusion_figure(variable: str, side: str, row: pd.Series, path: Path) -> P
         if not (pd.isna(recall) or pd.isna(precision))
         else f"{variable}, {limit}"
     )
-    fig.tight_layout()
     return _save(fig, path)
 
 
@@ -597,7 +638,6 @@ def _screening_by_stratum_figure(variable: str, rows: pd.DataFrame, path: Path) 
     axes[0].set_yticks(positions, labels)
     axes[0].set_ylabel(_stratification_name(rows) or "")
     fig.suptitle(f"{variable}: screening by {_stratification_name(rows)}")
-    fig.tight_layout()
     return _save(fig, path)
 
 
@@ -706,7 +746,7 @@ def write_coverage_summary(
             markdown_table(table),
             "",
         ]
-    lines += _figures_and_files(path, figures, files)
+    lines += figures_and_files(path, figures, files)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -718,15 +758,16 @@ def write_screening_summary(
     *,
     context: Sequence[str],
     known_where: Mapping[str, str],
+    sections: Sequence[str] = (),
 ) -> None:
     lines = ["# Screening report", "", *context, ""]
     sentence = known_sentence(by_stratum, known_where)
     if sentence:
         lines += [sentence, ""]
     lines += [
-        "An alarm is raised when a bound crosses a limit; it is checked against the true value.",
+        "## Alarms per value",
         "",
-        "## Results",
+        "An alarm is raised when a bound crosses a limit; it is checked against the true value.",
         "",
     ]
     by_stratum = sort_by_stratum(by_stratum)
@@ -747,11 +788,12 @@ def write_screening_summary(
         )
         limit = "upper limit" if side == "upper" else "either limit"
         lines += [f"### {variable} ({limit})", "", markdown_table(table), ""]
-    lines += _figures_and_files(path, figures, files)
+    lines += list(sections)
+    lines += figures_and_files(path, figures, files)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _figures_and_files(
+def figures_and_files(
     path: Path, figures: Sequence[Path], files: Sequence[tuple[str, str]]
 ) -> list[str]:
     lines: list[str] = []

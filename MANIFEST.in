@@ -1,3 +1,7 @@
 include CHANGELOG.md
 include CITATION.cff
 include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+include SECURITY.md
+# The tests need fixtures and example data that the sdist does not carry.
+prune tests

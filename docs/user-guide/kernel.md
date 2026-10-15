@@ -122,6 +122,8 @@ tuning:
 
 **Cost.** Roughly one kernel run per fold and candidate, each on $(K-1)/K$ of the calibration data: `folds × len(grid) × len(distances)` runs for a grid search, `folds × budget` for a random one. The weighted quantiles dominate, so the cost grows with the number of calibration scenarios and of buses or lines. On a laptop CPU, the default grid takes about ten seconds for 10,000 calibration scenarios on a network with 186 lines.
 
+The runs are independent and use 4 processes by default, which halved the time of the default grid on 20,000 IEEE-118 calibration scenarios (75 s to 37 s) and doubled the peak memory (2.4 GB to 5.0 GB), since each process holds a copy of the calibration data. The choice is the same whatever the number of processes. Set `n_jobs: 1` (or `--n-jobs 1`) to save memory, or a higher number on a machine with more cores.
+
 All options are listed in the [configuration reference](../reference/configuration.md#tuning).
 
 ## Distance

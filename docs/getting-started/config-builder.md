@@ -1,13 +1,13 @@
 # Building the config
 
-All three commands read one YAML config. Which keys it needs depends on your earlier choices: kernel options only matter for `cp_type: kernel`, bin counts only for binned stratifications, screening bounds only if you screen. The **config builder** is a Jupyter form that asks only the questions that apply, explains each option in one line, and checks the result with the same validation as the CLI before saving it.
+All four commands read one YAML config. Which keys it needs depends on your earlier choices: kernel options only matter for `cp_type: kernel`, bin counts only for binned stratifications, screening bounds only if you screen. The **config builder** is a Jupyter form that asks only the questions that apply, explains each option in one line, and checks the result with the same validation as the CLI before saving it.
 
 ## Open the form
 
 Install the `interactive` extra, and Jupyter if you don't have it:
 
 ```bash
-python -m pip install "gridfm-trustlayer[interactive] @ git+https://github.com/gridfm/gridfm-trustlayer"
+python -m pip install "gridfm-trustlayer[interactive]"
 python -m pip install jupyterlab
 ```
 

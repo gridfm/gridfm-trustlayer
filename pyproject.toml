@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=75"]
+# 77: the SPDX `license` expression below.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,30 +21,34 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering",
+  "Typing :: Typed",
 ]
 dependencies = [
-  "matplotlib>=3.8",
+  "matplotlib>=3.8.4",
   "numpy>=2.2",
   "pandas>=2.3",
-  "pyarrow>=15",
+  "pyarrow>=16",
   "scipy>=1.13",
   "pyyaml>=6",
 ]
 
 [project.urls]
+Documentation = "https://gridfm.github.io/gridfm-trustlayer/"
 Repository = "https://github.com/gridfm/gridfm-trustlayer"
 Issues = "https://github.com/gridfm/gridfm-trustlayer/issues"
 Changelog = "https://github.com/gridfm/gridfm-trustlayer/blob/main/CHANGELOG.md"
 Paper = "https://arxiv.org/abs/2602.07995"
 
 [project.optional-dependencies]
-# gridfm-datakit imports `run_julia` from juliapkg, which juliapkg 0.1.26
-# removed. Cap it until datakit adopts the replacement API.
-graphkit = ["gridfm-graphkit>=0.0.6", "gridfm-datakit>=1.0.2", "juliapkg<0.1.26"]
+# Line loading uses datakit's branch-flow routine (gridfm_trustlayer.io.loading).
+datakit = ["gridfm-datakit>=1.1.0"]
+# The same, next to gridfm-graphkit for running models in one environment;
+# graphkit needs PyTorch and its extensions, see its installation guide.
+graphkit = ["gridfm-graphkit>=0.0.6", "gridfm-datakit>=1.1.0"]
 # Jupyter form that builds a config file: gridfm_trustlayer.interactive.config_builder()
 interactive = ["ipywidgets>=8"]
 dev = ["ruff", "mypy", "pre-commit", "build", "mkdocs>=1.6,<2", "mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
-test = ["pytest", "pytest-cov", "gridfm-datakit>=1.0.2", "juliapkg<0.1.26", "ipywidgets>=8"]
+test = ["pytest", "pytest-cov", "gridfm-datakit>=1.1.0", "ipywidgets>=8", "nbclient>=0.10", "ipykernel>=6"]
 
 [project.scripts]
 gridfm_trustlayer = "gridfm_trustlayer.cli:main"

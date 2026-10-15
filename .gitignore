@@ -1,33 +1,43 @@
-data_out*
-logs/
-site/
-.julia/
-data/case*
+# Python: bytecode, packaging, environments
 __pycache__/
-*.egg-info/
-*.log
 *.pyc
-.coverage
-.DS_Store
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tool caches and coverage
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-.venv/
-.vscode/
-build/
-dist/
+.coverage
 htmlcov/
+
+# Docs build (mkdocs)
+site/
+
+# Editors, notebooks and OS
+.vscode/
+.ipynb_checkpoints/
+.DS_Store
+
+# Local data, models and run outputs
+data/case*
+data_out*
+.julia/
+/models/
 mlruns/
-models/
-run_*
-predictions_test*
+logs/
+*.log
+/run_*
+/predictions_test*
 trustlayer_outputs/
-venv/
+examples/demo/outputs/
+config_files
 
 # Internal planning and local notes
 IMPLEMENTATION_PLAN.md
 checklist.md
 conformal_layer_int*
-notes*
-
-config_files
+/notes*

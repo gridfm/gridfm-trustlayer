@@ -4,4 +4,6 @@ import sys
 
 from gridfm_trustlayer.cli import main
 
-sys.exit(main())
+# Guarded: worker processes are spawned and import the main module again.
+if __name__ == "__main__":
+    sys.exit(main())

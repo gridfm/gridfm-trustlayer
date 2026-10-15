@@ -36,7 +36,7 @@ def compute_line_loading(
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "gridfm_datakit is required for compute_line_loading(). Install the "
-            'graphkit extra: pip install "gridfm-trustlayer[graphkit]".',
+            'datakit extra: pip install "gridfm-trustlayer[datakit]".',
         ) from exc
     compute_branch_powers_vectorized = cast(
         Any,

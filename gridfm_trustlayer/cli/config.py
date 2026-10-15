@@ -9,6 +9,7 @@ import yaml  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.conformal.calibrator import validate_sparse_strata
 from gridfm_trustlayer.conformal.kernel import (
+    DEFAULT_BANDWIDTH,
     SUPPORTED_BANDWIDTHS,
     SUPPORTED_DISTANCES,
 )
@@ -38,6 +39,7 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "tuning",
     "screen_bounds",
     "save_figures",
+    "n_jobs",
     "inputs",
     "outputs",
     "commands",
@@ -64,6 +66,7 @@ _ALLOWED_COMMAND_OVERRIDE_KEYS = {
     "artifact",
     "screen_bounds",
     "save_figures",
+    "n_jobs",
     "outputs",
 }
 
@@ -97,7 +100,7 @@ _OUTPUT_KEYS = {
     "applied_predictions_line",
     "coverage_dir",
     "screen_dir",
-    "screened_predictions",
+    "status_dir",
 }
 
 
@@ -238,6 +241,7 @@ def resolve_command_config(
         "tuning",
         "screen_bounds",
         "save_figures",
+        "n_jobs",
     ):
         if key in config:
             resolved[key] = config[key]
@@ -279,6 +283,7 @@ def resolve_command_config(
         "artifact",
         "screen_bounds",
         "save_figures",
+        "n_jobs",
     ):
         if key in command_overrides:
             resolved[key] = command_overrides[key]
@@ -314,7 +319,9 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
                 f"tuning.{where} contains values below n_eff_min ({n_eff_min}); those "
                 "candidates would fall back to the stratum quantile everywhere.",
             )
-    elif config.get("tuning") is not None:
+    elif config.get("tuning") is not None and command_name == "compute":
+        # Only compute tunes; the other commands ignore the block, so that
+        # `commands.compute.n_eff_target: auto` works next to a top-level tuning.
         raise ValueError(
             "The tuning block only applies with n_eff_target: auto (and cp_type: kernel, "
             "bandwidth: n_eff). Set n_eff_target: auto to tune, or remove tuning.",
@@ -361,6 +368,12 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
 
     if "save_figures" in config and config.get("save_figures") is not None:
         _validate_boolean_option(config.get("save_figures"), option_name="save_figures")
+    n_jobs = config.get("n_jobs")
+    if n_jobs is not None and (isinstance(n_jobs, bool) or not isinstance(n_jobs, int)):
+        raise ValueError(
+            "n_jobs must be an integer: the number of processes (-1 for all CPUs, "
+            "1 to run serially)."
+        )
 
 
 def coalesce_option(
@@ -460,9 +473,9 @@ def validate_distance(value: str | None) -> str:
 
 
 def validate_bandwidth(value: str | None) -> str:
-    """Validate the kernel bandwidth-selection mode."""
+    """Validate the kernel bandwidth-selection mode; unset means the default, `n_eff`."""
 
-    normalized = "knn" if value is None else str(value).strip().lower()
+    normalized = DEFAULT_BANDWIDTH if value is None else str(value).strip().lower()
     if normalized not in SUPPORTED_BANDWIDTHS:
         supported = ", ".join(repr(name) for name in SUPPORTED_BANDWIDTHS)
         raise ValueError(

@@ -218,3 +218,90 @@ def test_apply_requires_the_power_flow_set_points(tmp_path) -> None:
     assert main(["compute", "--config", str(config)]) == 0
     with pytest.raises(ValueError, match="set-points"):
         main(["apply", "--config", str(config)])
+
+
+SCREENING = [
+    "screen_bounds:",
+    "  Vm: {lower: 0.98, upper: 1.02}",
+    "  line_loading: {upper: 1.0}",
+    "commands:",
+    "  screen:",
+    "    variables: [Vm, line_loading]",
+]
+
+
+@pytest.mark.parametrize("method", ["element_n_outages", "kernel_n_outages"])
+def test_apply_gives_the_statuses_of_screen(tmp_path, method) -> None:
+    config = _config(tmp_path, METHODS[method], {}, "[Vm, Va, line_loading]")
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f"\n  screen_dir: {tmp_path / 'screen'}\n"
+        + "\n".join(SCREENING)
+        + "\n",
+        encoding="utf-8",
+    )
+    for command in ("compute", "calibrate", "screen", "apply"):
+        assert main([command, "--config", str(config)]) == 0
+
+    # Same rule, same statuses: per scenario...
+    screened = pd.read_csv(tmp_path / "screen" / "scenarios.csv").set_index("scenario")
+    applied = pd.read_csv(tmp_path / "applied" / "status" / "scenarios.csv").set_index(
+        "scenario"
+    )
+    columns = [c for c in applied.columns if c.endswith("status")]
+    assert {"status", "point_status", "Vm_status", "line_loading_status"} <= set(
+        columns
+    )
+    assert not [c for c in applied.columns if "true" in c]
+    pd.testing.assert_frame_equal(applied[columns], screened[columns])
+
+    # ...and per value, with no status for the set-points.
+    detail = pd.read_parquet(tmp_path / "screen" / "screening_detail_voltage.parquet")
+    values = _rows(tmp_path / "applied", "volt")
+    assert values.loc[values["Vm_known"], "Vm_status"].isna().all()
+    merged = detail.merge(values, on=["scenario", "bus"])
+    assert len(merged) == len(detail)
+    for own, other in (("status", "Vm_status"), ("point_status", "Vm_point_status")):
+        assert (merged[own].astype(str) == merged[other].astype(str)).all()
+
+    summary = (tmp_path / "applied" / "status" / "summary.md").read_text(
+        encoding="utf-8"
+    )
+    assert summary.startswith("# Operating status")
+    assert "Interval status against point-prediction status" in summary
+    assert "truly" not in summary
+    counts = pd.read_csv(tmp_path / "applied" / "status" / "status_by_stratum.csv")
+    assert "truly_violated" not in counts.columns
+    assert "n_outages=1" in set(counts["stratum"])
+
+
+def test_apply_in_parallel_gives_the_serial_result(tmp_path, monkeypatch) -> None:
+    import gridfm_trustlayer.cli.common as cli_common
+    import gridfm_trustlayer.io.parquet as parquet_io
+
+    config = _config(
+        tmp_path, METHODS["element_n_outages"], {}, "[Vm, Va, line_loading]"
+    )
+    config.write_text(
+        config.read_text(encoding="utf-8") + "\n" + "\n".join(SCREENING) + "\n",
+        encoding="utf-8",
+    )
+    assert main(["compute", "--config", str(config)]) == 0
+    assert main(["apply", "--config", str(config), "--n-jobs", "1"]) == 0
+    serial = {kind: _rows(tmp_path / "applied", kind) for kind in ROWS}
+    serial_status = pd.read_csv(tmp_path / "applied" / "status" / "scenarios.csv")
+
+    monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", 10)
+    monkeypatch.setattr(cli_common, "_BLOCK_ROWS", 1)
+    assert main(["apply", "--config", str(config), "--n-jobs", "3"]) == 0
+    assert len(list((tmp_path / "applied").glob("*vm_va*/scenario_partition=*"))) > 3
+    for kind in ROWS:
+        parallel = _rows(tmp_path / "applied", kind)
+        pd.testing.assert_frame_equal(
+            parallel.drop(columns="scenario_partition"),
+            serial[kind].drop(columns="scenario_partition"),
+            check_dtype=False,
+        )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(tmp_path / "applied" / "status" / "scenarios.csv"), serial_status
+    )

@@ -203,6 +203,9 @@ def build_config(
             outputs["applied_predictions"] = f"{out}/new_{names}_bounds.parquet"
     if bounds:
         outputs["screen_dir"] = f"{out}/screen"
+        if "apply" in config["inputs"]:
+            # `apply` also gives the status of every new value and scenario.
+            outputs["status_dir"] = f"{out}/status"
     config["outputs"] = outputs
 
     screened = [name for name in variables if name in bounds]
@@ -597,7 +600,9 @@ def config_builder() -> Any:
                 "<div style='color:#666;font-size:12px;margin:0 0 6px 155px'>"
                 "For <code>gridfm_trustlayer apply</code>. pf_node and pf_edge describe "
                 "the new scenarios (topology, loads); they are needed for outage or load "
-                "stratification and for line_loading, and need no AC solution.</div>"
+                "stratification and for line_loading, and need no AC solution. With screening "
+                "bounds, apply also gives each new scenario its status (secure, uncertain, "
+                "insecure).</div>"
             ),
             *new_fields.values(),
         ],

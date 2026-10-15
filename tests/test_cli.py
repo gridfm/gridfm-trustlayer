@@ -975,7 +975,16 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
         "pred_upper_violation",
         "true_upper_violation",
     ]
-    values = ["variable", "target", "pi_lower", "pi_upper", *flags]
+    values = [
+        "variable",
+        "pred",
+        "target",
+        "pi_lower",
+        "pi_upper",
+        *flags,
+        "status",
+        "point_status",
+    ]
     partition = ["scenario_partition"]
     assert list(volt_detail.columns) == [
         "scenario",
@@ -1041,6 +1050,39 @@ def test_config_driven_mixed_screen(tmp_path) -> None:
     summary = (screen_dir / "summary.md").read_text(encoding="utf-8")
     assert summary.startswith("# Screening report")
     assert "### Vm (either limit)" in summary
+    assert "## Status per operating scenario" in summary
+
+    # Statuses agree with the alarm flags: within limits exactly when no alarm.
+    for detail in (volt_detail, line_detail):
+        alarm = detail["pred_lower_violation"] | detail["pred_upper_violation"]
+        assert ((detail["status"] == "within_limits") == ~alarm).all()
+    # One row per scenario; its status is the worst of its values.
+    scenarios = pd.read_csv(screen_dir / "scenarios.csv")
+    assert sorted(scenarios["scenario"]) == [0, 1, 2, 3]
+    worst = {"within_limits": 0, "uncertain": 1, "violation": 2}
+    names = ["secure", "uncertain", "insecure"]
+    both = pd.concat([volt_detail, line_detail])
+    expected = both.groupby("scenario")["status"].agg(
+        lambda s: names[max(worst[v] for v in s)]
+    )
+    actual = scenarios.set_index("scenario")["status"]
+    assert actual.to_dict() == expected.to_dict()
+    truly = (
+        (both["true_lower_violation"] | both["true_upper_violation"])
+        .groupby(both["scenario"])
+        .any()
+    )
+    assert (
+        scenarios.set_index("scenario")["true_status"].eq("insecure") == truly
+    ).all()
+    counts = pd.read_csv(screen_dir / "status_by_stratum.csv")
+    overall = counts[
+        counts["level"].eq("scenario")
+        & counts["variable"].eq("all")
+        & counts["method"].eq("interval")
+    ]
+    assert overall["status"].tolist() == names
+    assert overall["n"].sum() == 4
 
 
 def _screen_config(tmp_path, outputs: list[str]) -> Path:
@@ -1157,6 +1199,30 @@ def test_single_family_run_honours_the_family_specific_output_key(tmp_path) -> N
     assert volt_path.exists()
     assert main(["screen", "--config", str(config_path)]) == 0
     assert (tmp_path / "screen" / "screening_by_element_voltage.csv").exists()
+
+
+def test_single_family_run_with_a_folder_like_output_path(tmp_path) -> None:
+    # One family: calibrate writes its partitioned dataset at the given path,
+    # itself a folder, and screen must read it there, not look inside for files.
+    calibrated = tmp_path / "out" / "calibrated"
+    config_path = _screen_config(
+        tmp_path,
+        [
+            f"  calibrated_predictions: {calibrated}",
+            f"  screen_dir: {tmp_path / 'screen'}",
+        ],
+    )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace("[Vm, Va, line_loading]", "[line_loading]")
+        .replace("[Vm, line_loading]", "[line_loading]")
+        .replace("  Vm: {lower: 0.95, upper: 1.05}\n", ""),
+        encoding="utf-8",
+    )
+    for command in ("compute", "calibrate", "screen"):
+        assert main([command, "--config", str(config_path)]) == 0
+    assert any(calibrated.glob("scenario_partition=*"))
+    assert (tmp_path / "screen" / "screening_by_element_line_loading.csv").exists()
 
 
 def test_screen_explains_a_missing_calibrated_parquet(tmp_path) -> None:

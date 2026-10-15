@@ -13,6 +13,12 @@ python -m pip install --upgrade pip
 ## Install the package
 
 ```bash
+python -m pip install gridfm-trustlayer
+```
+
+The development version, from the `main` branch:
+
+```bash
 python -m pip install "git+https://github.com/gridfm/gridfm-trustlayer"
 ```
 
@@ -28,17 +34,18 @@ Some features need extra packages. Install them by adding the extra's name in br
 
 | Extra | Adds | You need it to |
 | --- | --- | --- |
-| `graphkit` | `gridfm-graphkit` and `gridfm-datakit` | calibrate **`line_loading`**: trustlayer computes line loading with datakit's branch-flow routine. Not needed for `Vm` and `Va` alone. |
+| `datakit` | `gridfm-datakit` | calibrate **`line_loading`**: trustlayer computes line loading with datakit's branch-flow routine. Not needed for `Vm` and `Va` alone. |
+| `graphkit` | `gridfm-graphkit` and `gridfm-datakit` | the same, in an environment where you also run models with graphkit, which needs PyTorch (install it first, following graphkit's guide). |
 | `interactive` | `ipywidgets` | use the [config builder](config-builder.md), a Jupyter form that writes the config file for you. |
 
 For example, both at once:
 
 ```bash
-python -m pip install "gridfm-trustlayer[graphkit,interactive] @ git+https://github.com/gridfm/gridfm-trustlayer"
+python -m pip install "gridfm-trustlayer[datakit,interactive]"
 ```
 
 !!! tip "Using the GridFM tools in one environment"
-    If you also generate data with gridfm-datakit or run models with gridfm-graphkit, you can install trustlayer into the same environment. The `graphkit` extra pins compatible versions. See the [datakit](https://github.com/gridfm/gridfm-datakit) and [graphkit](https://github.com/gridfm/gridfm-graphkit) installation guides for their own requirements.
+    If you also generate data with gridfm-datakit or run models with gridfm-graphkit, you can install trustlayer into the same environment. The `graphkit` extra sets the minimum versions trustlayer works with. See the [datakit](https://github.com/gridfm/gridfm-datakit) and [graphkit](https://github.com/gridfm/gridfm-graphkit) installation guides for their own requirements.
 
 ## Install for development
 
