@@ -1,6 +1,6 @@
 # CLI reference
 
-The `gridfm_trustlayer` command has three subcommands. Each reads the YAML config given with `--config`; flags override individual config values for one run. `gridfm_trustlayer <command> --help` prints the same options.
+The `gridfm_trustlayer` command has four subcommands. Each reads the YAML config given with `--config`; flags override individual config values for one run. `gridfm_trustlayer <command> --help` prints the same options.
 
 ## Command overview
 
@@ -19,15 +19,15 @@ Available commands:
 - `screen`
 - `apply`
 
-The three run in this order:
+They play three roles:
 
-1. `compute` fits the calibrators on the calibration dataset (`inputs.calibration`) and writes a `.trustlayer` artifact.
-2. `calibrate` applies the artifact to the test dataset (`inputs.test`) and writes the predictions with their bounds, coverage reports and figures.
-3. `screen` compares the test bounds with the operating limits in `screen_bounds`.
+1. **Fit, always:** `compute` fits the calibrators on the calibration dataset (`inputs.calibration`) and writes a `.trustlayer` artifact.
+2. **Validate, optional:** `calibrate` applies the artifact to the test dataset (`inputs.test`) and writes the predictions with their bounds and the coverage report; then `screen` compares the test bounds with the operating limits in `screen_bounds` and checks statuses and alarms against the true solution.
+3. **Operate:** `apply` uses the artifact on new scenarios without a known solution (`inputs.apply`), at any point after `compute`: bounds and, with `screen_bounds`, the status of every value and operating scenario.
 
-`apply` uses the artifact on new scenarios without a known solution (`inputs.apply`), at any point after `compute`.
+Every command also takes `--n-jobs` (see [`n_jobs`](configuration.md#method-keys)). For `compute`, it sets the processes of the cross-validated bandwidth choice, 4 by default. For every command, when given, blocks of scenarios are also processed in parallel, which is off by default.
 
-Each command ends with a short summary: what `compute` fitted and where the artifact is; the coverage and mean width per variable, with the weakest stratum, after `calibrate`; the violations caught and missed and the false alarms after `screen`. Both also say how many known values (set-points) were left out. On large test sets, `calibrate` and `screen` also print one line per block of scenarios as they go.
+Each command ends with a short summary: what `compute` fitted and where the artifact is; the coverage and mean width per variable, with the weakest stratum, after `calibrate`; the violations caught and missed, the false alarms, and the secure, uncertain and insecure scenarios after `screen`; the same scenario counts after `apply`. `calibrate` and `screen` also say how many known values (set-points) were left out. On large test sets, `calibrate` and `screen` also print one line per block of scenarios as they go.
 
 ```bash
 gridfm_trustlayer compute --config path/to/trust_config.yaml
@@ -135,7 +135,7 @@ gridfm_trustlayer calibrate --config path/to/trust_config.yaml
 | `--embeddings` | `str` | Scenario embeddings parquet for the test scenarios. Required when the artifact is a kernel artifact. |
 | `--task-name` | `str` | Task adapter name used while loading predictions. |
 | `--generator-predictions` | `str` | Optional OPF generator prediction parquet. |
-| `--no-figures` | flag | Skip analysis figure generation and write only calibrated parquet plus CSV outputs. |
+| `--figures` / `--no-figures` | flag | Write (default) or skip the analysis figures; without them, only the calibrated parquet and the CSV outputs are written. |
 
 Output behavior:
 
@@ -184,7 +184,8 @@ Purpose:
 
 - load a `.trustlayer` artifact
 - write bounds for new scenarios (`inputs.apply`), which need no known AC solution
-- no coverage analysis, figures or reports: there is no true value to compare with
+- with `screen_bounds`, give every value and operating scenario its status, by the rule of `screen`
+- no coverage analysis and no figures: there is no true value to compare with
 
 Syntax:
 
@@ -211,6 +212,13 @@ What it reads:
 - the embeddings, for kernel artifacts.
 
 Outputs: one partitioned dataset per target family, `<predictions>_<variables>_bounds.parquet`, with the columns of the outputs of `calibrate` except the true values: the `*_target` columns of the predictions file are dropped, since for new scenarios they hold placeholders except at the set-points. They contain the bounds `*_pi_lower` and `*_pi_upper`, the strata, and the kernel diagnostics. The `_bounds` suffix keeps it apart from `calibrate`'s `_with_intervals` outputs, so that the two never overwrite each other. On labeled data, `apply` gives exactly the bounds of `calibrate`.
+
+With `screen_bounds` (every variable of the layer that has limits there is screened):
+
+- the datasets gain `<variable>_status` (`within_limits`, `uncertain`, `violation`) and `<variable>_point_status` (`within_limits`, `violation`), empty for known values and out-of-service lines;
+- `outputs.status_dir` (default: `status/` next to the datasets) receives `summary.md`, `scenarios.csv` (one row per operating scenario: `secure`, `uncertain` or `insecure`, overall and per variable, by interval and by point prediction) and `status_by_stratum.csv` (counts per status, variable and stratum).
+
+On labeled data, `apply` gives exactly the statuses of `screen`. See [Reading the results](../user-guide/results.md#outputs-of-apply).
 
 ## `screen`
 
@@ -241,7 +249,7 @@ gridfm_trustlayer screen --config path/to/trust_config.yaml
 | `--task-name` | `str` | Task name used for default path resolution. |
 | `--figures` / `--no-figures` | flag | Write (default) or skip the screening figures. |
 
-Alarm rule (see [Reading the results](../user-guide/results.md#how-an-alarm-is-defined)):
+Alarm rule (see [Reading the results](../user-guide/results.md#alarms-how-an-alarm-is-defined)):
 
 - lower violation alarm when `pi_lower < lower_bound` for variables that use a lower bound, such as `Vm`
 - upper violation alarm when `pi_upper > upper_bound`
@@ -250,11 +258,13 @@ Alarm rule (see [Reading the results](../user-guide/results.md#how-an-alarm-is-d
 
 Saved outputs, in `outputs.screen_dir`:
 
-- `summary.md`: limits, known values set aside, results by stratum, figures and files
+- `summary.md`: limits, known values set aside, alarms by stratum, statuses per operating scenario and per value, figures and files
+- `scenarios.csv`: one row per operating scenario, with its status (`secure`, `uncertain`, `insecure`) overall and per variable, by interval, by point prediction and from the true solution
+- `status_by_stratum.csv`: scenarios and values per status, variable, stratum and method (`interval`, `point`), with how many were truly violated
 - `screening_by_stratum.csv`: violations, alarms, caught, missed, false alarms, cleared, recall and precision per variable, stratum and side (`lower`, `upper`, `any`)
 - `screening_by_group.csv`: the same per bus type or line rating
 - `screening_by_element_voltage.csv`, `screening_by_element_line_loading.csv`: the same per bus or line
-- `screening_detail_voltage.parquet/`, `screening_detail_line_loading.parquet/`: one row per screened value (partitioned datasets)
+- `screening_detail_voltage.parquet/`, `screening_detail_line_loading.parquet/`: one row per screened value, with its prediction, bounds, true value, alarm flags and statuses (partitioned datasets)
 - `figures/`: confusion matrix and, with `strat`, recall and precision by stratum
 
 Known values are not screened: they are left out of every count and of the detail, and counted in `n_known`.

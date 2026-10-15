@@ -102,10 +102,10 @@ Error messages are quoted as the CLI prints them, with the values in your run in
     ```
 
 ??? failure "`gridfm_datakit is required for compute_line_loading().`"
-    Line loading is computed with datakit's branch-flow routine. Install the extra: `pip install "gridfm-trustlayer[graphkit] @ git+https://github.com/gridfm/gridfm-trustlayer"`.
+    Line loading is computed with datakit's branch-flow routine. Install the extra: `pip install "gridfm-trustlayer[datakit]"`.
 
 ??? question "`compute`, `calibrate` or `screen` needs a lot of memory"
-    `calibrate` and `screen` process the test set one block of scenarios at a time, so their memory use is set mainly by the block size rather than by the number of test scenarios. `compute` needs the whole calibration set in memory, since every residual enters the quantiles: its memory grows with the number of calibration scenarios times the number of buses and lines. If it is too large, use fewer calibration scenarios; a few thousand per stratum already give stable bounds.
+    Every command reads its data one block of scenarios at a time, so the memory of reading is set by the block size, not by the number of scenarios. `compute` then keeps one value per calibration scenario and bus or line (residuals and masks), which is small: under 100 MB for 20,000 IEEE-118 scenarios. The cross-validated bandwidth choice (`n_eff_target: auto`) runs in 4 processes by default, each with a copy of those arrays and of its fold's kernel: set `n_jobs: 1` to run it in one process, at about twice the time. If `n_jobs` is set, blocks are also processed in parallel, which multiplies the memory of reading by the number of processes.
 
-??? failure "`... exists and is not a partitioned trustlayer output: it would be replaced.`"
-    The per-row outputs are written as partitioned directories, and an existing directory at that path is only replaced if it holds a previous trustlayer output. Point `outputs.calibrated_predictions*` (or `screen_dir`) at a new path, or remove the directory.
+??? failure "`... exists and is not a trustlayer output: it would be replaced.`" / "`The output path ... is also an input of this command`"
+    The per-row outputs are written as partitioned directories, and what exists at that path is only replaced if it is a previous trustlayer output (a parquet file or dataset with interval bounds). Anything else is kept, including datakit's raw data, which uses the same partitioned layout, and the command's own inputs. Point `outputs.calibrated_predictions*`, `outputs.applied_predictions*` (or `screen_dir`) at a new path, or remove what is there.

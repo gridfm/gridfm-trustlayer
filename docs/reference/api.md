@@ -42,6 +42,8 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ::: gridfm_trustlayer.load_interval_artifact
 
+::: gridfm_trustlayer.load_interval_artifacts
+
 ## Kernel bandwidth tuning
 
 ::: gridfm_trustlayer.conformal.tuning.tune_n_eff_target

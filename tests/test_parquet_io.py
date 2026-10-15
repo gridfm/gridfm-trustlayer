@@ -12,6 +12,7 @@ from gridfm_trustlayer.io.parquet import (
     PARTITION_COLUMN,
     SCENARIOS_PER_PARTITION,
     PartitionedWriter,
+    clear_partitioned_output,
     column_names,
     read_frame,
     read_scenario_ids,
@@ -89,20 +90,42 @@ def test_partitioned_writer_writes_blocks_that_read_back_as_one_dataset(
     assert schema.field("value").type == pa.float32()
 
 
+def _interval_frame(scenarios: np.ndarray) -> pd.DataFrame:
+    frame = _frame(scenarios)
+    frame["Vm_pi_lower"] = frame["value"] - 1.0
+    return frame
+
+
 def test_partitioned_writer_replaces_previous_outputs_but_nothing_else(
     tmp_path,
 ) -> None:
-    old_file = tmp_path / "old.parquet"
-    old_file.write_text("previous single-file output")
-    PartitionedWriter(old_file).write(_frame(np.arange(3)))
-    assert old_file.is_dir()
+    output = tmp_path / "calibrated.parquet"
+    PartitionedWriter(output).write(_interval_frame(np.arange(3)))
+    PartitionedWriter(output).write(_interval_frame(np.arange(5)))
+    assert len(pd.read_parquet(output)) == 15
 
-    PartitionedWriter(old_file).write(_frame(np.arange(5)))
-    assert len(pd.read_parquet(old_file)) == 15
+    single = tmp_path / "single.parquet"
+    _interval_frame(np.arange(2)).to_parquet(single)
+    clear_partitioned_output(single)
+    assert not single.exists()
 
+    # Not trustlayer outputs: a folder of notes, a file, and a dataset in the
+    # partitioned layout datakit also writes (its raw data has no bounds).
     other = tmp_path / "results"
     other.mkdir()
     (other / "notes.txt").write_text("keep me")
-    with pytest.raises(ValueError, match="not a partitioned trustlayer output"):
-        PartitionedWriter(other)
+    text = tmp_path / "notes.parquet"
+    text.write_text("not parquet")
+    raw = tmp_path / "bus_data.parquet"
+    PartitionedWriter(raw).write(_frame(np.arange(4)))
+    for path in (other, text, raw):
+        with pytest.raises(ValueError, match="not a trustlayer output"):
+            clear_partitioned_output(path)
     assert (other / "notes.txt").exists()
+    assert text.exists()
+    assert len(pd.read_parquet(raw)) == 12
+
+    # An input of the command is never cleared, even a previous output.
+    with pytest.raises(ValueError, match="also an input"):
+        clear_partitioned_output(output, inputs=[None, str(output)])
+    assert output.exists()

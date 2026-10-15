@@ -63,7 +63,7 @@ For each command, a value is taken from the first of these that sets it:
 | --- | --- | --- | --- |
 | `version` | int | – | Config format marker; use `1`. |
 | `task_name` | str | – | How to read the predictions: `PowerFlow` or `OptimalPowerFlow`. Also names the default output directory. |
-| `cp_type` | str | required | `element` (stratified split-conformal) or `kernel` (kernel-weighted). See [Choosing a setup](../user-guide/choosing-a-setup.md#method-cp_type). |
+| `cp_type` | str | `element` | `element` (stratified split-conformal) or `kernel` (kernel-weighted). See [Choosing a setup](../user-guide/choosing-a-setup.md#method-cp_type). |
 | `alpha` | float | required by `compute` | Miscoverage level, two-sided: `0.1` gives 90% intervals, 5% per tail. |
 | `variables` | list | `[Vm, Va]` | Any of `Vm`, `Va`, `line_loading`. |
 | `strat` | str or null | null | Group scenarios and fit bounds per group: `n_outages`, `outage_type`, `system_load_bin` or `pred_bins` (`element` only). See [Choosing a setup](../user-guide/choosing-a-setup.md#grouping-strat). |
@@ -71,6 +71,7 @@ For each command, a value is taken from the first of these that sets it:
 | `pred_n_bins` | int | – | Number of percentile bins of the predicted values, per variable. Required with `strat: pred_bins`. |
 | `sparse_strata` | str | `pooled` | With `strat`: the bounds of a bus or line in a stratum with fewer than $\lceil 2/\alpha \rceil - 1$ valid calibration samples, or in a stratum absent from the calibration data. `pooled` uses the element's quantile over all calibration scenarios: finite, but without a guarantee within that stratum. `infinite` keeps the per-stratum guarantee with infinite bounds. See [Sparse strata](../user-guide/choosing-a-setup.md#sparse-strata-sparse_strata). |
 | `save_figures` | bool | `true` | `false` makes `calibrate` and `screen` skip their figures, like `--no-figures`. |
+| `n_jobs` | int | – | Processes for the cross-validated bandwidth choice (`n_eff_target: auto`), which runs in 4 processes by default (at most the CPU count); `-1` uses every CPU, `1` one process. When set, blocks of scenarios are also processed in parallel by every command, which is off by default: on IEEE-118 it made runs slower and larger, as reading parquet dominates. Each process holds its own copy of the data it works on. Same as `--n-jobs`. |
 
 The stratifications in detail:
 
@@ -138,24 +139,25 @@ The config is rejected if both blocks name the same `predictions` file, and `cal
 | `applied_predictions_volt`, `applied_predictions_line` | `apply` | Explicit paths for the two bounds datasets. Take precedence over `applied_predictions`. |
 | `coverage_dir` | `calibrate` | Directory for the coverage report: `summary.md`, the `coverage_by_*.csv` tables and `figures/`. Default: a `coverage/` folder next to the calibrated datasets. |
 | `screen_dir` | `screen` | Directory for the screening report, tables, figures and detail datasets. |
+| `status_dir` | `apply` | Directory for the status report of the new scenarios (`summary.md`, `scenarios.csv`, `status_by_stratum.csv`), written when `screen_bounds` is set. Default: a `status/` folder next to the applied datasets. |
 | `output` | `calibrate`, `screen` | Generic override, like the `--output` flag. |
 
-The calibrated predictions and the screening detail are written as partitioned parquet datasets: directories with one `scenario_partition=k/` folder per 200 scenarios, like gridfm-datakit's outputs ([Reading the results](../user-guide/results.md)). A path that already holds a previous trustlayer output is replaced; any other existing directory is left alone and the run stops. The coverage report of `calibrate` goes to `coverage_dir`, by default a `coverage/` folder next to the calibrated datasets. Without any output keys, everything goes to `trustlayer_outputs/<task_name>/<cp_type>/` in the working directory.
+The calibrated predictions and the screening detail are written as partitioned parquet datasets: directories with one `scenario_partition=k/` folder per 200 scenarios, like gridfm-datakit's outputs ([Reading the results](../user-guide/results.md)). A path that already holds a previous trustlayer output is replaced; anything else that exists there (an input, datakit's raw data, any other file or directory) is left alone and the run stops. The coverage report of `calibrate` goes to `coverage_dir`, by default a `coverage/` folder next to the calibrated datasets. Without any output keys, everything goes to `trustlayer_outputs/<task_name>/<cp_type>/` in the working directory.
 
 ## `screen_bounds`
 
-The operating limits that `screen` compares the intervals with, in the variable's own units:
+The operating limits that `screen` and `apply` compare the intervals with, in the variable's own units:
 
 | Variable | Keys | Units |
 | --- | --- | --- |
 | `Vm` | `lower` and `upper` | per unit |
 | `line_loading` | `upper` | fraction of the branch rating `rate_a`; `1.0` is 100% |
 
-Every screened variable needs bounds. `Va` has no natural limit, so restrict screening with `commands.screen.variables` when you calibrate it. The `--lower-bound` and `--upper-bound` flags override the bounds when exactly one variable is screened.
+For `screen`, every screened variable needs bounds. `Va` has no natural limit, so restrict screening with `commands.screen.variables` when you calibrate it. The `--lower-bound` and `--upper-bound` flags override the bounds when exactly one variable is screened. `apply` screens every variable of the layer that has bounds here and skips the others; without `screen_bounds`, it writes bounds only.
 
 ## `commands`
 
-`commands.compute`, `commands.calibrate`, `commands.screen` and `commands.apply` override shared keys for one command. Allowed keys: `task_name`, `alpha`, `cp_type`, `strat`, `system_load_n_bins`, `pred_n_bins`, `embedding_pooling`, `distance`, `bandwidth`, `n_eff_target`, `k_nn`, `n_eff_min`, `variables`, `screen_bounds`, `save_figures`, `artifact`, `output` and a nested `outputs` mapping. Inputs cannot be overridden per command, since each command already reads its own dataset.
+`commands.compute`, `commands.calibrate`, `commands.screen` and `commands.apply` override shared keys for one command. Allowed keys: `task_name`, `alpha`, `cp_type`, `strat`, `system_load_n_bins`, `pred_n_bins`, `embedding_pooling`, `distance`, `bandwidth`, `n_eff_target`, `k_nn`, `n_eff_min`, `sparse_strata`, `n_jobs`, `variables`, `screen_bounds`, `save_figures`, `artifact`, `output` and a nested `outputs` mapping. Inputs cannot be overridden per command, since each command already reads its own dataset.
 
 The most common use is restricting screening to the variables that have limits:
 

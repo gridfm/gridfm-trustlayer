@@ -1,8 +1,8 @@
 # Reading the results
 
-`calibrate` and `screen` each write data, CSV tables, figures and a `summary.md` report. This page explains what each file contains, how the numbers are computed, and in which order to read them.
+`calibrate` and `screen` validate the layer on the test set; `apply` runs it on new scenarios. Each writes data, CSV tables and a `summary.md` report. This page explains what each file contains, how the numbers are computed, and in which order to read them.
 
-With `outputs.calibrated_predictions: trustlayer_outputs/calibrated` and `outputs.screen_dir: trustlayer_outputs/screen`, a run of all three commands leaves:
+With `outputs.calibrated_predictions: trustlayer_outputs/calibrated`, `outputs.screen_dir: trustlayer_outputs/screen` and `outputs.applied_predictions: trustlayer_outputs/applied`, a run of all four commands leaves:
 
 ```text
 trustlayer_outputs/
@@ -17,23 +17,33 @@ trustlayer_outputs/
 │       ├── coverage_by_element_voltage.csv
 │       ├── coverage_by_element_line_loading.csv
 │       └── figures/
-└── screen/                                  screen: data and reports
-    ├── summary.md                           <- start here
-    ├── screening_by_stratum.csv
-    ├── screening_by_group.csv
-    ├── screening_by_element_voltage.csv
-    ├── screening_by_element_line_loading.csv
-    ├── screening_detail_voltage.parquet/
-    ├── screening_detail_line_loading.parquet/
-    └── figures/
+├── screen/                                  screen: data and reports
+│   ├── summary.md                           <- start here
+│   ├── scenarios.csv
+│   ├── status_by_stratum.csv
+│   ├── screening_by_stratum.csv
+│   ├── screening_by_group.csv
+│   ├── screening_by_element_voltage.csv
+│   ├── screening_by_element_line_loading.csv
+│   ├── screening_detail_voltage.parquet/
+│   ├── screening_detail_line_loading.parquet/
+│   └── figures/
+└── applied/                                 apply: data
+    ├── case118_ieee_predictions_vm_va_bounds.parquet/
+    ├── case118_ieee_predictions_line_loading_bounds.parquet/
+    └── status/                              apply: reports (with screen_bounds)
+        ├── summary.md                       <- start here
+        ├── scenarios.csv
+        └── status_by_stratum.csv
 ```
 
-The two `summary.md` files are separate reports: `calibrate` writes `coverage/summary.md`, `screen` writes `screen/summary.md`, and neither touches the other's. Running a command again replaces its own files only. `apply` writes data only, with no report.
+The `summary.md` files are separate reports: each command writes its own and never touches the others'. Running a command again replaces its own files only.
 
 !!! tip "In short"
     1. `coverage/summary.md`: is coverage close to $1-\alpha$ in every stratum?
-    2. `screen/summary.md`: how many violations were caught, how many missed, and how many false alarms?
-    3. The per-element tables and the figures: which buses or lines behave differently?
+    2. `screen/summary.md`: how many operating scenarios are secure, uncertain or insecure, and how often was that wrong? How many violations were caught, missed, falsely flagged?
+    3. `applied/status/summary.md`: the same statuses for the new scenarios.
+    4. The per-element tables and the figures: which buses or lines behave differently?
 
 Calibration never changes the point predictions (`*_pred`). It only adds bounds around them, so its effect is read through coverage, width and screening, not through prediction error.
 
@@ -141,15 +151,60 @@ calibrate: line_loading: coverage 0.903 (target 0.900), mean width 0.01364 fract
 calibrate: data in trustlayer_outputs/calibrated; reports in trustlayer_outputs/calibrated/coverage
 ```
 
-## Outputs of `apply`
-
-`apply` writes only the bounds of the new scenarios: one partitioned dataset per target family, `<predictions>_<variables>_bounds.parquet`, with the columns of the calibrated predictions above except the true values: the `*_target` columns are not written. For new scenarios they would hold real values only at the set-points (PV and reference buses) and placeholders elsewhere. The `Vm_known` and `Va_known` columns mark the set-points. There is no report, since the true values are unknown. To flag possible violations, compare the bounds with your limits directly, e.g. `line_loading_pi_upper > 1.0`.
-
 ## Outputs of `screen`
 
-`screen` compares the test bounds with `screen_bounds` and checks each alarm against the true AC value. Everything goes to `outputs.screen_dir`.
+`screen` compares the test bounds with `screen_bounds` and checks the result against the true AC value, in two ways: the **status** of every value and operating scenario, and the classic **alarms** per value. Everything goes to `outputs.screen_dir`.
 
-### How an alarm is defined
+### Statuses: per value and per operating scenario
+
+Each screened value gets a status from where its interval lies relative to the limits:
+
+| Value status | Interval | Example for `line_loading ≤ 1.0` |
+| --- | --- | --- |
+| `within_limits` | entirely inside the limits | `pi_upper ≤ 1.0` |
+| `uncertain` | straddles a limit | `pi_lower ≤ 1.0 < pi_upper` |
+| `violation` | entirely beyond a limit | `pi_lower > 1.0` |
+
+An **operating scenario** takes the worst status of its values: `secure` when all are within limits, `insecure` when at least one is a violation, `uncertain` otherwise. Statuses are given per variable and over all screened variables.
+
+The **point prediction** gets the same treatment, with the prediction in place of both bounds: a value is `within_limits` or a `violation`, a scenario `secure` or `insecure`. It is reported next to the interval status so you can compare the two screens.
+
+Against the true solution, the errors that matter are:
+
+- a `secure` scenario (or `within_limits` value) that is actually insecure (violated): a **miss**;
+- an `insecure` scenario (or `violation` value) that is actually secure: a **false confirmation**.
+
+`uncertain` scenarios are the ones the intervals cannot settle. The coverage guarantee holds per value: a violated value is called `within_limits` for at most a share $\alpha/2$ of values, on average. A scenario combines many values, so its error rates are measured here, not guaranteed. Known values (set-points) and out-of-service lines are not screened.
+
+### `scenarios.csv`
+
+One row per operating scenario:
+
+| Column | Content |
+| --- | --- |
+| `scenario` | the scenario |
+| stratum columns | e.g. `n_outages`, when `strat` is set |
+| `status`, `point_status`, `true_status` | over all screened variables: by the interval, by the point prediction, and from the true solution (`secure` or `insecure`) |
+| `<variable>_status`, `<variable>_point_status`, `<variable>_true_status` | the same for one variable |
+| `<variable>_n_uncertain`, `<variable>_n_violation` | how many of its values are uncertain or violations |
+
+### `status_by_stratum.csv`
+
+The counts behind the status tables of `summary.md`, one row per combination of:
+
+| Column | Content |
+| --- | --- |
+| `level` | `scenario` or `element` (one value of a bus or line) |
+| `variable` | `all` (scenario level only), `Vm`, `line_loading` |
+| `stratum` | `all`, or the stratum |
+| `method` | `interval` or `point` |
+| `status` | the status |
+| `n` | scenarios or values with that status |
+| `truly_violated` | of those, how many are actually insecure (violated) according to the true solution |
+
+So the misses are `truly_violated` in the `secure` and `within_limits` rows, and the false confirmations are `n - truly_violated` in the `insecure` and `violation` rows.
+
+### Alarms: how an alarm is defined
 
 For each scenario and bus or line:
 
@@ -167,7 +222,7 @@ with `recall = caught / violations` and `precision = caught / alarms`. Counts ar
 
 ### `summary.md`
 
-The page to open first: the limits, how many known values were set aside, and per variable a table of violations, caught, missed, false alarms, recall and precision by stratum, followed by the figures and the files.
+The page to open first: the limits and how many known values were set aside; per variable, a table of violations, caught, missed, false alarms, recall and precision by stratum; then the statuses per operating scenario (by stratum and per variable) and per value, each with the number that were wrong according to the true solution, and the point-prediction statuses next to them; then the figures and the files.
 
 ### `screening_by_stratum.csv`
 
@@ -196,9 +251,10 @@ Partitioned datasets with one row per screened value (known values excluded):
 | --- | --- |
 | `scenario`, `bus` / `branch` | the row; plus `bus_type`, or `from_bus`, `to_bus`, `rate_a` |
 | `variable` | `Vm` or `line_loading` |
-| `target`, `pi_lower`, `pi_upper` | the true value and the bounds |
+| `pred`, `target`, `pi_lower`, `pi_upper` | the prediction, the true value and the bounds |
 | `pred_lower_violation`, `pred_upper_violation` | the bound crosses the lower (upper) limit: an alarm |
 | `true_lower_violation`, `true_upper_violation` | the true value crosses it |
+| `status`, `point_status` | the status of the value, by the interval and by the point prediction |
 
 The stratum columns of the calibrated predictions are carried over when `strat` is set. `line_loading` rows only carry upper-side flags. Use the detail to inspect individual cases, for example the missed overloads:
 
@@ -225,7 +281,26 @@ The terminal shows the headline of each variable:
 ```text
 screen: Vm (either limit): 36,850 of 36,954 true violations flagged (104 missed), 1,818 false alarms in 328,420 values; 261,580 known values not counted
 screen: line_loading (upper limit): 15,512 of 15,724 true violations flagged (212 missed), 6,255 false alarms in 918,842 values
+screen: scenarios: 0 secure (0 truly insecure), 4 uncertain, 4,996 insecure (0 truly secure); point prediction: 0 secure (0 truly insecure), 5,000 insecure (0 truly secure)
 screen: reports in trustlayer_outputs/screen
+```
+
+This example data set is heavily loaded: with `Vm` limits of 0.95–1.05 p.u., almost every scenario has a confirmed voltage violation. The per-variable table of `summary.md` separates the variables; for line loading alone it reads 47 secure (2 truly insecure), 1,747 uncertain and 3,206 insecure (11 truly secure), against 340 secure (201 truly insecure) and 4,660 insecure (150 truly secure) by the point prediction.
+
+## Outputs of `apply`
+
+`apply` writes the bounds of the new scenarios: one partitioned dataset per target family, `<predictions>_<variables>_bounds.parquet` in `outputs.applied_predictions`, with the columns of the calibrated predictions above except the true values: the `*_target` columns are not written. For new scenarios they would hold real values only at the set-points (PV and reference buses) and placeholders elsewhere. The `Vm_known` and `Va_known` columns mark the set-points.
+
+With `screen_bounds` in the config, `apply` also gives the [statuses](#statuses-per-value-and-per-operating-scenario) of the new values and operating scenarios, by exactly the rule `screen` uses:
+
+- the data gain `<variable>_status` and `<variable>_point_status`, empty for known values and out-of-service lines;
+- `outputs.status_dir` (by default `status/` next to the data) holds `summary.md`, `scenarios.csv` and `status_by_stratum.csv`, as for `screen` but without the true status: the counts of secure, uncertain and insecure scenarios, per stratum and per variable, with the point-prediction statuses next to them and a table of scenarios by interval status against point status.
+
+The error rates `screen` measured on the test set are the ones to expect for these statuses. Every variable of the layer that has limits in `screen_bounds` is screened; without `screen_bounds`, `apply` writes the bounds only.
+
+```text
+apply: scenarios: 0 secure, 4 uncertain, 4,996 insecure; point prediction: 0 secure, 5,000 insecure
+apply: status report in trustlayer_outputs/applied/status
 ```
 
 ## Checklist
@@ -233,5 +308,5 @@ screen: reports in trustlayer_outputs/screen
 1. **Coverage per stratum** in `coverage/summary.md`: close to the target or above. If one stratum falls short beyond its 95% interval, check that calibration and test data were generated the same way, and that the stratum has enough calibration scenarios.
 2. **Sparse strata:** `n_pooled` or `n_elements_infinite` above zero. The coverage of those strata is not guaranteed; merge strata or add calibration data ([Sparse strata](choosing-a-setup.md#sparse-strata-sparse_strata)).
 3. **Spread across elements:** `worst_element_coverage` and the `coverage_by_bus` / `coverage_by_line` histograms. A few badly covered buses or lines can hide behind a good average.
-4. **Screening:** `missed` and `false_alarms` in `screen/summary.md`, then `screening_by_element_*.csv` for where they occur.
+4. **Screening:** secure scenarios that were truly insecure, and insecure ones that were truly secure, in `screen/summary.md`; then `missed` and `false_alarms` per value, and `screening_by_element_*.csv` for where they occur.
 5. **Kernel runs:** the share of `kcp_fallback` in the calibrated predictions, and the comparison with an `element` run.

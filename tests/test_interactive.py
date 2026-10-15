@@ -456,7 +456,16 @@ def test_build_config_adds_new_scenarios_for_apply(tmp_path) -> None:
     assert {"applied_predictions_volt", "applied_predictions_line"} <= set(
         config["outputs"]
     )
+    assert "status_dir" not in config["outputs"]  # no limits, no statuses
     assert "gridfm_trustlayer apply" in to_yaml(config)
+    screened = build_config(
+        calibration=datasets["cal"],
+        test=datasets["test"],
+        variables=["Vm", "line_loading"],
+        apply={"predictions": "new/predictions.parquet"},
+        screen_bounds=BOUNDS,
+    )
+    assert screened["outputs"]["status_dir"].endswith("/status")
     save_config(config, str(tmp_path / "config.yaml"))  # passes validation
 
 

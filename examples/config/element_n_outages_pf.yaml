@@ -50,6 +50,8 @@ inputs:
   # branch files give their outages (for strat: n_outages) and branch parameters
   # (for line_loading); no solved values are read. Power-flow predictions must
   # carry the set-points (Vm_target at PV buses, Va_target at the reference bus).
+  # With screen_bounds, `apply` also gives every new scenario its status
+  # (secure, uncertain, insecure), by the same rule as `screen`.
   # apply:
   #   predictions: path/to/new/predictions.parquet
   #   pf_node: path/to/new/raw/bus_data.parquet
@@ -60,6 +62,9 @@ outputs:
   calibrated_predictions_volt: trustlayer_outputs/element/n_outages_pf_vm_va_with_intervals.parquet
   calibrated_predictions_line: trustlayer_outputs/element/n_outages_pf_line_loading_with_intervals.parquet
   screen_dir: trustlayer_outputs/element/n_outages_pf_screen
+  # For `apply`: the bounds of the new scenarios, and their status report.
+  # applied_predictions: trustlayer_outputs/element/n_outages_pf_applied
+  # status_dir: trustlayer_outputs/element/n_outages_pf_applied/status
 
 # `screen` defaults to the shared `variables` list, but Va has no natural
 # operating bound. Restrict screening to the variables that do.

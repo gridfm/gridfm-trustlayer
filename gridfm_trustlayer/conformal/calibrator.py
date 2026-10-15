@@ -105,6 +105,10 @@ class NaiveIntervalCalibrator:
     # SHA-256 of the calibration predictions, so that applying the artifact to the
     # very same data (in-sample evaluation) can be detected and refused.
     calibration_fingerprint: str | None = None
+    # Which branches and generators are in service in the calibration set, and
+    # the units of its voltage angles (`GroundTruthReference.to_dict`), set by
+    # the CLI: the other commands count outages and convert angles the same way.
+    ground_truth_reference: dict[str, Any] | None = None
     sparse_strata: str = DEFAULT_SPARSE_STRATA
     _pooled: dict[str, np.ndarray] = field(
         default_factory=dict, repr=False, compare=False
@@ -192,9 +196,12 @@ class NaiveIntervalCalibrator:
             residuals = (target_values - prediction_values).astype(
                 FLOAT32_DTYPE, copy=False
             )
-            valid_mask = _combine_valid_masks(
-                _get_valid_mask(predictions, channel_name),
-                _get_valid_mask(ground_truth, channel_name),
+            valid_mask = _with_finite(
+                _combine_valid_masks(
+                    _get_valid_mask(predictions, channel_name),
+                    _get_valid_mask(ground_truth, channel_name),
+                ),
+                residuals,
             )
             lower_residual_quantiles[channel_name] = _masked_column_quantile(
                 residuals,
@@ -462,6 +469,7 @@ class NaiveIntervalCalibrator:
             if self.stratification_values is None
             else self.stratification_values.tolist(),
             "calibration_fingerprint": self.calibration_fingerprint,
+            "ground_truth_reference": self.ground_truth_reference,
             "lower_residual_quantiles": {
                 key: values.tolist()
                 for key, values in self.lower_residual_quantiles.items()
@@ -576,6 +584,9 @@ class NaiveIntervalCalibrator:
             pred_n_bins=_optional_int(data.get("pred_n_bins")),
             pred_bin_edges=pred_bin_edges,
             calibration_fingerprint=_optional_str(data.get("calibration_fingerprint")),
+            ground_truth_reference=cast(
+                dict[str, Any] | None, data.get("ground_truth_reference")
+            ),
             sparse_strata=validate_sparse_strata(
                 str(data.get("sparse_strata", DEFAULT_SPARSE_STRATA))
             ),
@@ -720,6 +731,21 @@ def _get_valid_mask(
     if isinstance(values, ChannelSet):
         return values.valid_masks.get(channel_name)
     return None
+
+
+def _with_finite(
+    valid_mask: np.ndarray | None, residuals: np.ndarray
+) -> np.ndarray | None:
+    """`valid_mask` without the missing (NaN or infinite) residuals.
+
+    A missing true or predicted value says nothing about the error; left in, it
+    would make a quantile NaN (`element`) or count as a perfect prediction.
+    """
+
+    finite = np.isfinite(residuals)
+    if finite.all():
+        return valid_mask
+    return finite if valid_mask is None else np.asarray(valid_mask, dtype=bool) & finite
 
 
 def _combine_valid_masks(

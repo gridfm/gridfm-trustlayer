@@ -21,10 +21,11 @@ import pytest
 import gridfm_trustlayer.io.parquet as parquet_io
 from gridfm_trustlayer.cli import main
 from gridfm_trustlayer.io import load_ground_truth
+from gridfm_trustlayer.io.artifact import load_interval_artifacts
 from gridfm_trustlayer.io.ground_truth import scan_ground_truth_reference
 
-# The package re-exports `main` the function, which shadows the module name.
-cli_main = importlib.import_module("gridfm_trustlayer.cli.main")
+# Shared CLI settings, monkeypatched to force small blocks and per-block reads.
+cli_common = importlib.import_module("gridfm_trustlayer.cli.common")
 
 N_SCENARIOS = 60
 FIRST_BLOCK = 10  # scenarios per block in the split runs
@@ -230,7 +231,7 @@ def test_calibrate_and_screen_do_not_depend_on_the_block_size(
     split = Path(str(whole).replace("whole", "split"))
     split.write_text(whole.read_text().replace("/whole/", "/split/"), encoding="utf-8")
     monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", FIRST_BLOCK)
-    monkeypatch.setattr(cli_main, "_BLOCK_ROWS", 1)
+    monkeypatch.setattr(cli_common, "_BLOCK_ROWS", 1)
     _run(split)
 
     whole_dir, split_dir = tmp_path / "whole", tmp_path / "split"
@@ -238,7 +239,7 @@ def test_calibrate_and_screen_do_not_depend_on_the_block_size(
         list((split_dir / "screen" / "screening_detail_line_loading.parquet").iterdir())
     ) == (N_SCENARIOS // FIRST_BLOCK)
     csv_files = sorted(path.relative_to(whole_dir) for path in whole_dir.rglob("*.csv"))
-    assert len(csv_files) == 8
+    assert len(csv_files) == 10
     for relative in csv_files:
         pd.testing.assert_frame_equal(
             pd.read_csv(split_dir / relative),
@@ -306,9 +307,9 @@ def test_kernel_runs_read_embeddings_once_or_per_block_with_the_same_result(
     per_block.write_text(
         once.read_text().replace("/once/", "/per_block/"), encoding="utf-8"
     )
-    monkeypatch.setattr(cli_main, "_EMBEDDINGS_PRELOAD_BYTES", 0)
+    monkeypatch.setattr(cli_common, "_EMBEDDINGS_PRELOAD_BYTES", 0)
     monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", FIRST_BLOCK)
-    monkeypatch.setattr(cli_main, "_BLOCK_ROWS", 1)
+    monkeypatch.setattr(cli_common, "_BLOCK_ROWS", 1)
     _run(per_block)
 
     relative = "calibrated/predictions_vm_va_with_intervals.parquet"
@@ -317,3 +318,121 @@ def test_kernel_runs_read_embeddings_once_or_per_block_with_the_same_result(
         _read_rows(tmp_path / "per_block" / relative, keys),
         _read_rows(tmp_path / "once" / relative, keys),
     )
+
+
+def _artifact_contents(path: Path) -> tuple[dict, dict]:
+    calibrators = load_interval_artifacts(str(path))
+    meta = {kind: calibrator.to_dict() for kind, calibrator in calibrators.items()}
+    arrays = {
+        kind: calibrator.array_payload()
+        for kind, calibrator in calibrators.items()
+        if hasattr(calibrator, "array_payload")
+    }
+    return meta, arrays
+
+
+@pytest.mark.parametrize("method", list(METHODS))
+def test_compute_does_not_depend_on_the_block_size(
+    tmp_path, monkeypatch, method
+) -> None:
+    whole = _config(tmp_path, "whole", METHODS[method])
+    assert main(["compute", "--config", str(whole)]) == 0
+    whole_artifact = tmp_path / "whole.trustlayer"
+    (tmp_path / "layer.trustlayer").rename(whole_artifact)
+
+    monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", FIRST_BLOCK)
+    monkeypatch.setattr(cli_common, "_BLOCK_ROWS", 1)
+    assert main(["compute", "--config", str(whole)]) == 0
+
+    whole_meta, whole_arrays = _artifact_contents(whole_artifact)
+    split_meta, split_arrays = _artifact_contents(tmp_path / "layer.trustlayer")
+    assert split_meta == whole_meta
+    for kind, arrays in whole_arrays.items():
+        for name, values in arrays.items():
+            np.testing.assert_array_equal(
+                split_arrays[kind][name], values, err_msg=name
+            )
+
+
+def _outputs(directory: Path) -> dict[str, pd.DataFrame]:
+    """Every CSV and partitioned dataset under `directory`, keyed by relative path."""
+
+    frames = {
+        str(path.relative_to(directory)): pd.read_csv(path)
+        for path in directory.rglob("*.csv")
+    }
+    for path in directory.rglob("*.parquet"):
+        if path.is_dir():
+            frame = pd.read_parquet(path).drop(columns=parquet_io.PARTITION_COLUMN)
+            keys = [c for c in ("variable", "scenario", "bus", "branch") if c in frame]
+            frames[str(path.relative_to(directory))] = frame.sort_values(
+                keys
+            ).reset_index(drop=True)
+    return frames
+
+
+def test_serial_and_parallel_runs_agree(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", FIRST_BLOCK)
+    monkeypatch.setattr(cli_common, "_BLOCK_ROWS", 1)
+    parallel = _config(tmp_path, "parallel", METHODS["kernel_n_outages"])
+    # Blocks run in parallel only when n_jobs is given.
+    parallel.write_text(parallel.read_text() + "\nn_jobs: 3\n", encoding="utf-8")
+    serial = parallel.with_name("serial.yaml")
+    serial.write_text(
+        parallel.read_text()
+        .replace(str(tmp_path / "parallel"), str(tmp_path / "serial"))
+        .replace("n_jobs: 3", "n_jobs: 1"),
+        encoding="utf-8",
+    )
+    assert main(["compute", "--config", str(parallel)]) == 0
+    _run(parallel)
+    _run(serial)
+    # Also on the command line, with all CPUs.
+    assert main(["screen", "--config", str(parallel), "--n-jobs", "-1"]) == 0
+
+    serial_outputs = _outputs(tmp_path / "serial")
+    parallel_outputs = _outputs(tmp_path / "parallel")
+    assert serial_outputs.keys() == parallel_outputs.keys()
+    assert len(serial_outputs) >= 12
+    for name, frame in serial_outputs.items():
+        pd.testing.assert_frame_equal(
+            parallel_outputs[name], frame, check_exact=False, rtol=1e-12, obj=name
+        )
+
+
+def test_module_entry_point_runs_worker_processes(tmp_path) -> None:
+    """`python -m gridfm_trustlayer` runs a pool of spawned workers to completion."""
+
+    import subprocess
+    import sys
+
+    tuned = [
+        "cp_type: kernel",
+        "strat: n_outages",
+        "bandwidth: n_eff",
+        "n_eff_target: auto",
+        "n_eff_min: 2",
+        "tuning:",
+        "  folds: 2",
+        "  grid: [8, 16]",
+    ]
+    config = _config(tmp_path, "run", tuned)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gridfm_trustlayer",
+            "compute",
+            "--config",
+            str(config),
+            "--n-jobs",
+            "2",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("compute: fitted") == 1
+    assert (tmp_path / "layer.trustlayer").exists()

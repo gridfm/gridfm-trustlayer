@@ -393,9 +393,7 @@ Outputs:
 
 - calibrated bus parquet for voltage variables
 - calibrated branch parquet for `line_loading`
-- trust-analysis CSVs
-- trust-summary CSVs
-- figures
+- the coverage report: `summary.md`, coverage tables by stratum, group and element, and figures
 - for `cp_type: kernel`, the per-scenario diagnostics `kcp_n_eff`, `kcp_bandwidth_sq`, and `kcp_fallback`
 
 For `cp_type: kernel` this is also where the localization happens: the test embeddings are loaded and pooled, distances to the stored bank are computed within each stratum, and the weighted quantile is evaluated per test scenario.
@@ -413,10 +411,14 @@ Example bounds:
 
 Outputs:
 
-- detail CSVs with row-level predicted and true violation flags
-- entity-level summaries by bus or branch
-- aggregate summaries by bus type or `rate_a`
-- screening figures
+- detail datasets with the prediction, bounds, true value, alarm flags and statuses of every value
+- the status of every operating scenario, and counts per status
+- alarm counts per stratum, per bus type or `rate_a`, and per bus or branch
+- the screening report and figures
+
+### `apply`
+
+`apply` applies the fitted calibrators to new scenarios, which have no known solution, exactly as `calibrate` does to the test set. With operating bounds in the config, it also gives every value and operating scenario its status, by the rule of `screen`. Nothing is evaluated, since there is no truth: the rates measured by `screen` on the test set are the ones to expect.
 
 ## Screening interpretation
 
@@ -440,6 +442,16 @@ That distinction matters especially for OPF data:
 
 - PF data often contains realized violations, so precision/recall style screening is naturally informative
 - OPF data is often feasible by construction, so the same screen behaves more like a near-limit risk alarm
+
+### Statuses
+
+The alarm uses one bound; the status uses both. For an upper limit $L$:
+
+- `within_limits` if $u \le L$: the whole interval is inside the limit;
+- `violation` if $\ell > L$: the whole interval is beyond it;
+- `uncertain` otherwise: the interval straddles the limit.
+
+A lower limit is treated symmetrically, and an operating scenario takes the worst status of its values: `secure`, `uncertain` or `insecure`. A missed violation needs $y > u$ and a false confirmation needs $y < \ell$, so each happens for at most a share $\alpha/2$ of the values on average. This bounds their number among all values, not their share among the values given that status, and it does not extend to scenarios, which combine many values: those rates are measured by `screen`. The point prediction $\hat{y}$ is classified by the same rule with $\ell = u = \hat{y}$, as a baseline without uncertainty.
 
 ## Task semantics
 

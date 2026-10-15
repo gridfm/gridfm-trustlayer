@@ -4,10 +4,19 @@ site_url: https://gridfm.github.io/gridfm-trustlayer/
 repo_name: gridfm/gridfm-trustlayer
 repo_url: https://github.com/gridfm/gridfm-trustlayer
 
+# The docs build installs from this file; it is not a page of the site.
+exclude_docs: |
+  requirements.txt
+
+# With `mkdocs build --strict`, a link to a missing heading fails the build.
+validation:
+  anchors: warn
+
 nav:
   - Home: index.md
   - Getting started:
     - Installation: getting-started/installation.md
+    - Demo notebook: getting-started/demo.md
     - Quick start: getting-started/quickstart.md
     - Building the config: getting-started/config-builder.md
   - User guide:

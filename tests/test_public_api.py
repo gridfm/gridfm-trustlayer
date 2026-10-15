@@ -14,6 +14,7 @@ from gridfm_trustlayer import (
     KernelIntervalCalibrator,
     NaiveIntervalCalibrator,
     load_interval_artifact,
+    load_interval_artifacts,
     save_interval_artifact,
 )
 
@@ -67,6 +68,14 @@ def test_fitted_calibrator_survives_an_artifact_roundtrip(tmp_path) -> None:
     assert not isinstance(loaded, KernelIntervalCalibrator)
     np.testing.assert_array_equal(
         loaded.upper_residual_quantiles["Vm"], calibrator.upper_residual_quantiles["Vm"]
+    )
+    by_family = load_interval_artifacts(str(path))
+    assert list(by_family) == ["volt"]
+    volt = by_family["volt"]
+    assert isinstance(volt, NaiveIntervalCalibrator)
+    np.testing.assert_array_equal(
+        volt.upper_residual_quantiles["Vm"],
+        calibrator.upper_residual_quantiles["Vm"],
     )
 
 

@@ -138,13 +138,33 @@ class PartitionedWriter:
     directory if it holds only partitions written by a previous run.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clear: bool = True,
+        schema: pa.Schema | None = None,
+    ) -> None:
         self.path = Path(path)
-        _clear_partitioned_output(self.path)
+        if clear:
+            clear_partitioned_output(self.path)
         self._blocks_written = 0
-        self._schema: pa.Schema | None = None
+        self._schema = schema
 
-    def write(self, frame: pd.DataFrame) -> None:
+    @property
+    def schema(self) -> pa.Schema | None:
+        """Column types of the dataset, fixed by the first block written."""
+
+        return self._schema
+
+    def write(self, frame: pd.DataFrame, *, block_index: int | None = None) -> None:
+        """Write one block of rows.
+
+        Several writers (e.g. in parallel processes) can add blocks to the same
+        dataset when each passes the dataset's `schema` and its own
+        `block_index`, and their blocks hold different partitions.
+        """
+
         if frame.empty:
             return
         partition = (
@@ -167,7 +187,10 @@ class PartitionedWriter:
             table,
             str(self.path),
             partition_cols=[PARTITION_COLUMN],
-            basename_template=f"part-{self._blocks_written:05d}-{{i}}.parquet",
+            basename_template=(
+                f"part-{self._blocks_written if block_index is None else block_index:05d}"
+                "-{i}.parquet"
+            ),
             existing_data_behavior="overwrite_or_ignore",
             compression="zstd",
             use_dictionary=[name for name in table.column_names if name not in floats],
@@ -193,20 +216,68 @@ def _plain_types(table: pa.Table) -> pa.Table:
     return table.cast(pa.schema(fields))
 
 
-def _clear_partitioned_output(path: Path) -> None:
-    if path.is_file():
+def is_partitioned_dataset(path: str | Path) -> bool:
+    """Whether `path` is a partitioned dataset (a folder of `scenario_partition=k`)."""
+
+    path = Path(path)
+    return path.is_dir() and any(
+        child.is_dir() and child.name.startswith(f"{PARTITION_COLUMN}=")
+        for child in path.iterdir()
+    )
+
+
+def clear_partitioned_output(
+    path: str | Path, *, inputs: Iterable[str | Path | None] = ()
+) -> None:
+    """Remove a previous trustlayer output at `path`; refuse anything else.
+
+    Only a file or partitioned dataset with interval bounds among its columns
+    (`*pi_lower`, in every trustlayer output) is removed, and never one of the
+    command's `inputs`. The layout alone does not tell an output apart: datakit
+    writes its raw data in the same partitioned layout.
+    """
+
+    path = Path(path)
+    if not path.exists():
+        return
+    resolved = path.resolve()
+    if any(
+        source is not None and Path(source).resolve() == resolved for source in inputs
+    ):
+        raise ValueError(
+            f"The output path {path} is also an input of this command; choose "
+            "another output path.",
+        )
+    if path.is_dir():
+        children = list(path.iterdir())
+        if not children:
+            path.rmdir()
+            return
+        partitioned = all(
+            child.is_dir() and child.name.startswith(f"{PARTITION_COLUMN}=")
+            for child in children
+        )
+        if partitioned and _has_interval_columns(path):
+            shutil.rmtree(path)
+            return
+    elif _has_interval_columns(path):
         path.unlink()
         return
-    if not path.is_dir():
-        return
-    children = list(path.iterdir())
-    if all(
-        child.is_dir() and child.name.startswith(f"{PARTITION_COLUMN}=")
-        for child in children
-    ):
-        shutil.rmtree(path)
-        return
     raise ValueError(
-        f"{path} exists and is not a partitioned trustlayer output: it would be "
-        "replaced. Choose another output path or remove it.",
+        f"{path} exists and is not a trustlayer output: it would be replaced. "
+        "Choose another output path or remove it.",
     )
+
+
+def _has_interval_columns(path: Path) -> bool:
+    """Whether `path` is a parquet file or dataset with interval bounds."""
+
+    try:
+        names = (
+            pq.read_schema(path).names
+            if path.is_file()
+            else ds.dataset(path, format="parquet", partitioning="hive").schema.names
+        )
+    except (OSError, pa.ArrowException):
+        return False
+    return any(name.endswith("pi_lower") for name in names)
