@@ -42,6 +42,31 @@ _COLORS = {"main": "#2f6db3", "target": "#c0392b", "box": "#a9c6e8"}
 
 
 # ------------------------------------------------------------------ helpers
+# The files a report folder gets from `calibrate`, `screen` or `apply`.
+_REPORT_FILES = (
+    "summary.md",
+    "coverage_by_*.csv",
+    "screening_by_*.csv",
+    "scenarios.csv",
+    "status_by_*.csv",
+    "figures/*.png",
+)
+
+
+def clear_report(directory: Path) -> None:
+    """Remove the report files of a previous run from `directory`.
+
+    A rerun with fewer variables would otherwise leave, e.g., the line-loading
+    tables and figures of the previous run next to the new summary. Only the
+    files trustlayer writes are removed.
+    """
+
+    for pattern in _REPORT_FILES:
+        for path in directory.glob(pattern):
+            if path.is_file():
+                path.unlink()
+
+
 def write_csv(frame: pd.DataFrame, path: Path) -> None:
     """Write a report table with floats rounded to 6 significant digits."""
 
@@ -105,6 +130,25 @@ def _stratification_name(frame: pd.DataFrame) -> str:
 
 
 # ------------------------------------------------------------------ coverage
+def _finite_mean_width(group: pd.DataFrame) -> float:
+    """Mean width over the values with finite bounds.
+
+    Per value, not per element: an element with some infinite bounds (a sparse
+    stratum with `sparse_strata: infinite`) still counts with its finite ones.
+    """
+
+    if "finite_width_count" in group:
+        count = float(group["finite_width_count"].sum())
+        return float(group["finite_width_sum"].sum()) / count if count else math.nan
+    widths = group["mean_width"].to_numpy(dtype=float)
+    finite = np.isfinite(widths)
+    return (
+        float(np.average(widths[finite], weights=group["n_values"][finite]))
+        if finite.any()
+        else math.nan
+    )
+
+
 def coverage_by_stratum(elements: pd.DataFrame, alpha: float) -> pd.DataFrame:
     """Coverage and width per variable and stratum, from per-element statistics.
 
@@ -150,11 +194,7 @@ def coverage_by_stratum(elements: pd.DataFrame, alpha: float) -> pd.DataFrame:
                 "coverage_low": max(0.0, coverage - half_width),
                 "coverage_high": min(1.0, coverage + half_width),
                 "worst_element_coverage": _worst(observed),
-                "mean_width": float(
-                    np.average(widths[finite], weights=observed["n_values"][finite])
-                )
-                if finite.any()
-                else math.nan,
+                "mean_width": _finite_mean_width(observed),
                 "n_elements_infinite": int((~finite).sum()),
             }
         )
@@ -179,8 +219,6 @@ def coverage_by_group(elements: pd.DataFrame, entity_column: str) -> pd.DataFram
         keys, sort=False, dropna=False
     ):
         n_values = int(group["n_values"].sum())
-        widths = group["mean_width"].to_numpy(dtype=float)
-        finite = np.isfinite(widths)
         records.append(
             {
                 "variable": variable,
@@ -197,11 +235,7 @@ def coverage_by_group(elements: pd.DataFrame, entity_column: str) -> pd.DataFram
                     (group["coverage"] * group["n_values"]).sum() / n_values
                 ),
                 "worst_element_coverage": _worst(group),
-                "mean_width": float(
-                    np.average(widths[finite], weights=group["n_values"][finite])
-                )
-                if finite.any()
-                else math.nan,
+                "mean_width": _finite_mean_width(group),
             }
         )
     if not records:

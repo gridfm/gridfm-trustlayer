@@ -4,7 +4,7 @@ Error messages are quoted as the CLI prints them, with the values in your run in
 
 ## Config errors
 
-??? failure "`inputs.predictions is no longer supported: the calibration and test data must be separate datasets.`"
+??? failure "`inputs.<key> is no longer supported: the calibration and test data must be separate datasets.`"
     The config uses the old flat `inputs` block of version 0.0.1. Move the keys under `inputs.calibration` and add an `inputs.test` block for a separately generated dataset:
 
     ```yaml
@@ -62,8 +62,14 @@ Error messages are quoted as the CLI prints them, with the values in your run in
 ??? failure "`screen_bounds.Vm must define both 'lower' and 'upper'.` / `screen_bounds.line_loading must define 'upper'.`"
     `Vm` is screened against both limits, `line_loading` only against `upper` (a fraction of `rate_a`).
 
-??? failure "`No calibrated voltage parquet for '...' in .... Run calibrate first, or set outputs.calibrated_predictions_volt to the file to screen.`"
-    `screen` reads the parquet written by `calibrate`. Run `calibrate` with the same config first. If you moved or renamed the file, point `outputs.calibrated_predictions_volt` (or `_line`) at it.
+??? failure "`Calibrated predictions not found: .... Run calibrate first.`"
+    `screen` reads the data written by `calibrate`. Run `calibrate` with the same config first. If you moved or renamed it, point `outputs.calibrated_predictions_volt` (or `_line`) at it.
+
+??? failure "`line_loading not found in the calibrated predictions ...: calibrate it first`"
+    `screen` was asked for a variable that `calibrate` did not calibrate, e.g. `commands.screen.variables` still lists `line_loading` after it was dropped from `variables`. Calibrate it (add it to `variables`, then run `compute` and `calibrate`), or remove it from the screened variables.
+
+??? failure "`Artifact not found: .... Run compute first`"
+    `calibrate` and `apply` read the artifact that `compute` wrote, at `outputs.artifact` or, without it, at the default path under `trustlayer_outputs/<task_name>/<cp_type>/`. Run `compute` with the same config first, or point `outputs.artifact` at the artifact.
 
 ??? failure "`A mixed-variable run needs separate parquet outputs.`"
     Calibrating voltages and `line_loading` together writes two files, one per bus and one per branch. Set `outputs.calibrated_predictions` to a **directory**, or set `outputs.calibrated_predictions_volt` and `outputs.calibrated_predictions_line` to two file paths.
@@ -100,6 +106,12 @@ Error messages are quoted as the CLI prints them, with the values in your run in
     python -m pip install ipykernel
     python -m ipykernel install --user --name trustlayer --display-name "Python (trustlayer)"
     ```
+
+??? failure "`Missing inputs.<dataset>.<key> in the config (or --<key>).`"
+    The command needs that input, e.g. `apply` needs `inputs.apply.predictions`. Add it to the config block named in the message, or pass the flag.
+
+??? question "`compute: task_name '...' is not PowerFlow or OptimalPowerFlow`"
+    Any other task name reads the predictions as they are, with no set-points set aside. If you meant power flow or optimal power flow, fix the spelling (case, spaces, `_` and `-` do not matter, and `PF` / `OPF` work too): with an unknown name, the set-points would be fitted as predictions and the bounds would be too narrow.
 
 ??? failure "`gridfm_datakit is required for compute_line_loading().`"
     Line loading is computed with datakit's branch-flow routine. Install the extra: `pip install "gridfm-trustlayer[datakit]"`.

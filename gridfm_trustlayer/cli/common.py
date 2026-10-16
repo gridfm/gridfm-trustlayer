@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -14,8 +15,10 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.cli import reports, status
 from gridfm_trustlayer.cli.config import (
+    CALIBRATION_PREDICTIONS_KEY,
     coalesce_option,
     normalize_variables,
+    validate_cp_type,
 )
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import (
@@ -38,6 +41,7 @@ from gridfm_trustlayer.io.parquet import (
     PartitionedWriter,
     column_names,
     open_dataset,
+    read_frame,
 )
 
 SCREEN_BOUND_TOLERANCE = 1e-6
@@ -63,7 +67,11 @@ BASE_ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type", "system_load_bin")
 def _sparse_strata_listing(
     calibrators: Mapping[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
 ) -> str:
-    """E.g. `Vm: 27 buses (n_outages=1: 27)`, or '' when no stratum is sparse."""
+    """E.g. `Vm: 27 bus-stratum pairs (n_outages=1: 27)`, or '' when none is sparse.
+
+    A bus or line counts once in each stratum where it is sparse; with many
+    strata (e.g. `pred_bins`), only the first five are listed.
+    """
 
     parts: list[str] = []
     for calibrator in calibrators.values():
@@ -78,11 +86,15 @@ def _sparse_strata_listing(
             if not by_stratum:
                 continue
             total = sum(by_stratum.values())
+            items = list(by_stratum.items())
             where = ", ".join(
                 f"{_sparse_stratum_label(calibrator.strat, variable, value)}: {count}"
-                for value, count in by_stratum.items()
+                for value, count in items[:5]
             )
-            parts.append(f"{variable}: {total} {nouns[total != 1]} ({where})")
+            if len(items) > 5:
+                where += f", and {len(items) - 5} more strata"
+            pairs = "pair" if total == 1 else "pairs"
+            parts.append(f"{variable}: {total} {nouns[0]}-stratum {pairs} ({where})")
     return "; ".join(parts)
 
 
@@ -134,6 +146,99 @@ class _EmbeddingSource:
             )
         else:
             _attach_scenario_embeddings(predictions, self.path, pooling=self.pooling)
+
+
+def _bounds_notes(output_paths: Iterable[str]) -> list[str]:
+    """What the bounds of a run rest on, when it is not the usual case.
+
+    The values whose bounds come from all calibration scenarios pooled across
+    strata (too few samples in their stratum), and the share of scenarios in
+    which the kernel fell back to the stratum quantile. Read from the written
+    outputs, so that `calibrate` and `apply` report alike.
+    """
+
+    pooled_notes: dict[str, str] = {}
+    fallback_scenarios: dict[int, bool] = {}
+    for path in output_paths:
+        columns = column_names(path)
+        pooled = [c for c in columns if c.endswith("_pooled")]
+        fallback = ["kcp_fallback"] if "kcp_fallback" in columns else []
+        if not pooled and not fallback:
+            continue
+        frame = read_frame(path, ["scenario", *pooled, *fallback])
+        for column in pooled:
+            n = int(frame[column].fillna(False).astype(bool).sum())
+            if n:
+                variable = column.removesuffix("_pooled")
+                pooled_notes[variable] = (
+                    f"{variable}: {n:,} values use pooled bounds (their stratum has "
+                    "too few calibration samples; no guarantee within it)"
+                )
+        if fallback:
+            flags = frame.groupby("scenario")["kcp_fallback"].first()
+            fallback_scenarios.update(flags.astype(bool).to_dict())
+    notes = [pooled_notes[v] for v in sorted(pooled_notes, key=reports.variable_rank)]
+    if fallback_scenarios:
+        share = sum(fallback_scenarios.values()) / len(fallback_scenarios)
+        notes.append(
+            f"kernel: in {share:.0%} of scenarios, at least one value uses the stratum "
+            "quantile instead of the kernel's (kcp_fallback)"
+        )
+    return notes
+
+
+def _check_artifact_matches(
+    calibrators: Mapping[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
+    args: argparse.Namespace,
+    config: Mapping[str, Any],
+    artifact_path: str,
+    *,
+    command: str,
+) -> None:
+    """Say so when the artifact was fitted with other settings than the config's.
+
+    The artifact defines the layer, and its settings are used. A config that
+    differs from it (changed without running `compute` again, or `compute` run
+    with a flag that overrode it) is reported rather than ignored silently.
+    """
+
+    def given(key: str) -> Any:
+        return coalesce_option(getattr(args, key, None), dict(config), key)
+
+    first = next(iter(calibrators.values()))
+    fitted_cp = "kernel" if isinstance(first, KernelIntervalCalibrator) else "element"
+    stale = []
+    alpha = given("alpha")
+    if alpha is not None and not math.isclose(float(alpha), float(first.alpha)):
+        stale.append(f"alpha {first.alpha:g}, not {float(alpha):g}")
+    cp_type = given("cp_type")
+    if cp_type is not None and validate_cp_type(cp_type) != fitted_cp:
+        stale.append(f"cp_type {fitted_cp}, not {cp_type}")
+    pooling = given("embedding_pooling")
+    if (
+        pooling is not None
+        and isinstance(first, KernelIntervalCalibrator)
+        and str(pooling).strip().lower() != first.embedding_pooling
+    ):
+        stale.append(f"embedding_pooling {first.embedding_pooling}, not {pooling}")
+    variables = given("variables")
+    if variables is not None:
+        fitted = {name for c in calibrators.values() for name in c.channel_names}
+        requested = set(normalize_variables(variables))
+        if requested != fitted:
+            stale.append(
+                "variables "
+                + ", ".join(sorted(fitted, key=reports.variable_rank))
+                + ", not "
+                + ", ".join(sorted(requested, key=reports.variable_rank))
+            )
+    if stale:
+        print(
+            f"{command}: note: the artifact {artifact_path} was fitted with "
+            f"{'; '.join(stale)}, and is used as fitted. If you changed the config "
+            "since, run compute again.",
+            flush=True,
+        )
 
 
 def _ground_truth_reference(
@@ -380,21 +485,54 @@ def _parse_screen_bounds(raw_bounds: object) -> dict[str, dict[str, float]]:
                 raise ValueError(
                     f"screen_bounds.{raw_name} must be a mapping with screening bounds."
                 )
+            unknown = sorted(set(raw_value).difference({"lower", "upper"}))
+            if unknown:
+                raise ValueError(
+                    f"screen_bounds.{raw_name} has unknown keys {unknown}; use lower "
+                    "and upper."
+                )
             if variable == "line_loading":
                 if "upper" not in raw_value:
                     raise ValueError(f"screen_bounds.{raw_name} must define 'upper'.")
-                lower_value = float(raw_value.get("lower", float("nan")))
-            else:
-                if "lower" not in raw_value or "upper" not in raw_value:
-                    raise ValueError(
-                        f"screen_bounds.{raw_name} must define both 'lower' and 'upper'."
-                    )
-                lower_value = float(raw_value["lower"])
-            bounds_by_variable[variable] = {
-                "lower": lower_value,
-                "upper": float(raw_value["upper"]),
-            }
+            elif "lower" not in raw_value or "upper" not in raw_value:
+                raise ValueError(
+                    f"screen_bounds.{raw_name} must define both 'lower' and 'upper'."
+                )
+            bounds_by_variable[variable] = screen_limits(
+                variable,
+                _bound_number(
+                    raw_value.get("lower"), f"screen_bounds.{raw_name}.lower"
+                ),
+                _bound_number(raw_value["upper"], f"screen_bounds.{raw_name}.upper"),
+            )
     return bounds_by_variable
+
+
+def _bound_number(value: object, name: str) -> float:
+    if value is None:
+        return float("nan")
+    try:
+        return float(cast(Any, value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number; got {value!r}.") from exc
+
+
+def screen_limits(variable: str, lower: float, upper: float) -> dict[str, float]:
+    """The operating limits of a variable, checked.
+
+    `line_loading` is screened against its upper limit only (a loading is never
+    too low), so a lower limit given for it is not used, by `screen` and `apply`
+    alike.
+    """
+
+    if variable == "line_loading":
+        lower = float("nan")
+    if not math.isnan(lower) and not lower < upper:
+        raise ValueError(
+            f"The lower limit of {variable} ({lower:g}) must be below its upper "
+            f"limit ({upper:g})."
+        )
+    return {"lower": lower, "upper": upper}
 
 
 def _build_interval_frame(
@@ -565,6 +703,19 @@ def _build_bus_channel_set(
     )
 
 
+def _require_set_points(predictions: PredictionSet) -> None:
+    for variable, bus_type in _SET_POINTS.get(predictions.task_name, ()):
+        mask = predictions.bus_type_masks.get(bus_type)
+        values = predictions.Vm if variable == "Vm" else predictions.Va
+        if mask is not None and not np.isfinite(values[mask]).all():
+            raise ValueError(
+                f"{variable}_target is missing at some {bus_type} buses: these "
+                f"set-points are inputs of each {predictions.task_name} scenario and "
+                "are needed to apply the layer (the predictions there are replaced "
+                "by them).",
+            )
+
+
 def _unknown_masks(
     predictions: PredictionSet, channel_names: tuple[str, ...]
 ) -> dict[str, np.ndarray]:
@@ -620,7 +771,10 @@ def _build_line_loading_sets(
     target_loading = compute_line_loading(
         ground_truth.Vm, ground_truth.Va, ground_truth
     )
-    valid_mask = (predicted_loading >= 0.0) & (target_loading >= 0.0)
+    # -1 marks an out-of-service or unrated line. The bounds depend on the
+    # predictions only (as in `apply`); fitting also needs a known true value.
+    predicted_valid = ~(predicted_loading < 0.0)
+    target_valid = predicted_valid & (target_loading >= 0.0)
     entity_columns = {
         "from_bus": ground_truth.f_bus.astype(np.int64, copy=True),
         "to_bus": ground_truth.t_bus.astype(np.int64, copy=True),
@@ -632,7 +786,7 @@ def _build_line_loading_sets(
             entity_ids=ground_truth.branch_ids.copy(),
             entity_name="branch",
             channels={"line_loading": predicted_loading},
-            valid_masks={"line_loading": valid_mask},
+            valid_masks={"line_loading": predicted_valid},
             entity_columns=entity_columns,
             scenario_columns={
                 name: values.copy() for name, values in (scenario_columns or {}).items()
@@ -644,7 +798,7 @@ def _build_line_loading_sets(
             entity_ids=ground_truth.branch_ids.copy(),
             entity_name="branch",
             channels={"line_loading": target_loading},
-            valid_masks={"line_loading": valid_mask},
+            valid_masks={"line_loading": target_valid},
             entity_columns=entity_columns,
             scenario_columns={
                 name: values.copy() for name, values in (scenario_columns or {}).items()
@@ -908,15 +1062,69 @@ def _attach_scenario_embeddings(
     return predictions
 
 
-def _default_output_dir(task_name: str, cp_type: str) -> Path:
+def _default_output_dir(task_name: str, cp_type: str, *, create: bool = True) -> Path:
     output_dir = (
         Path.cwd()
         / "trustlayer_outputs"
         / _normalize_output_segment(task_name)
         / _normalize_output_segment(cp_type)
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if create:
+        output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
+
+
+def _output_task_name(args: argparse.Namespace, config: Mapping[str, Any]) -> str:
+    """The task folder of the default outputs: the config's `task_name`, or `unknown`.
+
+    Every command uses the same rule, so that each finds what the previous one
+    wrote by default.
+    """
+
+    return str(
+        coalesce_option(getattr(args, "task_name", None), dict(config), "task_name")
+        or "unknown"
+    )
+
+
+def _artifact_path(
+    args: argparse.Namespace,
+    config: Mapping[str, Any],
+    *,
+    explicit: str | None,
+    for_reading: bool,
+) -> str:
+    """The artifact: `explicit` (a flag), `outputs.artifact`, else the default.
+
+    The default, `trustlayer_outputs/<task_name>/<cp_type>/<calibration
+    predictions>_<variables>.trustlayer`, is the same for every command.
+    """
+
+    path = coalesce_option(explicit, dict(config), "artifact")
+    if path is None:
+        calibration = config.get(CALIBRATION_PREDICTIONS_KEY)
+        if calibration is None:
+            raise ValueError(
+                "No artifact: set outputs.artifact (or --artifact), or "
+                "inputs.calibration.predictions for the default path."
+            )
+        cp_type = validate_cp_type(
+            coalesce_option(getattr(args, "cp_type", None), dict(config), "cp_type")
+        )
+        variables = normalize_variables(
+            coalesce_option(getattr(args, "variables", None), dict(config), "variables")
+        )
+        suffix = "_".join(variable.lower() for variable in variables)
+        directory = _default_output_dir(
+            _output_task_name(args, config), cp_type, create=not for_reading
+        )
+        path = str(directory / f"{Path(str(calibration)).stem}_{suffix}.trustlayer")
+    if for_reading and not Path(str(path)).is_file():
+        raise FileNotFoundError(
+            f"Artifact not found: {path}. Run compute first, or set outputs.artifact "
+            "to the artifact it wrote."
+        )
+    return str(path)
 
 
 def _normalize_output_segment(value: str) -> str:

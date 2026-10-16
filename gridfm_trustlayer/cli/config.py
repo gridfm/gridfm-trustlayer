@@ -215,6 +215,12 @@ def _same_path(first: Any, second: Any) -> bool:
     )
 
 
+# Internal keys of a resolved command config: the calibration predictions path,
+# and the `inputs` block the command reads (for error messages).
+CALIBRATION_PREDICTIONS_KEY = "_calibration_predictions"
+DATASET_KEY = "_dataset"
+
+
 def resolve_command_config(
     config: dict[str, Any],
     command_name: str,
@@ -252,6 +258,12 @@ def resolve_command_config(
         inputs.get(_COMMAND_DATASET[command_name]),
         allowed_keys=_DATASET_KEYS,
     )
+    # Every command names the default artifact after the calibration predictions,
+    # as `compute` does when it writes it (see `common._artifact_path`).
+    calibration = inputs.get("calibration")
+    if isinstance(calibration, dict) and calibration.get("predictions") is not None:
+        resolved[CALIBRATION_PREDICTIONS_KEY] = calibration["predictions"]
+    resolved[DATASET_KEY] = _COMMAND_DATASET[command_name]
     _merge_mapping(resolved, inputs, allowed_keys={"artifact"})
     _merge_mapping(resolved, config.get("outputs"), allowed_keys=_OUTPUT_KEYS)
 
@@ -295,6 +307,13 @@ def resolve_command_config(
 
 def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
     """Validate resolved command-level config values with clear messages."""
+
+    if config.get("version") not in (None, 1):
+        raise ValueError(
+            f"Unsupported config version {config['version']!r}; this release reads "
+            "version 1."
+        )
+    validate_alpha(config.get("alpha"))
 
     cp_type = validate_cp_type(config.get("cp_type"))
     strat = validate_strat(config.get("strat"))
@@ -390,9 +409,14 @@ def coalesce_option(
     if key in config:
         return config[key]
     if required:
-        raise ValueError(
-            f"Missing required option '{key}'. Provide it via CLI or config."
-        )
+        flag = "--" + key.replace("_", "-")
+        if key in _DATASET_KEYS:
+            where = f"inputs.{config.get(DATASET_KEY, '<dataset>')}.{key}"
+        elif key in _OUTPUT_KEYS:
+            where = f"outputs.{key}"
+        else:
+            where = key
+        raise ValueError(f"Missing {where} in the config (or {flag}).")
     return None
 
 
@@ -404,7 +428,13 @@ def normalize_variables(raw_value: Any) -> tuple[str, ...]:
     elif isinstance(raw_value, str):
         raw_values = [part.strip() for part in raw_value.split(",") if part.strip()]
     elif isinstance(raw_value, (list, tuple)):
-        raw_values = [str(part).strip() for part in raw_value if str(part).strip()]
+        # `--variables Vm line_loading` and `--variables Vm,line_loading` alike.
+        raw_values = [
+            piece.strip()
+            for part in raw_value
+            for piece in str(part).split(",")
+            if piece.strip()
+        ]
     else:
         raise ValueError("variables must be a string or a list of strings.")
 
@@ -443,6 +473,20 @@ def validate_cp_type(cp_type: str | None) -> str:
         raise ValueError(
             f"Unsupported cp_type: {cp_type!r}. The current implementation supports {supported}.",
         )
+    return normalized
+
+
+def validate_alpha(value: Any) -> float | None:
+    """`alpha`: the miscoverage level, a number strictly between 0 and 1."""
+
+    if value is None:
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"alpha must be a number; got {value!r}.") from exc
+    if not 0.0 < normalized < 1.0:
+        raise ValueError(f"alpha must be between 0 and 1, e.g. 0.1; got {value!r}.")
     return normalized
 
 

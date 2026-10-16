@@ -191,4 +191,4 @@ def _replace_where(
 def _normalize_task_name(task_name: str | None) -> str | None:
     if task_name is None:
         return None
-    return task_name.replace("_", "").replace("-", "").strip().lower()
+    return "".join(character for character in task_name.lower() if character.isalnum())

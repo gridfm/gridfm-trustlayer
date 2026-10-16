@@ -62,7 +62,7 @@ For each command, a value is taken from the first of these that sets it:
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `version` | int | – | Config format marker; use `1`. |
-| `task_name` | str | – | How to read the predictions: `PowerFlow` or `OptimalPowerFlow`. Also names the default output directory. |
+| `task_name` | str | – | How to read the predictions: `PowerFlow` or `OptimalPowerFlow` (case, spaces, `_` and `-` do not matter; `PF` and `OPF` work too). For `PowerFlow`, the set-points (`Vm` at PV buses, `Va` at the reference bus) are set aside as known values. Any other name reads the predictions as they are, and `compute` says so. Also names the default output directory (`unknown` when not set). |
 | `cp_type` | str | `element` | `element` (stratified split-conformal) or `kernel` (kernel-weighted). See [Choosing a setup](../user-guide/choosing-a-setup.md#method-cp_type). |
 | `alpha` | float | required by `compute` | Miscoverage level, two-sided: `0.1` gives 90% intervals, 5% per tail. |
 | `variables` | list | `[Vm, Va]` | Any of `Vm`, `Va`, `line_loading`. |
@@ -142,7 +142,7 @@ The config is rejected if both blocks name the same `predictions` file, and `cal
 | `status_dir` | `apply` | Directory for the status report of the new scenarios (`summary.md`, `scenarios.csv`, `status_by_stratum.csv`), written when `screen_bounds` is set. Default: a `status/` folder next to the applied datasets. |
 | `output` | `calibrate`, `screen` | Generic override, like the `--output` flag. |
 
-The calibrated predictions and the screening detail are written as partitioned parquet datasets: directories with one `scenario_partition=k/` folder per 200 scenarios, like gridfm-datakit's outputs ([Reading the results](../user-guide/results.md)). A path that already holds a previous trustlayer output is replaced; anything else that exists there (an input, datakit's raw data, any other file or directory) is left alone and the run stops. The coverage report of `calibrate` goes to `coverage_dir`, by default a `coverage/` folder next to the calibrated datasets. Without any output keys, everything goes to `trustlayer_outputs/<task_name>/<cp_type>/` in the working directory.
+The calibrated predictions and the screening detail are written as partitioned parquet datasets: directories with one `scenario_partition=k/` folder per 200 scenarios, like gridfm-datakit's outputs ([Reading the results](../user-guide/results.md)). A path that already holds a previous trustlayer output is replaced; anything else that exists there (an input, datakit's raw data, any other file or directory) is left alone and the run stops. The coverage report of `calibrate` goes to `coverage_dir`, by default a `coverage/` folder next to the calibrated datasets. Without any output keys, everything goes to `trustlayer_outputs/<task_name>/<cp_type>/` in the working directory (`<task_name>` is `unknown` when not set); the artifact is then `<calibration predictions>_<variables>.trustlayer` there, which every command finds by the same rule. Relative paths in the config, inputs and outputs alike, are relative to the directory the command runs in, not to the config file.
 
 ## `screen_bounds`
 
@@ -153,7 +153,7 @@ The operating limits that `screen` and `apply` compare the intervals with, in th
 | `Vm` | `lower` and `upper` | per unit |
 | `line_loading` | `upper` | fraction of the branch rating `rate_a`; `1.0` is 100% |
 
-For `screen`, every screened variable needs bounds. `Va` has no natural limit, so restrict screening with `commands.screen.variables` when you calibrate it. The `--lower-bound` and `--upper-bound` flags override the bounds when exactly one variable is screened. `apply` screens every variable of the layer that has bounds here and skips the others; without `screen_bounds`, it writes bounds only.
+For `screen`, every screened variable needs bounds. `Va` has no natural limit, so restrict screening with `commands.screen.variables` when you calibrate it. Each entry takes only `lower` and `upper`, with `lower` below `upper`; a `lower` given for `line_loading` is not used, by `screen` and `apply` alike, since a loading is screened against its rating only. The `--lower-bound` and `--upper-bound` flags override the bounds when exactly one variable is screened; a side not given on the command line comes from the config. `apply` screens every variable of the layer that has bounds here and skips the others; without `screen_bounds`, it writes bounds only.
 
 ## `commands`
 

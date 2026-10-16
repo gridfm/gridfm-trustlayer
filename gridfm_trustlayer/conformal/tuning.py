@@ -343,9 +343,10 @@ def tune_n_eff_target(
     Setting = tuple[float, str]
     covered: dict[tuple[Setting, str, int | None], int] = {}
     counted: dict[tuple[Setting, str, int | None], int] = {}
-    width_sum: dict[tuple[Setting, str], float] = {}
-    width_n: dict[tuple[Setting, str], int] = {}
-    infinite: dict[tuple[Setting, str], int] = {}
+    # Widths per (candidate, channel, scope), like coverage.
+    width_sum: dict[tuple[Setting, str, int | None], float] = {}
+    width_n: dict[tuple[Setting, str, int | None], int] = {}
+    infinite: dict[tuple[Setting, str, int | None], int] = {}
     fallbacks: dict[Setting, int] = {}
 
     context = _FoldContext(
@@ -381,14 +382,15 @@ def tune_n_eff_target(
             key = (setting, channel, scope)
             covered[key] = covered.get(key, 0) + value
             counted[key] = counted.get(key, 0) + result.counted[(channel, scope)]
-        for channel in channel_names:
-            wkey = (setting, channel)
-            width_sum[wkey] = width_sum.get(wkey, 0.0) + result.width_sum[channel]
-            width_n[wkey] = width_n.get(wkey, 0) + result.width_n[channel]
-            infinite[wkey] = infinite.get(wkey, 0) + result.infinite[channel]
+        for (channel, scope), width_total in result.width_sum.items():
+            wkey = (setting, channel, scope)
+            width_sum[wkey] = width_sum.get(wkey, 0.0) + width_total
+            width_n[wkey] = width_n.get(wkey, 0) + result.width_n[(channel, scope)]
+            infinite[wkey] = infinite.get(wkey, 0) + result.infinite[(channel, scope)]
 
-    def mean_width(setting: Setting, channel: str) -> float:
-        return width_sum[(setting, channel)] / max(width_n[(setting, channel)], 1)
+    def mean_width(setting: Setting, channel: str, scope: int | None = None) -> float:
+        key = (setting, channel, scope)
+        return width_sum.get(key, 0.0) / max(width_n.get(key, 0), 1)
 
     scenarios_in: dict[int | None, int] = {None: n}
     scenarios_in.update({int(v): int((strata == v).sum()) for v in stratum_values})
@@ -423,10 +425,13 @@ def tune_n_eff_target(
                         "coverage": coverage,
                         "threshold": threshold,
                         "meets_target": coverage >= threshold,
-                        "mean_width": mean_width(setting, channel),
-                        "infinite_width_share": infinite[(setting, channel)]
+                        "mean_width": mean_width(setting, channel, scope),
+                        "infinite_width_share": infinite.get(
+                            (setting, channel, scope), 0
+                        )
                         / max(
-                            width_n[(setting, channel)] + infinite[(setting, channel)],
+                            width_n.get((setting, channel, scope), 0)
+                            + infinite.get((setting, channel, scope), 0),
                             1,
                         ),
                     }
@@ -528,9 +533,9 @@ class _FoldResult:
 
     covered: dict[tuple[str, int | None], int]
     counted: dict[tuple[str, int | None], int]
-    width_sum: dict[str, float]
-    width_n: dict[str, int]
-    infinite: dict[str, int]
+    width_sum: dict[tuple[str, int | None], float]
+    width_n: dict[tuple[str, int | None], int]
+    infinite: dict[tuple[str, int | None], int]
     fallbacks: int
 
 
@@ -588,15 +593,16 @@ def _evaluate_fold(
         truth = held_truth.channels[channel]
         valid = _valid(held_predictions, held_truth, channel)
         hit = (lower <= truth) & (truth <= upper) & valid
+        width = upper - lower
         for scope in (None, *context.stratum_values.tolist()):
             rows = slice(None) if scope is None else context.strata[held] == scope
             result.covered[(channel, scope)] = int(hit[rows].sum())
             result.counted[(channel, scope)] = int(valid[rows].sum())
-        width = (upper - lower)[valid]
-        finite = np.isfinite(width)
-        result.width_sum[channel] = float(width[finite].sum())
-        result.width_n[channel] = int(finite.sum())
-        result.infinite[channel] = int((~finite).sum())
+            scope_width = width[rows][valid[rows]]
+            finite = np.isfinite(scope_width)
+            result.width_sum[(channel, scope)] = float(scope_width[finite].sum())
+            result.width_n[(channel, scope)] = int(finite.sum())
+            result.infinite[(channel, scope)] = int((~finite).sum())
     return result
 
 

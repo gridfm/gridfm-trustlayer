@@ -72,11 +72,16 @@ inputs:
     predictions: predictions/test/case118_ieee_predictions.parquet
     pf_node: data_test/case118_ieee/raw/bus_data.parquet
     pf_edge: data_test/case118_ieee/raw/branch_data.parquet
+  apply:                  # new scenarios: no AC solution needed
+    predictions: predictions/new/case118_ieee_predictions.parquet
+    pf_node: data_new/case118_ieee/raw/bus_data.parquet
+    pf_edge: data_new/case118_ieee/raw/branch_data.parquet
 
 outputs:
   artifact: trustlayer_outputs/case118.trustlayer
   calibrated_predictions: trustlayer_outputs/calibrated
   screen_dir: trustlayer_outputs/screen
+  applied_predictions: trustlayer_outputs/applied
 
 commands:
   screen:
@@ -96,7 +101,7 @@ gridfm_trustlayer apply     --config trust_config.yaml   # operate: new scenario
 
 `calibrate` and `screen` measure how well the layer works on scenarios with a known solution. `apply` is the operational step: for new scenarios (`inputs.apply` in the config) it gives the bounds and, with `screen_bounds`, the status of every value (within limits, uncertain, violation) and of every operating scenario (secure, uncertain, insecure), next to what the point prediction alone would say.
 
-To write the config, use the Jupyter **config builder**, which shows only the options that apply to your choices and validates the result ([`examples/notebooks/config_builder.ipynb`](examples/notebooks/config_builder.ipynb)), or start from one of the ten [example configs](examples/config/). The [Quick start guide](https://gridfm.github.io/gridfm-trustlayer/getting-started/quickstart/) walks through every step, including data generation and how to read the results.
+To write the config, use the Jupyter **config builder**, which shows only the options that apply to your choices and validates the result ([`examples/notebooks/config_builder.ipynb`](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/config_builder.ipynb)), or start from one of the ten [example configs](https://github.com/gridfm/gridfm-trustlayer/tree/main/examples/config). The [Quick start guide](https://gridfm.github.io/gridfm-trustlayer/getting-started/quickstart/) walks through every step, including data generation and how to read the results.
 
 ## Python API
 

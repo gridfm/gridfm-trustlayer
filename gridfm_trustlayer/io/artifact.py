@@ -123,9 +123,20 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, IntervalCalibrator]
     if raw[: len(_NPZ_MAGIC)] == _NPZ_MAGIC:
         return _load_kernel_artifacts(raw)
 
-    data = json.loads(raw.decode("utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("Interval artifact must decode to a JSON object.")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"{artifact_path} is not a trustlayer artifact (a .trustlayer file "
+            "written by compute)."
+        ) from exc
+    if not isinstance(data, dict) or not str(data.get("version", "")).startswith(
+        "trustlayer_"
+    ):
+        raise ValueError(
+            f"{artifact_path} is not a trustlayer artifact (a .trustlayer file "
+            "written by compute)."
+        )
     if data.get("version") == BUNDLE_VERSION:
         artifacts = data.get("artifacts")
         if not isinstance(artifacts, dict) or not artifacts:
@@ -138,6 +149,25 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, IntervalCalibrator]
         }
     calibrator = NaiveIntervalCalibrator.from_dict(data)
     return {_artifact_key(calibrator): calibrator}
+
+
+def is_interval_artifact(path: str | Path) -> bool:
+    """Whether `path` is a `.trustlayer` file (either encoding)."""
+
+    path = Path(path)
+    if not path.is_file():
+        return False
+    try:
+        raw = path.read_bytes()
+        if raw[: len(_NPZ_MAGIC)] == _NPZ_MAGIC:
+            with np.load(io.BytesIO(raw), allow_pickle=False) as payload:
+                return _META_KEY in payload
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(data, dict) and str(data.get("version", "")).startswith(
+        "trustlayer_"
+    )
 
 
 def load_ground_truth_reference(artifact_path: str) -> dict[str, Any] | None:

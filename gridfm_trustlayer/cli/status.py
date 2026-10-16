@@ -395,6 +395,11 @@ def terminal_line(counts: pd.DataFrame, *, command: str, truth: bool) -> str:
             elif truth and status == "insecure":
                 text += f" ({n - truly:,} truly secure)"
             cells.append(text)
+        if method != "interval":
+            # Only a missing prediction makes the point prediction uncertain.
+            n, _ = _count(overall, method, "uncertain")
+            if n:
+                cells.insert(1, f"{n:,} uncertain (missing predictions)")
         lead = "scenarios" if method == "interval" else "point prediction"
         parts.append(f"{lead}: {', '.join(cells)}")
     return f"{command}: {'; '.join(parts)}"
@@ -452,7 +457,12 @@ def _table_section(
     if rows.empty:
         return []
     statuses = SCENARIO_STATUSES if level == "scenario" else ELEMENT_STATUSES
-    point = _POINT_STATUSES[level]
+    point: tuple[str, ...] = _POINT_STATUSES[level]
+    # Only a missing prediction makes the point prediction uncertain.
+    if (
+        (rows["method"] == "point") & (rows["status"] == "uncertain") & (rows["n"] > 0)
+    ).any():
+        point = (point[0], "uncertain", point[1])
     bad = "insecure" if level == "scenario" else "violated"
     good = "secure" if level == "scenario" else "not violated"
     records: list[dict[str, str]] = []
@@ -484,14 +494,18 @@ def _table_section(
 def crosstab(table: pd.DataFrame) -> pd.DataFrame:
     """Scenarios by interval status (rows) and point-prediction status (columns)."""
 
+    # Only a missing prediction makes the point prediction uncertain.
+    point = {0: "secure", 2: "insecure"}
+    if (table["point"] == 1).any():
+        point = {0: "secure", 1: "uncertain", 2: "insecure"}
     records = []
     for code, status in enumerate(SCENARIO_STATUSES):
         rows = table[table["interval"] == code]
         records.append(
-            {
-                "interval \\ point": status,
-                "secure": f"{int((rows['point'] == 0).sum()):,}",
-                "insecure": f"{int((rows['point'] == 2).sum()):,}",
+            {"interval \\ point": status}
+            | {
+                name: f"{int((rows['point'] == value).sum()):,}"
+                for value, name in point.items()
             }
         )
     return pd.DataFrame.from_records(records)

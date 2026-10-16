@@ -203,7 +203,7 @@ class KernelIntervalCalibrator:
         channel_names: Iterable[str] = ("Vm", "Va"),
         strat: str | None = None,
         embeddings: np.ndarray,
-        embedding_pooling: str,
+        embedding_pooling: str = "mean",
         k_nn: int = DEFAULT_K_NN,
         n_eff_min: float = DEFAULT_N_EFF_MIN,
         bandwidth: str = DEFAULT_BANDWIDTH,
@@ -225,8 +225,9 @@ class KernelIntervalCalibrator:
                 within each stratum. `"pred_bins"` is not supported.
             embeddings: `(n_scenarios, d)` scenario embeddings of the
                 calibration scenarios, in the order of `predictions`.
-            embedding_pooling: Name of the pooling that produced `embeddings`,
-                stored so that test embeddings can be pooled the same way.
+            embedding_pooling: Name of the pooling that produced `embeddings`
+                (default `"mean"`), stored so that the CLI pools test
+                embeddings the same way; the calibrator itself does not use it.
             k_nn: Neighbour rank that sets the bandwidth, for `bandwidth="knn"`.
             n_eff_min: Effective sample size below which a scenario falls back
                 to the stratum-wide quantile.
@@ -263,7 +264,9 @@ class KernelIntervalCalibrator:
                 "element-wise while kernel localization is scenario-wise. Use 'n_outages', "
                 "'outage_type', 'system_load_bin', or omit strat.",
             )
-        embeddings = np.ascontiguousarray(embeddings, dtype=FLOAT32_DTYPE)
+        embeddings = _finite_embeddings(
+            np.ascontiguousarray(embeddings, dtype=FLOAT32_DTYPE), "calibration"
+        )
         if embeddings.shape[0] != len(predictions.scenario_ids):
             raise ValueError(
                 f"Embedding rows ({embeddings.shape[0]}) do not match calibration "
@@ -1194,7 +1197,23 @@ def _require_scenario_embeddings(
             "cp_type 'kernel' requires scenario embeddings on the prediction set. "
             "Provide inputs.embeddings in the trustlayer config.",
         )
-    return np.asarray(embeddings, dtype=FLOAT32_DTYPE)
+    return _finite_embeddings(np.asarray(embeddings, dtype=FLOAT32_DTYPE), "test")
+
+
+def _finite_embeddings(embeddings: np.ndarray, which: str) -> np.ndarray:
+    """`embeddings`, refused if any value is NaN or infinite.
+
+    One such value makes every distance to it NaN; in the calibration bank, it
+    would make every test scenario fall back without a word.
+    """
+
+    broken = ~np.isfinite(embeddings).all(axis=1)
+    if broken.any():
+        raise ValueError(
+            f"The {which} embeddings have NaN or infinite values in "
+            f"{int(broken.sum()):,} scenario(s) (rows {np.flatnonzero(broken)[:5].tolist()})."
+        )
+    return embeddings
 
 
 def _optional_float_array(value: object | None) -> np.ndarray | None:

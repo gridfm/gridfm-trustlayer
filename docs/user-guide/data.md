@@ -61,7 +61,7 @@ The coverage guarantee of `cp_type: element` assumes that calibration and test s
 
 Bounds are fitted for every bus or line separately, and within each stratum when `strat` is set. Each of those cells needs enough calibration scenarios:
 
-- **Minimum.** A finite bound needs at least $\lceil 2/\alpha \rceil - 1$ valid residuals, i.e. 19 at $\alpha = 0.1$ and 199 at $\alpha = 0.01$. With fewer, the bound is $\pm\infty$ rather than misleadingly narrow, and the `screen` step will flag every such case.
+- **Minimum.** A finite bound needs at least $\lceil 2/\alpha \rceil - 1$ valid residuals, i.e. 19 at $\alpha = 0.1$ and 199 at $\alpha = 0.01$. With fewer, the bound comes from all calibration scenarios of that bus or line, pooled across strata (`sparse_strata: pooled`, the default), which carries no guarantee within the stratum: `compute`, `calibrate` and `apply` report how many values use it, and `<variable>_pooled` marks them. With `sparse_strata: infinite`, the bound is $\pm\infty$ instead, and `screen` flags every such case.
 - **Stable.** Bounds from a few hundred residuals per cell vary noticeably between calibration sets; a few thousand give stable bounds. With `strat: n_outages`, remember that rare contingency levels (N-3 and above, typically) get few scenarios.
 - **Kernel.** `cp_type: kernel` localizes within each stratum, so it needs more scenarios than `element`. A stratum with fewer calibration scenarios than `n_eff_target` (600 by default) gets uniform weights, which is exactly `element`; localization only has room to work when a stratum holds several times the target.
 

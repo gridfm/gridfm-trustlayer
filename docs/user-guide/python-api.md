@@ -193,6 +193,13 @@ def load(predictions_path, bus_path, branch_path):
             entity_ids=predictions.bus_ids,
             entity_name="bus",
             channels={"Vm": source.Vm, "Va": source.Va},
+            # Vm at PV buses and Va at the reference bus are set-points: known
+            # exactly, they would shrink the bounds if fitted. Left out, as the
+            # CLI does, they keep their value as both bounds.
+            valid_masks={
+                "Vm": ~predictions.bus_type_masks["PV"],
+                "Va": ~predictions.bus_type_masks["REF"],
+            },
             scenario_columns={"n_outages": truth.n_outages},
         )
 
@@ -217,7 +224,7 @@ test_predicted, test_true = load(
 lower, upper = calibrator.predict_intervals(test_predicted)["Vm"]
 ```
 
-`load_predictions` applies task-specific corrections: for `PowerFlow`, the predictions of the known set-points are replaced by their values (`Vm` at PV buses, `Va` at the reference bus), as graphkit's evaluation does, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, using datakit's branch-flow routine (requires the `graphkit` extra). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
+`load_predictions` applies task-specific corrections: for `PowerFlow`, the predictions of the known set-points are replaced by their values (`Vm` at PV buses, `Va` at the reference bus), as graphkit's evaluation does, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). Their residuals are then zero; the `valid_masks` above leave them out of the fit, which is what the CLI does. Without them, a bus's bounds shrink in the scenarios where it is not PV (e.g. its generator is out). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, using datakit's branch-flow routine (requires the `datakit` extra). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
 
 ## Saving and loading
 

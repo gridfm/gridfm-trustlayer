@@ -68,7 +68,7 @@ Two partitioned datasets, one per target family, in `outputs.calibrated_predicti
 | `<predictions>_vm_va_with_intervals.parquet/` (name follows the calibrated variables) | scenario and bus | `Vm_pi_lower`, `Vm_pi_upper`, `Va_pi_lower`, `Va_pi_upper`, `Vm_known`, `Va_known`, next to every column of the predictions file; `Vm_target` / `Va_target` from the ground truth if the predictions file has none |
 | `<predictions>_line_loading_with_intervals.parquet/` | scenario and branch | `line_loading_pred`, `line_loading_target`, `line_loading_pi_lower`, `line_loading_pi_upper`, plus `from_bus`, `to_bus`, `rate_a` |
 
-Both also carry the stratum of each row when `strat` is set (`n_outages`, `outage_type`, `system_load_bin`, or `pred_bins_<variable>`, each with a readable `_label` column), and the [kernel diagnostics](kernel.md#checking-that-it-works) `kcp_n_eff`, `kcp_bandwidth_sq` and `kcp_fallback` for `cp_type: kernel`.
+Both also carry the stratum of each row when `strat` is set (`n_outages`, `outage_type`, `system_load_bin`, or `pred_bins_<variable>`; all but `n_outages` also have a readable `_label` column), and the [kernel diagnostics](kernel.md#checking-that-it-works) `kcp_n_eff`, `kcp_bandwidth_sq` and `kcp_fallback` for `cp_type: kernel`.
 
 Conventions:
 

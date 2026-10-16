@@ -58,6 +58,8 @@ inputs:
 
 outputs:
   artifact: trustlayer_outputs/kernel/cosine_pf.trustlayer
+  # Each example has its own report folder, so that runs do not mix their reports.
+  coverage_dir: trustlayer_outputs/kernel/cosine_pf_coverage
   calibrated_predictions_volt: trustlayer_outputs/kernel/cosine_pf_vm_va_with_intervals.parquet
   calibrated_predictions_line: trustlayer_outputs/kernel/cosine_pf_line_loading_with_intervals.parquet
   screen_dir: trustlayer_outputs/kernel/cosine_pf_screen

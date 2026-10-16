@@ -16,11 +16,12 @@ import pandas as pd  # type: ignore[import-untyped]
 from gridfm_trustlayer.cli import common
 from gridfm_trustlayer.cli.common import (
     _FINGERPRINT_SCENARIOS,
+    _SET_POINTS,
+    _artifact_path,
     _block_jobs,
     _build_scenario_columns,
     _build_target_channel_sets,
     _compute_system_load_bin_edges,
-    _default_output_dir,
     _EmbeddingSource,
     _n_jobs,
     _partition_variables,
@@ -68,6 +69,7 @@ from gridfm_trustlayer.io import (
     load_predictions,
 )
 from gridfm_trustlayer.io.artifact import (
+    is_interval_artifact,
     save_interval_artifacts,
 )
 from gridfm_trustlayer.io.embeddings import (
@@ -162,6 +164,20 @@ def _run_compute(args: argparse.Namespace) -> None:
         if cp_type == "kernel"
         else None
     )
+    # Checked before the data is read, so that a wrong path fails at once.
+    artifact_path = _artifact_path(
+        args, config, explicit=args.output, for_reading=False
+    )
+    _check_artifact_target(
+        artifact_path,
+        inputs=(
+            predictions_path,
+            pf_node_path,
+            pf_edge_path,
+            generator_path,
+            None if embeddings is None else embeddings[0],
+        ),
+    )
     data = _load_calibration_data(
         predictions_path,
         pf_node_path,
@@ -180,18 +196,19 @@ def _run_compute(args: argparse.Namespace) -> None:
         generator_parquet_path=generator_path,
         scenario_ids=scenario_ids[:_FINGERPRINT_SCENARIOS],
     )
+    if sample.task_name not in _SET_POINTS:
+        # A misspelled PowerFlow would otherwise fit the set-points silently.
+        print(
+            f"compute: task_name {sample.task_name!r} is not PowerFlow or "
+            "OptimalPowerFlow: the predictions are read as they are, with no "
+            "known set-points set aside. Check the spelling if you meant one of them.",
+            flush=True,
+        )
     tuning_groups = (
         None
         if tuning_options is None
         else _load_tuning_groups(pf_node_path, tuning_options.group_by)
     )
-    artifact_path = coalesce_option(args.output, config, "artifact")
-    if artifact_path is None:
-        artifact_path = str(
-            _default_output_dir(sample.task_name, cp_type).joinpath(
-                _default_artifact_name(predictions_path, cp_type, variables),
-            ),
-        )
     # Every scenario of the calibration dataset is used for fitting; the layer is
     # evaluated by `calibrate` on a separate test dataset.
     fingerprint = _prediction_fingerprint(scenario_ids, sample)
@@ -581,11 +598,24 @@ def _flatten_prediction_bin_values(
     return flattened.astype(np.float32, copy=False)
 
 
-def _default_artifact_name(
-    predictions_path: str,
-    cp_type: str,
-    variables: tuple[str, ...],
-) -> str:
-    base_name = Path(predictions_path).stem
-    variable_suffix = "_".join(variable.lower() for variable in variables)
-    return f"{base_name}_{variable_suffix}.trustlayer"
+def _check_artifact_target(path: str, *, inputs: tuple[object, ...]) -> None:
+    """Refuse to write the artifact over an input, a directory or another file."""
+
+    target = Path(path)
+    if any(
+        source is not None and Path(str(source)).resolve() == target.resolve()
+        for source in inputs
+    ):
+        raise ValueError(
+            f"The artifact path {path} is also an input of compute; choose another path."
+        )
+    if target.is_dir():
+        raise ValueError(
+            f"The artifact path {path} is a directory; give a file name, e.g. "
+            f"{target / 'layer.trustlayer'}."
+        )
+    if target.exists() and not is_interval_artifact(target):
+        raise ValueError(
+            f"{path} exists and is not a trustlayer artifact: it would be replaced. "
+            "Choose another path or remove it."
+        )

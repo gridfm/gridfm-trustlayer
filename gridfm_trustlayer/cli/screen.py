@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import partial
@@ -19,6 +20,7 @@ from gridfm_trustlayer.cli.common import (
     _SCENARIOS_FILE_TEXT,
     _STATUS_FILE_TEXT,
     SCREEN_BOUND_TOLERANCE,
+    _artifact_path,
     _block_jobs,
     _default_output_dir,
     _ground_truth_paths,
@@ -34,6 +36,7 @@ from gridfm_trustlayer.cli.common import (
     _voltage_target_frame,
     _write_block,
     _write_status_tables,
+    screen_limits,
 )
 from gridfm_trustlayer.cli.config import (
     coalesce_option,
@@ -119,6 +122,9 @@ def _run_screen(args: argparse.Namespace) -> None:
         cp_type=cp_type,
     )
     screen_dir.mkdir(parents=True, exist_ok=True)
+    reports.clear_report(screen_dir)
+    for previous in screen_dir.glob("screening_detail_*.parquet"):
+        clear_partitioned_output(previous)
     n_jobs = _block_jobs(args, config)
 
     strata: list[pd.DataFrame] = []
@@ -148,6 +154,14 @@ def _run_screen(args: argparse.Namespace) -> None:
             else ["variable", "branch", "from_bus", "to_bus", "rate_a"]
         )
         columns = set(column_names(input_path))
+        missing = [v for v in channel_names if f"{v}_pred" not in columns]
+        if missing:
+            raise ValueError(
+                f"{', '.join(missing)} not found in the calibrated predictions "
+                f"{input_path}: calibrate {'them' if len(missing) > 1 else 'it'} "
+                "first (add to `variables`, then run compute and calibrate), or "
+                "leave it out of the screened variables."
+            )
         needed = {
             f"{variable}_{suffix}"
             for variable in channel_names
@@ -492,29 +506,27 @@ def _apply_screen_bound_overrides(
 ) -> None:
     """`--lower-bound` / `--upper-bound` of `screen`, for a single variable."""
 
-    if args.lower_bound is not None or args.upper_bound is not None:
-        if len(variables) != 1:
-            raise ValueError(
-                "--lower-bound and --upper-bound can override bounds only when screening a single variable."
-            )
-        if variables[0] == "line_loading":
-            if args.upper_bound is None:
-                raise ValueError(
-                    "Provide --upper-bound when overriding line_loading screening bounds from the CLI."
-                )
-            lower_value = (
-                float("nan") if args.lower_bound is None else float(args.lower_bound)
-            )
-        else:
-            if args.lower_bound is None or args.upper_bound is None:
-                raise ValueError(
-                    "Provide both --lower-bound and --upper-bound when overriding screening bounds from the CLI."
-                )
-            lower_value = float(args.lower_bound)
-        bounds_by_variable[variables[0]] = {
-            "lower": lower_value,
-            "upper": float(args.upper_bound),
-        }
+    if args.lower_bound is None and args.upper_bound is None:
+        return
+    if len(variables) != 1:
+        raise ValueError(
+            "--lower-bound and --upper-bound can override bounds only when screening a single variable."
+        )
+    variable = variables[0]
+    # A side not given on the command line comes from the config.
+    current = bounds_by_variable.get(variable, {})
+    lower = (
+        float(args.lower_bound)
+        if args.lower_bound is not None
+        else current.get("lower", float("nan"))
+    )
+    upper = args.upper_bound if args.upper_bound is not None else current.get("upper")
+    if upper is None or (variable != "line_loading" and math.isnan(lower)):
+        raise ValueError(
+            f"Missing a screening bound for {variable}: set both under screen_bounds, "
+            "or give the missing one with --lower-bound / --upper-bound."
+        )
+    bounds_by_variable[variable] = screen_limits(variable, lower, float(upper))
 
 
 def _resolve_screen_input_path(
@@ -630,12 +642,13 @@ def _screen_reference(
 ) -> GroundTruthReference:
     """The calibration reference of the configured artifact, else a scan of the data."""
 
-    artifact = coalesce_option(None, config, "artifact")
-    stored = (
-        load_ground_truth_reference(str(artifact))
-        if artifact is not None and Path(str(artifact)).is_file()
-        else None
-    )
+    try:
+        artifact: str | None = _artifact_path(
+            argparse.Namespace(), config, explicit=None, for_reading=True
+        )
+    except (ValueError, FileNotFoundError):
+        artifact = None
+    stored = None if artifact is None else load_ground_truth_reference(artifact)
     if stored is not None:
         return GroundTruthReference.from_dict(stored)
     return scan_ground_truth_reference(*ground_truth_paths)
@@ -726,10 +739,13 @@ def _build_voltage_screen_detail_frame(
     records: list[pd.DataFrame] = []
     for variable in variables:
         _require_screen_columns(frame, variable, ["scenario", "bus"])
-        rows = frame.loc[:, ["scenario", "bus", *extra]].copy()
+        # A value without a true solution cannot be checked: left out, as for
+        # line loading (and from the coverage of `calibrate`).
+        solved = frame[np.isfinite(frame[f"{variable}_target"].to_numpy(dtype=float))]
+        rows = solved.loc[:, ["scenario", "bus", *extra]].copy()
         rows["bus_type"] = rows["bus"].map(bus_types).fillna("Unknown").astype(object)
         records.append(
-            _screen_detail_rows(rows, frame, variable, bounds_by_variable[variable])
+            _screen_detail_rows(rows, solved, variable, bounds_by_variable[variable])
         )
     return (
         pd.concat(records, ignore_index=True)

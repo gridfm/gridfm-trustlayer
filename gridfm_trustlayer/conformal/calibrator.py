@@ -56,6 +56,37 @@ class ChannelSet:
     # None for every cp_type other than 'kernel'.
     scenario_embeddings: np.ndarray | None = None
 
+    def __post_init__(self) -> None:
+        # Optional mappings may be passed as None.
+        self.valid_masks = dict(self.valid_masks or {})
+        self.entity_columns = dict(self.entity_columns or {})
+        self.scenario_columns = dict(self.scenario_columns or {})
+        shape = (len(self.scenario_ids), len(self.entity_ids))
+        for kind, arrays in (
+            ("channel", self.channels),
+            ("valid mask", self.valid_masks),
+        ):
+            for name, values in arrays.items():
+                if np.shape(values) != shape:
+                    raise ValueError(
+                        f"The {kind} {name!r} has shape {np.shape(values)}; expected "
+                        f"(n_scenarios, n_entities) = {shape}."
+                    )
+        for name, values in self.scenario_columns.items():
+            if len(values) != shape[0]:
+                raise ValueError(
+                    f"The scenario column {name!r} has {len(values)} values for "
+                    f"{shape[0]} scenarios."
+                )
+        if (
+            self.scenario_embeddings is not None
+            and len(self.scenario_embeddings) != shape[0]
+        ):
+            raise ValueError(
+                f"scenario_embeddings has {len(self.scenario_embeddings)} rows for "
+                f"{shape[0]} scenarios."
+            )
+
     @property
     def bus_ids(self) -> np.ndarray:
         """Compatibility alias for older bus-only call sites."""
@@ -702,6 +733,20 @@ def _get_entity_name(values: PredictionSet | GroundTruthSet | ChannelSet) -> str
     return "bus"
 
 
+def _stratum_codes(values: np.ndarray, column_name: str) -> np.ndarray:
+    """Stratum codes as integers, the same at fit and at prediction."""
+
+    array = np.asarray(values)
+    if array.dtype.kind == "f" and not (
+        np.isfinite(array).all() and (array == np.round(array)).all()
+    ):
+        raise ValueError(
+            f"The stratum column {column_name!r} must hold whole numbers (codes "
+            "of the strata)."
+        )
+    return array.astype(np.int64)
+
+
 def _get_scenario_column(
     values: PredictionSet | GroundTruthSet | ChannelSet,
     column_name: str,
@@ -709,7 +754,7 @@ def _get_scenario_column(
     if isinstance(values, ChannelSet):
         if column_name not in values.scenario_columns:
             raise ValueError(f"Scenario column not available: {column_name}")
-        return values.scenario_columns[column_name]
+        return _stratum_codes(values.scenario_columns[column_name], column_name)
     if isinstance(values, GroundTruthSet):
         if column_name == "n_outages":
             return values.n_outages

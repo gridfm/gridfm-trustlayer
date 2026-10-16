@@ -22,12 +22,15 @@ from gridfm_trustlayer.cli.common import (
     SCREEN_BOUND_TOLERANCE,
     _add_known_columns,
     _analysis_scenario_metadata_columns_from_frame,
+    _artifact_path,
     _block_jobs,
+    _bounds_notes,
     _build_bus_channel_set,
     _build_entity_output_frame,
     _build_interval_frame,
     _build_pred_bin_frame,
     _build_scenario_columns,
+    _check_artifact_matches,
     _common_parent,
     _default_output_dir,
     _embedding_spec,
@@ -37,8 +40,10 @@ from gridfm_trustlayer.cli.common import (
     _merge_kernel_diagnostics,
     _merge_pooled_columns,
     _ordered_analysis_strat_columns,
+    _output_task_name,
     _parse_screen_bounds,
     _report_progress,
+    _require_set_points,
     _scenario_strata,
     _share_threads,
     _stratification_applies_to_variable,
@@ -68,6 +73,7 @@ from gridfm_trustlayer.io.ground_truth import (
 from gridfm_trustlayer.io.parquet import (
     clear_partitioned_output,
     column_names,
+    is_trustlayer_output,
     read_frame,
     read_scenario_ids,
     rows_per_scenario,
@@ -95,8 +101,11 @@ def _run_apply(args: argparse.Namespace) -> None:
     predictions_path = str(
         coalesce_option(args.predictions, config, "predictions", required=True)
     )
-    artifact_path = coalesce_option(args.artifact, config, "artifact", required=True)
+    artifact_path = _artifact_path(
+        args, config, explicit=args.artifact, for_reading=True
+    )
     calibrators = load_interval_artifacts(artifact_path)
+    _check_artifact_matches(calibrators, args, config, artifact_path, command="apply")
     task_name = coalesce_option(args.task_name, config, "task_name")
     generator_path = coalesce_option(
         args.generator_predictions, config, "generator_predictions"
@@ -161,6 +170,10 @@ def _run_apply(args: argparse.Namespace) -> None:
         None if embeddings is None else embeddings[0],
     )
     for path in output_paths.values():
+        # Both families go into a folder; at that path, a previous run with one
+        # family left a dataset, replaced here.
+        if len(output_paths) > 1 and is_trustlayer_output(Path(path).parent):
+            clear_partitioned_output(Path(path).parent, inputs=inputs)
         clear_partitioned_output(path, inputs=inputs)
     # With screen_bounds, every value and scenario also gets its status.
     variables = sorted(
@@ -206,12 +219,17 @@ def _run_apply(args: argparse.Namespace) -> None:
     data_dir = _common_parent(output_paths.values())
     print(
         f"apply: bounds for {', '.join(variables)} in {len(scenario_ids):,} scenarios; "
-        f"outputs in {data_dir}",
+        f"outputs in "
+        f"{next(iter(output_paths.values())) if len(output_paths) == 1 else data_dir}",
         flush=True,
     )
+    notes = _bounds_notes(output_paths.values())
+    for note in notes:
+        print(f"apply: {note}", flush=True)
     if scenario_parts:
         status_dir = Path(str(config.get("status_dir") or Path(data_dir) / "status"))
         status_dir.mkdir(parents=True, exist_ok=True)
+        reports.clear_report(status_dir)
         table, counts = _write_status_tables(
             scenario_parts, status_counts, status_dir, truth=False
         )
@@ -236,6 +254,7 @@ def _run_apply(args: argparse.Namespace) -> None:
                 f"- New scenarios: `{predictions_path}` ({len(scenario_ids):,} scenarios).",
                 f"- Artifact: `{artifact_path}`.",
                 "- Known values (set-points) and out-of-service lines are not screened.",
+                *(f"- {note[0].upper()}{note[1:]}." for note in notes),
             ],
         )
         print(status.terminal_line(counts, command="apply", truth=False), flush=True)
@@ -359,7 +378,9 @@ def _add_status_columns(
         pred = frame[f"{variable}_pred"].to_numpy(dtype=float)
         screened = ~_known_mask(frame, variable)
         if variable == "line_loading":
-            screened &= pred >= 0.0
+            # -1 marks an out-of-service or unrated line; a missing (NaN)
+            # prediction is screened, and uncertain, as in `screen`.
+            screened &= ~(pred < 0.0)
         lower_limit = float(bounds["lower"]) - SCREEN_BOUND_TOLERANCE
         interval, point = status.classify(
             pred[screened],
@@ -402,18 +423,6 @@ def _require_set_point_columns(predictions_path: str, task: str) -> None:
         )
 
 
-def _require_set_points(predictions: PredictionSet) -> None:
-    for variable, bus_type in _SET_POINTS.get(predictions.task_name, ()):
-        mask = predictions.bus_type_masks.get(bus_type)
-        values = predictions.Vm if variable == "Vm" else predictions.Va
-        if mask is not None and not np.isfinite(values[mask]).all():
-            raise ValueError(
-                f"{variable}_target is missing at some {bus_type} buses: these "
-                f"set-points are inputs of each {predictions.task_name} scenario and "
-                "are needed to apply the layer.",
-            )
-
-
 def _resolve_apply_output_path(
     args: argparse.Namespace,
     config: dict[str, object],
@@ -435,7 +444,15 @@ def _resolve_apply_output_path(
     default_name = f"{stem}_{variables}_bounds.parquet"
     if args.output is not None:
         output = Path(str(args.output))
-        return str(output / default_name if multiple_targets else output)
+        if not multiple_targets:
+            return str(output)
+        if output.suffix.lower() == ".parquet" or output.is_file():
+            raise ValueError(
+                "Bounds for voltages and line loading are written separately, so "
+                "--output must be a directory. Use outputs.applied_predictions_volt "
+                "and outputs.applied_predictions_line for explicit file paths.",
+            )
+        return str(output / default_name)
     explicit = config.get(f"applied_predictions_{target_kind}")
     if explicit is not None:
         return str(explicit)
@@ -450,7 +467,7 @@ def _resolve_apply_output_path(
                 "outputs.applied_predictions_volt and outputs.applied_predictions_line.",
             )
         return str(Path(str(shared)) / default_name)
-    task_name = str(coalesce_option(args.task_name, config, "task_name") or "unknown")
+    task_name = _output_task_name(args, config)
     cp_type = (
         "kernel" if isinstance(calibrator, KernelIntervalCalibrator) else "element"
     )

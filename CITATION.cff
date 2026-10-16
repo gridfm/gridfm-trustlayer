@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it, and the paper below, as follows."
 title: "gridfm-trustlayer: Conformal trustworthiness layer for GridFM foundation models"
 type: software
-version: 0.1.0
-date-released: 2026-10-15
+version: 0.1.1
+date-released: 2026-10-16
 license: Apache-2.0
 repository-code: "https://github.com/gridfm/gridfm-trustlayer"
 authors:

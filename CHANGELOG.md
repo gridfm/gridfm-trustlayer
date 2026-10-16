@@ -5,6 +5,40 @@ All notable changes to this project are documented here. The format follows
 [semantic versioning](https://semver.org/). Before 1.0, minor versions may
 include breaking changes; they are listed under **Changed**.
 
+## [0.1.1] - 2026-10-16
+
+Fixes from testing the first release as a user would: following the documentation, and on edge cases of real data.
+
+### Fixed
+- **`apply` could hang after writing its outputs**, with pyarrow 26, when its output was captured (from a script, a notebook or CI): parquet datasets still cached at exit deadlocked Arrow's thread pool. The cache is now released before the process exits.
+- **Commands did not find each other's default outputs.** Without `outputs.artifact`, `calibrate` and `apply` stopped with "Missing required option 'artifact'", and with no `task_name`, `screen` looked in `trustlayer_outputs/unknown/` while `compute` and `calibrate` wrote to `trustlayer_outputs/powerflow/`. Every command now uses one rule: `trustlayer_outputs/<task_name>/<cp_type>/` (`unknown` when `task_name` is not set), and the artifact `<calibration predictions>_<variables>.trustlayer` there.
+- **`screen` crashed with `KeyError: 'branch'`** (or `'bus'`) when asked for a variable that was not calibrated, e.g. after dropping `line_loading` from `variables` but not from `commands.screen.variables`. It now says which variable is missing.
+- **A `line_loading` lower limit** in `screen_bounds` was used by `apply` but ignored by `screen`, so the two gave different statuses for the same scenarios. Both ignore it now, as documented: a loading is screened against its rating only.
+- **Missing (NaN) predictions:** `apply` left line values with a missing prediction unscreened while `screen` marked them uncertain; both mark them uncertain now. The terminal line, the summary tables and the crosstab show uncertain point-prediction statuses when there are any, instead of leaving those scenarios out of the counts.
+- **Coverage of voltages counted values with no true value as misses**, while line loading left them out. Both leave them out now, and so does `screen`, which counted them as values within their limits; a value whose prediction is missing still counts as not covered.
+- **`calibrate`'s line-loading bounds depended on the true values:** a missing true voltage made them zero-width. Bounds now depend on the predictions only, and equal `apply`'s.
+- **One NaN in the embeddings switched the kernel off silently** (every scenario fell back to the stratum quantile). Such embeddings are refused, naming the scenarios, by the CLI and by `KernelIntervalCalibrator`.
+- **`compute` overwrote any file at the artifact path**, an input included. It now refuses a path that is an input, a directory, or a file that is not a trustlayer artifact.
+- **Switching a run between one and two target families** with the same `outputs.calibrated_predictions` (or `applied_predictions`) failed: the two datasets were written inside the previous one, or the previous folder was refused. The previous output is now replaced.
+- **A rerun with fewer variables left the previous reports behind**, e.g. the line-loading tables and figures next to a new voltage-only summary. Report folders are cleared of trustlayer's own files before each report. The example configs now each write their coverage report to their own folder.
+- `calibrate` accepted missing set-points (NaN `Vm_target` at PV buses) and gave NaN bounds; it now refuses them, as `apply` does.
+- `apply --output <file>` in a run with both families gave a `NotADirectoryError` traceback; it now asks for a directory.
+- `outputs.output` and `commands.calibrate.output` were ignored when calibrating both families.
+- `mean_width` in `coverage_by_stratum.csv` and `coverage_by_group.csv` dropped every element with any infinite bound, so with `sparse_strata: infinite` it could be NaN overall. It is now the mean over values with finite bounds, as documented.
+- `*_kernel_tuning_details.csv` repeated the overall mean width on every stratum row.
+- `--variables Vm,line_loading` was rejected; comma-separated and space-separated lists both work.
+- The sparse-strata message counted bus-stratum pairs as buses (e.g. "3948 buses" on a 14-bus grid); it now says pairs and lists at most five strata.
+- Python API: `ChannelSet(valid_masks=None)` crashed in `fit`; channels or columns of the wrong shape were broadcast silently (now a `ValueError`); non-integer stratum codes were cast to integers at fit but not at prediction (now rejected); `scenario_status` failed on zero values; `KernelIntervalCalibrator.fit` required `embedding_pooling`, which it only records (now `"mean"` by default).
+- Config builder: `build_config` dropped unknown variables silently, and `validate_config` accepted `alpha` outside (0, 1).
+- Documentation: the Python API example "from GridFM files" fitted the power-flow set-points as predictions, giving bounds that were too narrow at generator buses; it now sets them aside, as the CLI does. The README Quick start runs `apply` but had no `inputs.apply`. Also: the extra named for `line_loading` (`datakit`), an outdated report file name, the bounds of sparse strata, the troubleshooting messages, and `classify_status` / `scenario_status` in the API reference.
+
+### Changed
+- `calibrate` and `apply` report how many values use pooled bounds (`sparse_strata: pooled`, no guarantee within their stratum) and, for `cp_type: kernel`, the share of scenarios in which some value uses the stratum quantile; `apply`'s status summary lists the same. Before, only the `n_pooled` column and the `kcp_*` columns showed them.
+- `calibrate` and `apply` print a note when the config differs from the artifact (`alpha`, `cp_type`, `embedding_pooling`, variables): the artifact is used as fitted, and the note says when `compute` should run again.
+- `compute` prints a note when `task_name` is neither `PowerFlow` nor `OptimalPowerFlow`, since predictions are then read as they are, with no set-points set aside. Spaces in the name no longer matter (`Power Flow`).
+- Clearer errors: a missing input names its config key (`Missing inputs.apply.predictions in the config (or --predictions)`), a missing artifact says to run `compute` first, a file that is not an artifact says so, swapped `pf_node` and `pf_edge` files are pointed out instead of printing Arrow's schema, and duplicate or missing rows name the scenarios. `alpha` must lie in (0, 1), `version` must be 1, and `screen_bounds` entries take only `lower` and `upper`, as numbers, with `lower` below `upper`. A missing optional extra (`datakit` for line loading) is a one-line error, like the others.
+- With one target family, `calibrate` and `apply` print the path of the dataset rather than its folder.
+
 ## [0.1.0] - 2026-10-15
 
 First public release.
@@ -95,4 +129,5 @@ First public release.
 - `tuning.n_eff_range` without a whole number in it (e.g. `[1.5, 1.7]`) gave a candidate outside the range; it is now rejected.
 - `pred_bins` errors named `system_load_bin`.
 
+[0.1.1]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.1.0
