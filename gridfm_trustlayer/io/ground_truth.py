@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from gridfm_trustlayer.io.parquet import open_dataset, read_frame
+from gridfm_trustlayer.io.parquet import column_names, open_dataset, read_frame
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 OUTAGE_TYPE_NONE = np.int32(0)
@@ -178,6 +178,13 @@ def scan_ground_truth_reference(
 def _scan_in_service(path: str, status_column: str) -> tuple[np.ndarray, np.ndarray]:
     """Element ids, and whether each is in service in at least one scenario."""
 
+    missing = sorted({"idx", status_column}.difference(column_names(path)))
+    if missing:
+        kind = "branch (pf_edge)" if status_column == "br_status" else "generator"
+        raise ValueError(
+            f"{path} has no {', '.join(missing)} column: is it the {kind} file? "
+            "pf_node and pf_edge may be swapped."
+        )
     in_service: dict[int, bool] = {}
     for batch in open_dataset(path).to_batches(columns=["idx", status_column]):
         ids = batch.column(0).to_numpy(zero_copy_only=False).astype(np.int64)
@@ -596,9 +603,16 @@ def _sort_rectangular_frame(
 ) -> pd.DataFrame:
     expected_rows = len(scenario_ids) * len(entity_ids)
     if len(frame) != expected_rows:
+        per_scenario = frame.groupby("scenario").size()
+        examples = [
+            f"scenario {scenario} has {int(per_scenario.get(scenario, 0))}"
+            for scenario in scenario_ids.tolist()
+            if int(per_scenario.get(scenario, 0)) != len(entity_ids)
+        ][:3]
         raise ValueError(
-            f"Expected one row per (scenario, {entity_column}); got {len(frame)} rows for "
-            f"{len(scenario_ids)} scenarios and {len(entity_ids)} {entity_column} values.",
+            f"Expected one row per scenario and {entity_column}, i.e. "
+            f"{len(entity_ids)} rows per scenario: {'; '.join(examples)}. Duplicate "
+            "or missing rows?",
         )
 
     if _in_rectangular_order(frame, scenario_ids, entity_ids, entity_column):

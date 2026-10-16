@@ -392,7 +392,7 @@ def test_compute_then_calibrate_with_n_outages_stratification(tmp_path) -> None:
     assert (n_minus_1["n_pooled"] == 2).all()
     summary = (coverage_dir / "summary.md").read_text(encoding="utf-8")
     assert (
-        "Too few calibration samples for a finite bound: Vm: 2 buses (n_outages=1: 2)"
+        "Too few calibration samples for a finite bound: Vm: 2 bus-stratum pairs (n_outages=1: 2)"
         in summary
     )
     assert (coverage_dir / "figures" / "vm_coverage_by_stratum.png").exists()

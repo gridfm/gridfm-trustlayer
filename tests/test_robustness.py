@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -239,3 +243,309 @@ def test_pred_bins_tables_have_one_overall_row_per_variable(tmp_path) -> None:
     overall = table[table["stratum"] == "all"]
     assert overall["variable"].value_counts().max() == 1
     assert table["coverage"].notna().all()
+
+
+# ---------------------------------------------------------------- 0.1.1 fixes
+DEMO_DATA = Path(__file__).resolve().parents[1] / "examples" / "demo" / "data"
+
+
+@pytest.mark.skipif(not DEMO_DATA.exists(), reason="needs the demo data")
+def test_apply_exits_after_writing_its_outputs(tmp_path) -> None:
+    # With pyarrow 26, datasets still cached at exit deadlocked Arrow's thread
+    # pool: 0.1.0's apply wrote everything and never exited when its output was
+    # piped. Whether it happens depends on what is cached at exit, so this is a
+    # smoke test; the fix (io.parquet releases the cache at exit) is general.
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "task_name: PowerFlow",
+                "alpha: 0.1",
+                "strat: n_outages",
+                "variables: [Vm, Va, line_loading]",
+                "inputs:",
+                "  calibration:",
+                *(
+                    f"    {key}: {DEMO_DATA / 'calibration' / name}"
+                    for key, name in (
+                        ("predictions", "case14_ieee_predictions.parquet"),
+                        ("pf_node", "raw/bus_data.parquet"),
+                        ("pf_edge", "raw/branch_data.parquet"),
+                    )
+                ),
+                "  apply:",
+                *(
+                    f"    {key}: {DEMO_DATA / 'test' / name}"
+                    for key, name in (
+                        ("predictions", "case14_ieee_predictions.parquet"),
+                        ("pf_node", "raw/bus_data.parquet"),
+                        ("pf_edge", "raw/branch_data.parquet"),
+                    )
+                ),
+                "outputs:",
+                f"  artifact: {tmp_path / 'layer.trustlayer'}",
+                f"  applied_predictions: {tmp_path / 'applied'}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for command in ("compute", "apply"):
+        finished = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "gridfm_trustlayer",
+                command,
+                "--config",
+                str(config),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert finished.returncode == 0, finished.stderr
+
+
+def test_commands_find_each_others_default_outputs(tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path, METHODS["kernel_n_outages"], {}, "[Vm, Va]")
+    text = config.read_text()
+    config.write_text(text.split("outputs:")[0], encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    for command in ("compute", "calibrate", "apply"):
+        assert main([command, "--config", str(config)]) == 0
+    folder = tmp_path / "trustlayer_outputs" / "powerflow" / "kernel"
+    assert (folder / "predictions_vm_va.trustlayer").is_file()
+
+
+def test_missing_input_names_the_config_key(tmp_path, monkeypatch, capsys) -> None:
+    config = _config(tmp_path, METHODS["element_n_outages"], {}, "[Vm]")
+    config.write_text(
+        config.read_text().split("  apply:")[0]
+        + "outputs:\n"
+        + config.read_text().split("outputs:\n")[1],
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(DEBUG_VARIABLE)
+    assert main(["compute", "--config", str(config)]) == 0
+    assert main(["apply", "--config", str(config)]) == 2
+    assert "Missing inputs.apply.predictions in the config" in capsys.readouterr().err
+
+
+def _screen_config(tmp_path: Path, method: str, variables: str) -> Path:
+    config = _config(tmp_path, METHODS[method], {}, variables)
+    config.write_text(
+        config.read_text()
+        + f"\n  screen_dir: {tmp_path / 'screen'}\n"
+        + "screen_bounds:\n  Vm: {lower: 0.98, upper: 1.02}\n"
+        + "  line_loading: {lower: 0.5, upper: 1.0}\n",
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_screen_refuses_a_variable_that_was_not_calibrated(tmp_path) -> None:
+    config = _screen_config(tmp_path, "element_n_outages", "[Vm, Va]")
+    for command in ("compute", "calibrate"):
+        assert main([command, "--config", str(config)]) == 0
+    with pytest.raises(ValueError, match="line_loading not found in the calibrated"):
+        main(["screen", "--config", str(config), "--variables", "Vm,line_loading"])
+
+
+def test_screen_and_apply_ignore_a_line_loading_lower_limit_alike(tmp_path) -> None:
+    config = _screen_config(tmp_path, "element_n_outages", "[line_loading]")
+    for command in ("compute", "calibrate", "screen", "apply"):
+        assert main([command, "--config", str(config)]) == 0
+    screened = pd.read_csv(tmp_path / "screen" / "scenarios.csv").set_index("scenario")
+    applied = pd.read_csv(next(tmp_path.rglob("status/scenarios.csv"))).set_index(
+        "scenario"
+    )
+    pd.testing.assert_series_equal(
+        screened["status"], applied.loc[screened.index, "status"]
+    )
+
+
+def test_switching_between_one_and_two_families_replaces_the_outputs(
+    tmp_path,
+) -> None:
+    config = _screen_config(tmp_path, "element_n_outages", "[Vm, Va]")
+    volt = config.read_text()
+    mixed = volt.replace("variables: [Vm, Va]", "variables: [Vm, Va, line_loading]")
+    for text, screened in ((volt, "Vm"), (mixed, "Vm,line_loading"), (volt, "Vm")):
+        config.write_text(text, encoding="utf-8")
+        for command in ("compute", "calibrate"):
+            assert main([command, "--config", str(config)]) == 0
+        assert main(["screen", "--config", str(config), "--variables", screened]) == 0
+    # The second volt run left no line-loading report behind.
+    assert not list((tmp_path / "coverage").glob("*line_loading*"))
+    assert not list((tmp_path / "screen").glob("*line_loading*"))
+
+
+def test_compute_refuses_to_overwrite_a_file_that_is_not_an_artifact(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path, METHODS["element_n_outages"], {}, "[Vm]")
+    victim = tmp_path / "victim.parquet"
+    victim.write_bytes(b"not an artifact")
+    with pytest.raises(ValueError, match="is not a trustlayer artifact"):
+        main(["compute", "--config", str(config), "--output", str(victim)])
+    assert victim.read_bytes() == b"not an artifact"
+
+
+def test_calibrate_and_apply_report_pooled_bounds(tmp_path, capsys) -> None:
+    config = _config(tmp_path, METHODS["element_n_outages"], {}, "[Vm, Va]")
+    for command in ("compute", "calibrate", "apply"):
+        assert main([command, "--config", str(config)]) == 0
+    printed = capsys.readouterr().out
+    # 60 synthetic scenarios over several outage counts: some strata are sparse.
+    assert "calibrate: Vm:" in printed and "use pooled bounds" in printed
+    assert "apply: Vm:" in printed
+
+
+def test_apply_and_screen_agree_on_missing_predictions(tmp_path) -> None:
+    config = _screen_config(tmp_path, "element_n_outages", "[Vm, line_loading]")
+    test = tmp_path / "test" / "predictions.parquet"
+    frame = pd.read_parquet(test)
+    frame.loc[frame.index[::7], "Vm_pred"] = np.nan  # some predictions missing
+    frame.to_parquet(test, index=False)
+    for command in ("compute", "calibrate", "screen", "apply"):
+        assert main([command, "--config", str(config)]) == 0
+    screened = pd.read_csv(tmp_path / "screen" / "scenarios.csv").set_index("scenario")
+    applied = pd.read_csv(next(tmp_path.rglob("status/scenarios.csv"))).set_index(
+        "scenario"
+    )
+    for column in ("status", "point_status"):
+        pd.testing.assert_series_equal(
+            screened[column], applied.loc[screened.index, column]
+        )
+    assert (applied["point_status"] == "uncertain").any()
+
+
+def test_line_bounds_do_not_depend_on_the_true_values(tmp_path) -> None:
+    config = _config(tmp_path, METHODS["element_n_outages"], {}, "[line_loading]")
+    bus = tmp_path / "test" / "raw" / "bus_data.parquet"
+    frame = pd.read_parquet(bus)
+    frame.loc[frame["scenario"] == 25, "Vm"] = np.nan  # an unsolved scenario
+    shutil.rmtree(bus)
+    frame.to_parquet(bus, partition_cols=["scenario_partition"])
+    for command in ("compute", "calibrate", "apply"):
+        assert main([command, "--config", str(config)]) == 0
+    # One family: each output is the dataset itself.
+    calibrated, applied = (
+        pd.read_parquet(tmp_path / name)
+        .sort_values(["scenario", "branch"])
+        .reset_index(drop=True)
+        for name in ("calibrated", "applied")
+    )
+    bounds = ["line_loading_pi_lower", "line_loading_pi_upper"]
+    pd.testing.assert_frame_equal(calibrated[bounds], applied[bounds])
+
+
+def test_one_nan_embedding_is_refused(tmp_path) -> None:
+    config = _config(tmp_path, METHODS["kernel_n_outages"], {}, "[Vm]")
+    embeddings = tmp_path / "calibration" / "embeddings.parquet"
+    frame = pd.read_parquet(embeddings)
+    frame.loc[3, "emb_001"] = np.nan
+    frame.to_parquet(embeddings, index=False)
+    with pytest.raises(ValueError, match="NaN or infinite values in 1 scenario"):
+        main(["compute", "--config", str(config)])
+
+
+@pytest.mark.parametrize(
+    ("bounds", "message"),
+    [
+        ("Vm: {lower: 1.05, upper: 0.95}", "must be below its upper limit"),
+        ("Vm: {lower: 0.95, uper: 1.05}", "unknown keys"),
+        ("Vm: {lower: low, upper: 1.05}", "screen_bounds.Vm.lower must be a number"),
+    ],
+)
+def test_screen_bounds_are_checked(tmp_path, bounds, message) -> None:
+    config = _config(tmp_path, METHODS["element_n_outages"], {}, "[Vm]")
+    config.write_text(
+        config.read_text() + f"\nscreen_bounds:\n  {bounds}\n", encoding="utf-8"
+    )
+    assert main(["compute", "--config", str(config)]) == 0
+    with pytest.raises(ValueError, match=message):
+        main(["apply", "--config", str(config)])
+
+
+def test_config_values_are_checked(tmp_path) -> None:
+    for line, message in (
+        ("alpha: 1.5", "alpha must be between 0 and 1"),
+        ("version: 2", "Unsupported config version"),
+    ):
+        config = _config(tmp_path / line[:5], METHODS["element_n_outages"], {}, "[Vm]")
+        config.write_text(
+            config.read_text().replace("alpha: 0.2", line)
+            if line.startswith("alpha")
+            else config.read_text().replace("version: 1", line),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=message):
+            main(["compute", "--config", str(config)])
+
+
+def test_task_name_spelling(tmp_path, capsys) -> None:
+    from gridfm_trustlayer import load_predictions
+
+    paths = _config(tmp_path, METHODS["element_n_outages"], {}, "[Vm]")
+    predictions = tmp_path / "calibration" / "predictions.parquet"
+    assert load_predictions(str(predictions), task_name="Power Flow").task_name == (
+        "PowerFlow"
+    )
+    paths.write_text(
+        paths.read_text().replace("task_name: PowerFlow", "task_name: PowerFlows"),
+        encoding="utf-8",
+    )
+    assert main(["compute", "--config", str(paths)]) == 0
+    assert "is not PowerFlow or OptimalPowerFlow" in capsys.readouterr().out
+
+
+def test_python_api_inputs_are_checked() -> None:
+    values = np.zeros((4, 2), dtype=np.float32)
+    common: dict[str, Any] = {
+        "scenario_ids": np.arange(4),
+        "entity_ids": np.arange(2),
+        "entity_name": "bus",
+    }
+    with pytest.raises(ValueError, match="expected"):
+        ChannelSet(channels={"Vm": np.zeros(4)}, **common)
+    with pytest.raises(ValueError, match="scenario column"):
+        ChannelSet(
+            channels={"Vm": values}, scenario_columns={"k": np.array([1, 2])}, **common
+        )
+    channel_set = ChannelSet(channels={"Vm": values}, valid_masks=None, **common)  # type: ignore[arg-type]
+    assert channel_set.valid_masks == {}
+    strata = {"k": np.array([1.0, 1.5, 2.0, 2.0])}
+    with pytest.raises(ValueError, match="whole numbers"):
+        NaiveIntervalCalibrator.fit(
+            ChannelSet(channels={"Vm": values}, scenario_columns=strata, **common),
+            ChannelSet(channels={"Vm": values}, scenario_columns=strata, **common),
+            alpha=0.5,
+            channel_names=("Vm",),
+            strat="k",
+        )
+    assert scenario_status(np.empty((3, 0), dtype=object)).tolist() == ["secure"] * 3
+
+
+def test_build_config_refuses_unknown_variables() -> None:
+    from gridfm_trustlayer.interactive import build_config
+
+    paths = {"predictions": "p.parquet", "pf_node": "b.parquet", "pf_edge": "e.parquet"}
+    with pytest.raises(ValueError, match="Unsupported variables"):
+        build_config(calibration=paths, test=paths, variables=["Vm", "Pg"])
+
+
+def test_screen_leaves_out_values_without_a_true_solution(tmp_path) -> None:
+    config = _screen_config(tmp_path, "element_n_outages", "[Vm]")
+    test = tmp_path / "test" / "predictions.parquet"
+    frame = pd.read_parquet(test)
+    unsolved = frame.index[frame["PQ"] == 1][::5]
+    frame.loc[unsolved, "Vm_target"] = np.nan
+    frame.to_parquet(test, index=False)
+    for command in ("compute", "calibrate", "screen"):
+        assert main([command, "--config", str(config)]) == 0
+    table = pd.read_csv(tmp_path / "screen" / "screening_by_stratum.csv")
+    overall = table[table["stratum"] == "all"].iloc[0]
+    known = int((frame["PV"] == 1).sum())
+    assert int(overall["n_values"]) == len(frame) - known - len(unsolved)

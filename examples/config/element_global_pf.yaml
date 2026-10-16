@@ -43,6 +43,8 @@ inputs:
 
 outputs:
   artifact: trustlayer_outputs/element/global_pf.trustlayer
+  # Each example has its own report folder, so that runs do not mix their reports.
+  coverage_dir: trustlayer_outputs/element/global_pf_coverage
   # This run asks for one target family (buses only), so the single
   # `calibrated_predictions` key applies. Runs that mix voltages with
   # line_loading must use calibrated_predictions_volt / _line instead,

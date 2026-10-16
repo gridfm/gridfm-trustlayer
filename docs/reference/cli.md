@@ -90,7 +90,7 @@ Kernel-specific notes:
 - `--cp-type kernel` is incompatible with `--strat pred_bins`; use `n_outages`, `outage_type`, `system_load_bin`, or omit `strat`.
 - Kernel and stratification compose. With `--cp-type kernel --strat n_outages`, the nearest-neighbour search, the bandwidth, and the weighted quantile are all restricted to calibration scenarios in the same outage stratum.
 - Kernel artifacts store the calibration residual bank and scenario embeddings, so they are substantially larger than `element` artifacts and are written as a compressed binary container rather than JSON. Both encodings load through the same `--artifact` path.
-- The embeddings parquet must cover every scenario present in the predictions parquet, and the same `--embedding-pooling` must be used for `compute` and `calibrate`. The pooling name is stored in the artifact and mismatches are rejected.
+- The embeddings parquet must cover every scenario present in the predictions parquet, The pooling is stored in the artifact, and `calibrate` and `apply` pool the test embeddings the same way. More generally, the artifact's settings (`alpha`, `cp_type`, `embedding_pooling`, the variables) are the ones used: when the config says otherwise, `calibrate` and `apply` print a note, since that usually means `compute` should run again.
 
 Distance metric:
 

@@ -36,7 +36,7 @@ Both methods take the same residuals (true value minus prediction) on the calibr
 - Coverage is **verified empirically** on the test set rather than guaranteed in finite samples.
 - It needs embeddings for both datasets, more calibration data, and more computation at `calibrate` time. The artifact keeps all calibration residuals and embeddings.
 
-Use `kernel` when the model's errors vary between scenarios in ways the strata do not capture, and check on the test set that it reaches the coverage target. [Kernel-weighted calibration](kernel.md) covers its options. A practical way to decide is to run both on the same data and compare `trust_reliability_*.csv` and the screening results.
+Use `kernel` when the model's errors vary between scenarios in ways the strata do not capture, and check on the test set that it reaches the coverage target. [Kernel-weighted calibration](kernel.md) covers its options. A practical way to decide is to run both on the same data and compare their `coverage_by_stratum.csv` and `screening_by_stratum.csv`.
 
 ## Grouping: `strat`
 
@@ -81,7 +81,7 @@ sparse_strata: infinite   # default: pooled
 ## Variables
 
 - `Vm` and `Va` are calibrated from the predictions directly.
-- `line_loading` is derived: trustlayer computes the branch flows from the predicted voltages and the branch parameters, divides by the rating `rate_a`, and calibrates the result. It needs the `graphkit` extra.
+- `line_loading` is derived: trustlayer computes the branch flows from the predicted voltages and the branch parameters, divides by the rating `rate_a`, and calibrates the result. It needs the `datakit` extra.
 - You can calibrate several at once. Voltage and line results are written to separate files, because one is per bus and the other per branch.
 
 Only `Vm` and `line_loading` have operating limits to screen against. If you calibrate `Va` too, restrict screening with `commands.screen.variables: [Vm, line_loading]`.

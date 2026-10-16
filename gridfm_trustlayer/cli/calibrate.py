@@ -20,13 +20,16 @@ from gridfm_trustlayer.cli.common import (
     _SET_POINTS,
     _add_known_columns,
     _analysis_scenario_metadata_columns_from_frame,
+    _artifact_path,
     _block_jobs,
+    _bounds_notes,
     _build_bus_channel_set,
     _build_calibration_sets,
     _build_entity_output_frame,
     _build_interval_frame,
     _build_pred_bin_frame,
     _build_scenario_columns,
+    _check_artifact_matches,
     _common_parent,
     _default_output_dir,
     _embedding_spec,
@@ -39,8 +42,10 @@ from gridfm_trustlayer.cli.common import (
     _merge_kernel_diagnostics,
     _merge_pooled_columns,
     _ordered_analysis_strat_columns,
+    _output_task_name,
     _prediction_fingerprint,
     _report_progress,
+    _require_set_points,
     _scan_bus_types,
     _share_threads,
     _sparse_strata_listing,
@@ -76,6 +81,7 @@ from gridfm_trustlayer.io.ground_truth import (
 from gridfm_trustlayer.io.parquet import (
     clear_partitioned_output,
     column_names,
+    is_trustlayer_output,
     read_frame,
     read_scenario_ids,
     rows_per_scenario,
@@ -94,8 +100,13 @@ def _run_calibrate(args: argparse.Namespace) -> None:
     predictions_path = str(
         coalesce_option(args.predictions, config, "predictions", required=True)
     )
-    artifact_path = coalesce_option(args.artifact, config, "artifact", required=True)
+    artifact_path = _artifact_path(
+        args, config, explicit=args.artifact, for_reading=True
+    )
     calibrators = load_interval_artifacts(artifact_path)
+    _check_artifact_matches(
+        calibrators, args, config, artifact_path, command="calibrate"
+    )
     if requested_strat is not None:
         for calibrator in calibrators.values():
             if calibrator.strat != requested_strat:
@@ -145,7 +156,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
             calibrator.channel_names,
             target_kind=target_kind,
             multiple_targets=len(calibrators) > 1,
-            task_name=sample.task_name,
+            task_name=_output_task_name(args, config),
         )
         for target_kind, calibrator in calibrators.items()
     }
@@ -158,6 +169,10 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         None if embeddings is None else embeddings[0],
     )
     for path in output_paths.values():
+        # Both families go into a folder; at that path, a previous run with one
+        # family left a dataset, replaced here.
+        if len(output_paths) > 1 and is_trustlayer_output(Path(path).parent):
+            clear_partitioned_output(Path(path).parent, inputs=inputs)
         clear_partitioned_output(path, inputs=inputs)
     n_jobs = _block_jobs(args, config)
     rows = rows_per_scenario(predictions_path, len(scenario_ids))
@@ -189,6 +204,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
 
     data_dir = Path(_common_parent(output_paths.values()))
     coverage_dir = Path(str(config.get("coverage_dir") or data_dir / "coverage"))
+    reports.clear_report(coverage_dir)
     strata: list[pd.DataFrame] = []
     groups: list[pd.DataFrame] = []
     figure_tasks: list[reports.FigureTask] = []
@@ -263,7 +279,12 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         known_where=_known_where(sample.task_name),
     )
     _report_coverage(by_stratum)
-    print(f"calibrate: data in {data_dir}; reports in {coverage_dir}", flush=True)
+    for note in _bounds_notes(output_paths.values()):
+        print(f"calibrate: {note}", flush=True)
+    data_text = (
+        next(iter(output_paths.values())) if len(output_paths) == 1 else data_dir
+    )
+    print(f"calibrate: data in {data_text}; reports in {coverage_dir}", flush=True)
 
 
 @dataclass
@@ -312,6 +333,7 @@ class _CalibrateJob:
             generator_parquet_path=self.generator_path,
             scenario_ids=block,
         )
+        _require_set_points(predictions)
         if self._embeddings is not None:
             self._embeddings.attach(predictions)
         ground_truth = None
@@ -530,8 +552,9 @@ def _resolve_output_path(
             )
         return str(output_path)
 
-    if args.output is not None:
-        output_root = Path(args.output)
+    generic_output = coalesce_option(args.output, config, "output")
+    if generic_output is not None:
+        output_root = Path(str(generic_output))
         if output_root.suffix.lower() == ".parquet":
             raise ValueError(
                 "When calibrating Vm/Va together with line_loading, --output must be a directory or omitted. "
@@ -633,16 +656,22 @@ def _analysis_partials(
         work["pooled"] = (_flag(frame, f"{variable}_pooled") & ~known).astype(np.int64)
         work["unknown"] = (~known).astype(np.int64)
         work["width"] = np.where(known, np.nan, upper - lower)
+        # The finite widths, for means over values with finite bounds.
+        work["finite_width"] = work["width"].where(np.isfinite(work["width"]))
         work["covered"] = np.where(
             known, 0.0, ((target >= lower) & (target <= upper)).astype(float)
         )
         work["scenario_unknown"] = np.where(
             known, np.nan, frame["scenario"].to_numpy(dtype=float)
         )
+        # Coverage is measured where the true value is known. A missing prediction
+        # (no bounds) counts as not covered: the interval failed there.
         if entity_column == "branch":
             # Out-of-service or unrated branches carry -1 and are not analysed.
-            valid = (frame[f"{variable}_pred"].to_numpy() >= 0.0) & (target >= 0.0)
-            work = work[valid]
+            pred = frame[f"{variable}_pred"].to_numpy(dtype=float)
+            work = work[~(pred < 0.0) & (target >= 0.0)]
+        else:
+            work = work[np.isfinite(target)]
         parts.append(
             _entity_statistics(
                 work,
@@ -684,6 +713,8 @@ def _entity_statistics(
         .agg(
             width_sum=("width", "sum"),
             width_count=("width", "count"),
+            finite_width_sum=("finite_width", "sum"),
+            finite_width_count=("finite_width", "count"),
             min_width=("width", "min"),
             max_width=("width", "max"),
             covered_sum=("covered", "sum"),
@@ -722,6 +753,8 @@ def _combine_analysis_partials(
             stratum=("stratum", "first"),
             width_sum=("width_sum", "sum"),
             width_count=("width_count", "sum"),
+            finite_width_sum=("finite_width_sum", "sum"),
+            finite_width_count=("finite_width_count", "sum"),
             min_width=("min_width", "min"),
             max_width=("max_width", "max"),
             covered_sum=("covered_sum", "sum"),
@@ -764,6 +797,8 @@ def _combine_analysis_partials(
     elements["n_scenarios"] = combined["n_scenarios"].astype(np.int64)
     elements["coverage"] = coverage
     elements["mean_width"] = mean_width
+    elements["finite_width_sum"] = combined["finite_width_sum"].astype(float)
+    elements["finite_width_count"] = combined["finite_width_count"].astype(np.int64)
     elements["min_width"] = combined["min_width"].astype(float)
     elements["max_width"] = combined["max_width"].astype(float)
     return elements.sort_values(

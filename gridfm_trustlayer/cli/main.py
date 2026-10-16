@@ -48,9 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         commands[args.command](args)
-    except (ValueError, FileNotFoundError) as exc:
-        # Bad configs, paths and data are the user's to fix: one line, not a
-        # traceback. GRIDFM_TRUSTLAYER_DEBUG=1 shows the traceback.
+    except (ValueError, FileNotFoundError, ModuleNotFoundError) as exc:
+        # Bad configs, paths and data, and a missing optional extra, are the
+        # user's to fix: one line, not a traceback. GRIDFM_TRUSTLAYER_DEBUG=1
+        # shows the traceback.
         if os.environ.get(DEBUG_VARIABLE):
             raise
         print(f"gridfm_trustlayer {args.command}: error: {exc}", file=sys.stderr)

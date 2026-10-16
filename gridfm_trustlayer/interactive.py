@@ -111,6 +111,11 @@ def build_config(
     """
 
     kernel = cp_type == "kernel"
+    unknown = [name for name in variables if name not in VARIABLES]
+    if unknown:
+        raise ValueError(
+            f"Unsupported variables {unknown}; choose from {', '.join(VARIABLES)}."
+        )
     variables = [name for name in VARIABLES if name in variables]
     config: dict[str, Any] = {
         "version": 1,

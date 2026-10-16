@@ -10,6 +10,7 @@ writing needs the whole dataset in memory.
 
 from __future__ import annotations
 
+import atexit
 import shutil
 from collections.abc import Iterable, Sequence
 from functools import lru_cache
@@ -43,6 +44,13 @@ def open_dataset(path: str | Path) -> ds.Dataset:
 def _open_dataset(path: str, modified_ns: int) -> ds.Dataset:
     del modified_ns  # part of the cache key only
     return ds.dataset(path, format="parquet", partitioning="hive")
+
+
+# Datasets still cached when the process exits would be destroyed after the
+# interpreter, in C `exit()`, where Arrow's thread pool can deadlock (seen with
+# pyarrow 26: the command finished its work and never exited). Released here,
+# while Python still runs.
+atexit.register(_open_dataset.cache_clear)
 
 
 def column_names(path: str | Path) -> list[str]:
@@ -257,7 +265,7 @@ def clear_partitioned_output(
             child.is_dir() and child.name.startswith(f"{PARTITION_COLUMN}=")
             for child in children
         )
-        if partitioned and _has_interval_columns(path):
+        if (partitioned and _has_interval_columns(path)) or _is_output_folder(children):
             shutil.rmtree(path)
             return
     elif _has_interval_columns(path):
@@ -266,6 +274,38 @@ def clear_partitioned_output(
     raise ValueError(
         f"{path} exists and is not a trustlayer output: it would be replaced. "
         "Choose another output path or remove it.",
+    )
+
+
+def is_trustlayer_output(path: str | Path) -> bool:
+    """Whether `path` is a calibrated or applied dataset that trustlayer wrote."""
+
+    path = Path(path)
+    if path.is_dir():
+        children = list(path.iterdir())
+        return (
+            bool(children)
+            and all(
+                child.is_dir() and child.name.startswith(f"{PARTITION_COLUMN}=")
+                for child in children
+            )
+            and _has_interval_columns(path)
+        )
+    return path.is_file() and _has_interval_columns(path)
+
+
+# Report folders written next to the datasets of a run with both families.
+_REPORT_FOLDERS = {"coverage", "status"}
+
+
+def _is_output_folder(children: list[Path]) -> bool:
+    """The folder of a run with both families: its datasets and their reports."""
+
+    datasets = [child for child in children if child.name not in _REPORT_FOLDERS]
+    return (
+        bool(datasets)
+        and all(child.is_dir() for child in children)
+        and all(is_trustlayer_output(child) for child in datasets)
     )
 
 

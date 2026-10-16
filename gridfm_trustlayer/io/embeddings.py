@@ -183,6 +183,14 @@ def load_scenario_embeddings(
     pooled = np.ascontiguousarray(
         POOLING_REGISTRY[pooling](stacked), dtype=FLOAT32_DTYPE
     )
+    # One NaN would make every distance NaN and switch the kernel off silently.
+    broken = ~np.isfinite(pooled).all(axis=1)
+    if broken.any():
+        examples = ", ".join(str(s) for s in unique_scenarios[broken][:5].tolist())
+        raise ValueError(
+            f"Embedding parquet {parquet_path!r} has NaN or infinite values in "
+            f"{int(broken.sum()):,} scenario(s) (e.g. {examples})."
+        )
     return ScenarioEmbeddingSet(
         scenario_ids=unique_scenarios,
         embeddings=pooled,

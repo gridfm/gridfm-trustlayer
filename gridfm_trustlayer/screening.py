@@ -110,7 +110,14 @@ def scenario_status(
         # Anything but a status name (None, NaN, pandas NA) is a missing status.
         return lookup[status] if isinstance(status, str) else 0
 
-    codes = np.vectorize(code, otypes=[np.int8])(np.asarray(statuses, dtype=object))
+    array = np.asarray(statuses, dtype=object)
+    codes = (
+        np.vectorize(code, otypes=[np.int8])(array)
+        if array.size
+        else np.zeros(array.shape, dtype=np.int8)
+    )
     if valid is not None:
         codes = np.where(np.asarray(valid, dtype=bool), codes, 0)
-    return np.asarray(SCENARIO_STATUSES, dtype=object)[codes.max(axis=axis)]
+    # A scenario with no values at all is secure, like one with no valid value.
+    worst = codes.max(axis=axis, initial=0)
+    return np.asarray(SCENARIO_STATUSES, dtype=object)[worst]
