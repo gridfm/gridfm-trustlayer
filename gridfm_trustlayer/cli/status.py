@@ -120,7 +120,7 @@ def element_counts(
                 parts.append(grouped.drop(columns="code"))
     if not parts:
         return pd.DataFrame()
-    counts = pd.concat(parts, ignore_index=True)
+    counts = reports.concat_strata(parts)
     counts.insert(0, "level", "element")
     return counts
 
@@ -255,7 +255,7 @@ def combine_counts(parts: Sequence[pd.DataFrame], *, truth: bool) -> pd.DataFram
     frames = [part for part in parts if len(part)]
     if not frames:
         return pd.DataFrame()
-    counts = pd.concat(frames, ignore_index=True)
+    counts = reports.concat_strata(frames)
     keys = ["level", "variable", "stratification", "stratum_value", "method", "status"]
     counts = (
         counts.groupby(keys, sort=False, dropna=False)

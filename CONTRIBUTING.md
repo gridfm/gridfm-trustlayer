@@ -83,6 +83,8 @@ If you add or change a config key:
   pre-commit run --all-files
   ```
 
+- [ ] When you change a minimum version in `pyproject.toml`, change it in `.github/minimum-versions.txt` too: a CI job installs exactly those versions and runs the tests (`tests/test_dependencies.py` checks that the two agree).
+
 - [ ] The documentation builds without warnings, and pages affected by the change are updated:
 
   ```bash

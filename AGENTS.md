@@ -7,7 +7,7 @@ Follow the guide in `gridfm_trustlayer/guide/own_data.md` (printed by `gridfm_tr
 ## Working on this repository
 
 - Setup, layout and the checklist for changes are in [CONTRIBUTING.md](CONTRIBUTING.md).
-- Before calling a change done, run `pre-commit run --all-files` (ruff, mypy, pytest) twice, since the first run may reformat files, and `mkdocs build --strict` when the docs change. CI also runs the tests on Python 3.10, where pip installs numpy 2.2, whose type stubs are stricter.
+- Before calling a change done, run `pre-commit run --all-files` (ruff, mypy, pytest) twice, since the first run may reformat files, and `mkdocs build --strict` when the docs change. CI also runs the tests on Python 3.10, where pip installs numpy 2.2, whose type stubs are stricter, and with the lowest dependency versions of `.github/minimum-versions.txt` (keep it equal to the `>=` bounds of `pyproject.toml`).
 - Bounds must not change silently: the kernel tests compare against the full-scan definitions in `tests/conformal_reference.py`. Say in the pull request whether results change, and add user-visible changes to `CHANGELOG.md`.
 - The code blocks of the guide run as a test (`tests/test_own_data.py`); update its `Output` block when their output changes.
 - Scripts that call the CLI or `tune_n_eff_target` with worker processes (`n_jobs` for blocks) must start from an `if __name__ == "__main__":` block, since the processes are spawned.

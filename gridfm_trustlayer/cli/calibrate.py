@@ -734,7 +734,7 @@ def _analysis_partials(
                 for value in statistics["stratum_value"].tolist()
             ]
             parts.append(statistics)
-    return pd.concat(parts, ignore_index=True)
+    return reports.concat_strata(parts)
 
 
 def _entity_statistics(

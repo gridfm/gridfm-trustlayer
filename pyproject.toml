@@ -30,7 +30,9 @@ dependencies = [
   "numba>=0.61.2",
   "numpy>=2.2",
   "pandas>=2.3",
-  "pyarrow>=16",
+  # 16.0.0 cannot read back float columns with nulls written with the
+  # BYTE_STREAM_SPLIT encoding that trustlayer's outputs use.
+  "pyarrow>=16.1",
   "scipy>=1.13",
   "pyyaml>=6",
 ]

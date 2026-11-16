@@ -32,9 +32,12 @@ Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage repo
 - `apply` and `calibrate` read each block of predictions once instead of twice, and take the end-of-run notes from the blocks instead of reading their outputs again.
 - `matplotlib` is imported only when a figure is drawn, and `numba` only when a kernel runs: commands start about 0.15 s sooner.
 - On case24 (7,070 new scenarios), `apply` went from 2.8 s to 2.0 s and its peak memory from 1.7 GB to 0.9 GB.
+- CI also runs the tests with the lowest dependency versions that `pyproject.toml` allows (pinned in `.github/minimum-versions.txt`, which a test keeps equal to those bounds).
 
 ### Fixed
 - **The `n_eff` bandwidth solve could stop at a wrong bandwidth.** Where `n_eff` is nearly flat at one end of the search bracket and steep at the other, Newton steps could alternate between the two ends until the iteration limit; the scenario then got, e.g., `n_eff` 2,862 instead of the target 600 (near-uniform weights), or 9 (a fallback to the stratum quantile). This happened for about 3 in 120,000 scenario solves on IEEE-118. After 30 Newton steps the solve now continues by bisection and converges; scenarios whose solve converged are unchanged. In strata with fewer calibration scenarios than `n_eff_target`, where the weights approach uniform, `kcp_bandwidth_sq` can differ from 0.1.1's in its last digit, with the same bounds.
+- **pyarrow 16.0.0 could not read trustlayer's outputs back.** The parquet outputs store floating-point columns with the `BYTE_STREAM_SPLIT` encoding, which pyarrow 16.0.0 fails to decode when a column holds nulls ("Data size ... does not match number of values in BYTE_STREAM_SPLIT"), e.g. bounds of values without a prediction bin or without a true solution; the demo notebook failed with it. The minimum is now pyarrow 16.1, which decodes them.
+- **pandas 2.3 warned about concatenating all-NaN columns** (`FutureWarning`) in the per-stratum tables of `calibrate` and `screen` with `pred_bins`. Their `stratum_value` column is now float64 under any pandas version; the tables are unchanged.
 
 ## [0.1.1] - 2026-10-16
 

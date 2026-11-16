@@ -108,6 +108,26 @@ def family_name(entity_column: str) -> str:
     return "line_loading" if entity_column == "branch" else "voltage"
 
 
+def concat_strata(parts: Sequence[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate per-stratum tables, with `stratum_value` as float64 in all.
+
+    The overall rows hold NaN there and the stratum rows the stratum's value
+    (float32 for `pred_bins`). pandas 2 left the all-NaN column out when
+    choosing the result's type (float32) and warns that this changes, pandas 3
+    does not (float64): fixing float64 gives the same table with either.
+    """
+
+    return pd.concat(
+        [
+            part.astype({"stratum_value": np.float64})
+            if "stratum_value" in part.columns
+            else part
+            for part in parts
+        ],
+        ignore_index=True,
+    )
+
+
 def sort_by_stratum(frame: pd.DataFrame) -> pd.DataFrame:
     order = {
         name: _VARIABLE_ORDER.get(name, len(_VARIABLE_ORDER) + index)
