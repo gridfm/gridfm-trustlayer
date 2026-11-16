@@ -158,12 +158,12 @@ line_status = classify_status(lower, upper, upper_limit=1.0)
 scenario = scenario_status(line_status, axis=1)  # secure, uncertain or insecure
 ```
 
-See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files.
+See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files. With your own model's outputs in a table, start from [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): `ChannelSet.from_frame` builds the arrays and `check_inputs` says what to fix. The same guide ships with the package, for you or an AI coding assistant: `gridfm_trustlayer guide` prints it.
 
 ## Documentation
 
 - [Getting started](https://gridfm.github.io/gridfm-trustlayer/getting-started/installation/): installation, demo notebook, quick start, config builder
-- [User guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/data/): preparing the data, choosing a setup, kernel-weighted calibration, reading the results, troubleshooting
+- [User guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/data/): preparing the data, choosing a setup, kernel-weighted calibration, reading the results, your own model and data, troubleshooting
 - [Reference](https://gridfm.github.io/gridfm-trustlayer/reference/cli/): CLI, configuration keys, data schemas, Python API
 - [Methodology](https://gridfm.github.io/gridfm-trustlayer/methodology/): the statistics behind both methods
 

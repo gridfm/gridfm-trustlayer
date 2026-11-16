@@ -7,6 +7,7 @@ from gridfm_trustlayer import (
     ChannelSet,  # aligned (scenario x entity) arrays
     NaiveIntervalCalibrator,  # cp_type: element
     KernelIntervalCalibrator,  # cp_type: kernel
+    check_inputs,  # checks the data for the calibrators
     load_predictions,
     load_ground_truth,
     load_scenario_embeddings,
@@ -17,7 +18,7 @@ from gridfm_trustlayer import (
 )
 ```
 
-Every function and class is documented in the [API reference](../reference/api.md).
+Every function and class is documented in the [API reference](../reference/api.md). With your own model's outputs in a table (one row per scenario and bus or line), start from [Using trustlayer with your own data](own-data.md): `ChannelSet.from_frame` builds the `ChannelSet`s below from it, and `check_inputs` checks them before fitting.
 
 ## Data: `ChannelSet`
 

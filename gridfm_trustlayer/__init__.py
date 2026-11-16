@@ -6,7 +6,11 @@ rather than from submodules, whose layout may change.
 Calibrators:
     NaiveIntervalCalibrator   stratified split-conformal intervals (``cp_type: element``)
     KernelIntervalCalibrator  kernel-weighted conformal intervals (``cp_type: kernel``)
-    ChannelSet                aligned (scenario x entity) arrays to calibrate
+    ChannelSet                aligned (scenario x entity) arrays to calibrate;
+                              ChannelSet.from_frame builds them from a long table
+    check_inputs              checks the data for the calibrators (InputCheck)
+
+Your own model and data: ``gridfm_trustlayer guide`` prints the guide.
 
 Data loading:
     load_predictions, load_ground_truth, load_scenario_embeddings, compute_line_loading
@@ -21,8 +25,10 @@ Screening:
 from gridfm_trustlayer._version import __version__
 from gridfm_trustlayer.conformal import (
     ChannelSet,
+    InputCheck,
     KernelIntervalCalibrator,
     NaiveIntervalCalibrator,
+    check_inputs,
 )
 from gridfm_trustlayer.io import (
     GroundTruthSet,
@@ -42,10 +48,12 @@ from gridfm_trustlayer.screening import classify_status, scenario_status
 __all__ = [
     "ChannelSet",
     "GroundTruthSet",
+    "InputCheck",
     "KernelIntervalCalibrator",
     "NaiveIntervalCalibrator",
     "PredictionSet",
     "__version__",
+    "check_inputs",
     "classify_status",
     "compute_line_loading",
     "load_ground_truth",

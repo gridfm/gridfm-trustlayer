@@ -65,6 +65,10 @@ version = { attr = "gridfm_trustlayer._version.__version__" }
 include = ["gridfm_trustlayer*"]
 namespaces = false
 
+[tool.setuptools.package-data]
+# The type marker, and the guide printed by `gridfm_trustlayer guide`.
+gridfm_trustlayer = ["py.typed", "guide/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

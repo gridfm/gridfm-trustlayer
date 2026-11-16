@@ -1,0 +1,25 @@
+# gridfm-trustlayer
+
+> Conformal trustworthiness layer for power-system models: calibrated prediction intervals (stratified split-conformal and kernel-weighted conformal prediction) and screening of contingencies against operating limits. A command-line tool reads GridFM's file layout; a Python API works with the predictions of any model.
+
+To use trustlayer with your own model and data, read the guide first. After `pip install gridfm-trustlayer`, `gridfm_trustlayer guide` prints the version that matches the installation.
+
+## Guides
+
+- [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): a long table of predictions and true values, `ChannelSet.from_frame`, `check_inputs`, fitting, checking coverage, mistakes to avoid
+- [Python API](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/): the calibrators on NumPy arrays, screening statuses, artifacts, bandwidth tuning
+- [Kernel-weighted calibration](https://gridfm.github.io/gridfm-trustlayer/user-guide/kernel/): embeddings, bandwidth, tuning, diagnostics
+- [Quick start](https://gridfm.github.io/gridfm-trustlayer/getting-started/quickstart/): the command-line workflow with GridFM data
+
+## Reference
+
+- [API reference](https://gridfm.github.io/gridfm-trustlayer/reference/api/)
+- [Data schemas](https://gridfm.github.io/gridfm-trustlayer/reference/schemas/)
+- [CLI](https://gridfm.github.io/gridfm-trustlayer/reference/cli/)
+- [Configuration](https://gridfm.github.io/gridfm-trustlayer/reference/configuration/)
+
+## Optional
+
+- [Methodology](https://gridfm.github.io/gridfm-trustlayer/methodology/)
+- [Source code](https://github.com/gridfm/gridfm-trustlayer)
+- [Package on PyPI](https://pypi.org/project/gridfm-trustlayer/)

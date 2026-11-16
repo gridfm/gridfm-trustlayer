@@ -18,6 +18,7 @@ Available commands:
 - `calibrate`
 - `screen`
 - `apply`
+- `guide`: prints the guide to using trustlayer with your own model and data through the Python API ([online](../user-guide/own-data.md)), the version that matches the installation, e.g. for an AI coding assistant; `--path` prints where the file is.
 
 They play three roles:
 

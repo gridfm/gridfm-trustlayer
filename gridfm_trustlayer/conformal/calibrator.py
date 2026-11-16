@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import numpy as np
+import pandas as pd  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 from gridfm_trustlayer.io.predictions import PredictionSet
@@ -92,6 +93,251 @@ class ChannelSet:
         """Compatibility alias for older bus-only call sites."""
 
         return self.entity_ids
+
+    @classmethod
+    def from_frame(
+        cls,
+        frame: pd.DataFrame,
+        channels: Mapping[str, str] | Sequence[str],
+        *,
+        entity: str,
+        scenario: str = "scenario",
+        entity_name: str = "bus",
+        valid: Mapping[str, str] | str | None = None,
+        strata: Mapping[str, str] | Sequence[str] = (),
+        embeddings: pd.DataFrame | np.ndarray | None = None,
+    ) -> ChannelSet:
+        """A `ChannelSet` from a long table: one row per scenario and element.
+
+        Build the predictions and the true values from the same rows, each with
+        its own `channels`; scenarios and elements are sorted by id, so the two
+        sets are aligned. See the guide "Using trustlayer with your own data"
+        (`gridfm_trustlayer guide`).
+
+        Args:
+            frame: One row per scenario and element (bus or line).
+            channels: The variables, as `{variable: column}`, e.g.
+                `{"line_loading": "loading_pred"}`, or a list of columns that
+                are also the variable names.
+            entity: Column of the element ids (integers).
+            scenario: Column of the scenario ids (integers).
+            entity_name: `"bus"` or `"branch"`.
+            valid: Boolean column marking the values to calibrate, for every
+                variable, or `{variable: column}`. `False` values are left out
+                of fitting and get no interval (e.g. out-of-service lines, or
+                values that are inputs of the model rather than predictions).
+            strata: Columns used for stratification (e.g. the number of
+                outages), as a list or `{name: column}`: integers, the same for
+                every row of a scenario.
+            embeddings: For `KernelIntervalCalibrator`: one vector per scenario,
+                as a DataFrame indexed by scenario id (or with the scenario
+                column) whose other columns are the dimensions, or an array
+                with one row per scenario in increasing order of scenario id.
+                Extra scenarios in a DataFrame are ignored.
+
+        Returns:
+            The `ChannelSet`. A (scenario, element) pair absent from `frame`,
+            or a value that is NaN or infinite, is marked invalid.
+
+        Raises:
+            ValueError: If a column is missing, ids are not integers, a
+                (scenario, element) pair appears twice, a stratum varies within
+                a scenario or is not an integer, or embeddings are missing for
+                some scenario.
+        """
+
+        names = (
+            dict(channels)
+            if isinstance(channels, Mapping)
+            else {str(column): str(column) for column in channels}
+        )
+        strata_columns = (
+            dict(strata)
+            if isinstance(strata, Mapping)
+            else {str(column): str(column) for column in strata}
+        )
+        valid_columns: dict[str, str] = (
+            {}
+            if valid is None
+            else dict(valid)
+            if isinstance(valid, Mapping)
+            else dict.fromkeys(names, valid)
+        )
+        if not names:
+            raise ValueError("Pass at least one variable in channels.")
+        unknown = sorted(set(valid_columns) - set(names))
+        if unknown:
+            raise ValueError(
+                f"valid names variables that are not in channels: {unknown}."
+            )
+        _require_frame_columns(
+            frame,
+            [
+                scenario,
+                entity,
+                *names.values(),
+                *valid_columns.values(),
+                *strata_columns.values(),
+            ],
+        )
+        scenario_values = _integer_ids(frame[scenario], scenario, "Scenario")
+        entity_values = _integer_ids(frame[entity], entity, "Element")
+        scenario_ids, scenario_index = np.unique(scenario_values, return_inverse=True)
+        entity_ids, entity_index = np.unique(entity_values, return_inverse=True)
+        shape = (len(scenario_ids), len(entity_ids))
+        flat = scenario_index * shape[1] + entity_index
+        cells, counts = np.unique(flat, return_counts=True)
+        if (counts > 1).any():
+            duplicated = cells[counts > 1]
+            examples = [
+                (int(scenario_ids[c // shape[1]]), int(entity_ids[c % shape[1]]))
+                for c in duplicated[:3]
+            ]
+            raise ValueError(
+                f"{len(duplicated):,} (scenario, element) pairs appear more than once, "
+                f"e.g. {examples}: the table needs one row per scenario and element."
+            )
+        present = np.zeros(shape, dtype=bool)
+        present[scenario_index, entity_index] = True
+        arrays: dict[str, np.ndarray] = {}
+        masks: dict[str, np.ndarray] = {}
+        for name, column in names.items():
+            values = np.full(shape, np.nan, dtype=FLOAT32_DTYPE)
+            try:
+                values[scenario_index, entity_index] = frame[column].to_numpy(
+                    dtype=FLOAT32_DTYPE
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Column {column!r} ({name}) is not numeric.") from exc
+            mask = present & np.isfinite(values)
+            if name in valid_columns:
+                flags = np.zeros(shape, dtype=bool)
+                flags[scenario_index, entity_index] = frame[
+                    valid_columns[name]
+                ].to_numpy(dtype=bool)
+                mask &= flags
+            arrays[name] = values
+            if not mask.all():
+                masks[name] = mask
+        scenario_columns = {
+            name: _per_scenario(
+                frame[column], column, scenario_index, len(scenario_ids)
+            )
+            for name, column in strata_columns.items()
+        }
+        return cls(
+            scenario_ids=scenario_ids,
+            entity_ids=entity_ids,
+            entity_name=entity_name,
+            channels=arrays,
+            valid_masks=masks,
+            scenario_columns=scenario_columns,
+            scenario_embeddings=None
+            if embeddings is None
+            else _aligned_embeddings(embeddings, scenario_ids, scenario),
+        )
+
+
+def _require_frame_columns(frame: pd.DataFrame, columns: Iterable[str]) -> None:
+    missing = [
+        column for column in dict.fromkeys(columns) if column not in frame.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"Columns {missing} are not in the table; it has {list(frame.columns)[:20]}."
+        )
+
+
+def _is_integral(array: np.ndarray) -> bool:
+    """Integers, or finite floats with integer values."""
+
+    if np.issubdtype(array.dtype, np.integer):
+        return True
+    return bool(
+        np.issubdtype(array.dtype, np.floating)
+        and np.all(np.isfinite(array))
+        and np.all(array == np.round(array))
+    )
+
+
+def _integer_ids(values: pd.Series | pd.Index, column: str, what: str) -> np.ndarray:
+    """Ids as int64; integral floats are accepted, anything else is refused."""
+
+    array = np.asarray(values)
+    if _is_integral(array):
+        return array.astype(np.int64, copy=False)
+    raise ValueError(
+        f"{what} ids in {column!r} must be integers; they are {array.dtype}. Number "
+        f"them, e.g. table[{column!r}] = pd.factorize(table[{column!r}])[0], and keep "
+        "the same numbering for every dataset."
+    )
+
+
+def _per_scenario(
+    values: pd.Series, column: str, scenario_index: np.ndarray, n_scenarios: int
+) -> np.ndarray:
+    """One integer per scenario from a column that must be constant within each."""
+
+    array = np.asarray(values)
+    if not _is_integral(array):
+        raise ValueError(
+            f"Stratum column {column!r} must hold integers (e.g. the number of "
+            f"outages, or bin numbers); it holds {array.dtype}."
+        )
+    array = array.astype(np.int64)
+    first = np.zeros(n_scenarios, dtype=np.int64)
+    first[scenario_index[::-1]] = array[::-1]
+    varying = np.flatnonzero(array != first[scenario_index])
+    if varying.size:
+        raise ValueError(
+            f"Stratum column {column!r} takes different values within a scenario "
+            f"(in {len(np.unique(scenario_index[varying])):,} scenarios): a stratum "
+            "describes the whole scenario, e.g. its number of outages."
+        )
+    return first
+
+
+def _aligned_embeddings(
+    embeddings: pd.DataFrame | np.ndarray, scenario_ids: np.ndarray, scenario: str
+) -> np.ndarray:
+    """One embedding row per scenario of `scenario_ids`, in that order."""
+
+    if not isinstance(embeddings, pd.DataFrame):
+        array = np.asarray(embeddings, dtype=FLOAT32_DTYPE)
+        if array.ndim != 2 or array.shape[0] != len(scenario_ids):
+            raise ValueError(
+                f"An embeddings array must have one row per scenario: expected "
+                f"({len(scenario_ids)}, d), got {array.shape}. Pass a DataFrame indexed "
+                "by scenario id to align them by id instead."
+            )
+        return array
+    table = (
+        embeddings.set_index(scenario) if scenario in embeddings.columns else embeddings
+    )
+    ids = _integer_ids(
+        table.index,
+        "the index" if table.index.name is None else str(table.index.name),
+        "Scenario",
+    )
+    if len(np.unique(ids)) != len(ids):
+        raise ValueError(
+            "The embeddings have more than one row for some scenarios. Pool them to "
+            "one vector per scenario first, e.g. embeddings.groupby('scenario').mean() "
+            "for per-bus embeddings."
+        )
+    position = pd.Index(ids).get_indexer(scenario_ids)
+    if (position < 0).any():
+        missing = scenario_ids[position < 0]
+        raise ValueError(
+            f"The embeddings have no row for {len(missing):,} scenario(s) of the table, "
+            f"e.g. {missing[:5].tolist()}."
+        )
+    try:
+        return np.ascontiguousarray(table.to_numpy(dtype=FLOAT32_DTYPE)[position])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Every embedding column must be numeric (one column per dimension)."
+        ) from exc
 
 
 # (n + 1) * q is computed in floating point; absorb rounding so that an exact

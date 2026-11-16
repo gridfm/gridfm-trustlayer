@@ -7,7 +7,13 @@ include breaking changes; they are listed under **Changed**.
 
 ## [Unreleased]
 
-Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**.
+Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**. And a path for models outside GridFM: a guide, a table loader and input checks.
+
+### Added
+- **Using trustlayer with your own data**: a guide for any model, from a table of predictions and true values to calibrated bounds and their coverage, with the mistakes to avoid. It is a page of the documentation and ships with the package: `gridfm_trustlayer guide` prints it (`--path`: its location), for you or an AI coding assistant. Its example runs as a test.
+- `ChannelSet.from_frame`: a `ChannelSet` from a long table, one row per scenario and element, with optional validity, strata and per-scenario embeddings aligned by scenario id. Absent rows and NaN values are marked invalid; duplicated rows, non-integer ids and strata that vary within a scenario are refused with a message.
+- `check_inputs` (and `InputCheck`): checks the data before fitting, or new scenarios against a fitted calibrator, and says what to fix: misaligned or differently ordered scenarios and elements, missing variables or strata, NaN, missing or constant embeddings, a different embedding width (errors); NaN values marked valid, strata too small for a finite bound, strata absent from the calibration data (warnings).
+- `llms.txt` at the root of the documentation site, an index for AI assistants, and `AGENTS.md` in the repository.
 
 ### Changed
 - **`numba` is now a dependency.** The kernel's bandwidth solve and weighted quantiles run as compiled loops, spread over the calibrator's threads. On IEEE-118 (20,000 calibration scenarios in five outage strata, 20,000 test scenarios, voltages and line loading) the kernel part of `apply` and `calibrate` went from 9.2 s to 0.8 s on a 12-core laptop. The code is compiled on first use and cached, once per installation.

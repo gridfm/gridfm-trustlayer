@@ -14,10 +14,11 @@ Where things are:
 
 | Path | Contents |
 | --- | --- |
-| `gridfm_trustlayer/conformal/` | the two calibrators and the bandwidth tuning |
+| `gridfm_trustlayer/conformal/` | the two calibrators, the bandwidth tuning, and the input checks (`inputs.py`); the kernel's compiled loops are in `_kernel_jit.py` (numba) |
 | `gridfm_trustlayer/io/` | loaders for predictions, ground truth and embeddings; partitioned parquet; artifacts |
 | `gridfm_trustlayer/screening.py` | the status rule (within limits, uncertain, violation) |
-| `gridfm_trustlayer/parallel.py` | process pools for the bandwidth tuning and, on request, blocks of scenarios |
+| `gridfm_trustlayer/parallel.py` | process pools for blocks of scenarios (on request), and thread counts |
+| `gridfm_trustlayer/guide/own_data.md` | the guide to using trustlayer with your own data, printed by `gridfm_trustlayer guide` and included in the docs |
 | `gridfm_trustlayer/cli/main.py` | the argument parser and the dispatch to the commands |
 | `gridfm_trustlayer/cli/{compute,calibrate,screen,apply}.py` | one module per command |
 | `gridfm_trustlayer/cli/common.py` | helpers shared by the commands |

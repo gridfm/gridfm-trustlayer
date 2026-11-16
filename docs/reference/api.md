@@ -18,7 +18,13 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ::: gridfm_trustlayer.ChannelSet
     options:
-      members: false
+      members: [from_frame]
+
+::: gridfm_trustlayer.check_inputs
+
+::: gridfm_trustlayer.InputCheck
+    options:
+      members: [ok, raise_for_errors]
 
 ::: gridfm_trustlayer.PredictionSet
     options:
