@@ -5,9 +5,11 @@ All notable changes to this project are documented here. The format follows
 [semantic versioning](https://semver.org/). Before 1.0, minor versions may
 include breaking changes; they are listed under **Changed**.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-16
 
 Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**. And a path for models outside GridFM: a guide, a table loader, input checks, one object to fit, apply and save the bounds of buses and lines, results as tables, coverage and screening reports, and an example notebook.
+
+Upgrading from 0.1.1: `numba` is a new dependency and pyarrow must be 16.1 or later; with `n_eff_target: auto`, `n_jobs` now counts threads. Artifacts work both ways: 0.2.0 loads those of 0.1.1, and 0.1.1 loads those of 0.2.0, including the files `TrustLayer` saves.
 
 ### Added
 - **Using trustlayer with your own data**: a guide for any model, from a table of predictions and true values to calibrated bounds and their coverage, with the mistakes to avoid. It is a page of the documentation and ships with the package: `gridfm_trustlayer guide` prints it (`--path`: its location), for you or an AI coding assistant. Its example runs as a test.
@@ -17,7 +19,7 @@ Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage repo
 - `coverage_report` and `screening_report`: the tables of `calibrate` and `screen` from Python, for any `ChannelSet`s and intervals: coverage and width per stratum (or per element); violations caught, missed and falsely flagged, status counts and each scenario's status. On the CLI's outputs they give the same numbers as `coverage_by_stratum.csv`, and, with the CLI's 1e-6 tolerance added to the limits, as `status_by_stratum.csv` and `scenarios.csv`.
 - `OutageStrata` and `LoadBins`: the CLI's `n_outages`, `outage_type` and `system_load_bin` from your own in-service flags and loads, learned on the calibration set; `from_frame` takes their results as strata (a Series indexed by scenario id). Fitted on DataFrames, `OutageStrata` matches later columns by label.
 - `TrustLayer`: one calibrator per `ChannelSet` (e.g. buses and lines) fitted with the same settings, new data sent to the calibrator of its variables, and everything saved in one `.trustlayer` file with the definitions of the strata, so that new scenarios get their strata as at fit after `TrustLayer.load` (which also reads the CLI's artifacts). It checks the data with `check_inputs` and raises its errors; `n_eff_target="auto"` tunes the kernel for all sets at once. The file stays readable by `load_interval_artifacts`, also of 0.1.1.
-- `KernelFallbackWarning`: `KernelIntervalCalibrator.predict_intervals`, `predict_intervals_jointly` and `tune_n_eff_target(s)` warn when at least half of the scenarios fall back to the stratum quantiles, i.e. the kernel barely changes the bounds; the message says whether strata are missing from the calibration data or the calibration scenarios are too far away in the embedding, and what to try. Real runs fall back in 0 to 5% of the scenarios. `compute` prints the tuning case as a note (`BandwidthTuningResult.fallback_note`); the CLI's commands do not raise the warning.
+- `KernelFallbackWarning`: `KernelIntervalCalibrator.predict_intervals`, `predict_intervals_jointly` and `tune_n_eff_target(s)` warn when at least half of the scenarios fall back to the stratum quantiles, i.e. the kernel barely changes the bounds; the message says whether strata are missing from the calibration data or the calibration scenarios are too far away in the embedding, and what to try. On case24, the CLI's kernel runs fall back in 0 to 5% of the scenarios. `compute` prints the tuning case as a note (`BandwidthTuningResult.fallback_note`); the CLI's commands do not raise the warning.
 - Limits that differ per element: `screening_report`, `to_frame` and `classify_status` take a limit per element (a Series or dict by element id, or an array; NaN for no limit) as well as a number.
 - A notebook, `examples/notebooks/own_model.ipynb`: the whole workflow with a model outside GridFM (a ridge regression in numpy) on the demo's IEEE 14-bus contingencies, including kernel bounds for a model without embeddings. It runs as a test.
 - `llms.txt` at the root of the documentation site, an index for AI assistants, and `AGENTS.md` in the repository.
@@ -163,5 +165,6 @@ First public release.
 - `tuning.n_eff_range` without a whole number in it (e.g. `[1.5, 1.7]`) gave a candidate outside the range; it is now rejected.
 - `pred_bins` errors named `system_load_bin`.
 
+[0.2.0]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.2.0
 [0.1.1]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.1.0

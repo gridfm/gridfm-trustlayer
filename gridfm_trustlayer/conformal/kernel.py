@@ -53,9 +53,9 @@ ARTIFACT_VERSION = "trustlayer_kernel_interval_v1"
 DEFAULT_K_NN = 20
 
 # Warn when at least this share of the scenarios falls back to the stratum
-# quantiles: the kernel then barely changes the bounds. Real runs fall back in
-# 0 to 5% of the scenarios (strata absent from the calibration data, or a few
-# scenarios far from every calibration scenario).
+# quantiles: the kernel then barely changes the bounds. The kernel runs on
+# case24 fall back in 0 to 5% of the scenarios (strata absent from the
+# calibration data, or a few scenarios far from every calibration scenario).
 FALLBACK_WARNING_SHARE = 0.5
 
 
