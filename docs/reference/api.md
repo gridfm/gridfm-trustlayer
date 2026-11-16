@@ -4,6 +4,10 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ## Calibrators
 
+::: gridfm_trustlayer.TrustLayer
+    options:
+      members: [fit, predict_intervals, variables, diagnostics, save, load]
+
 ::: gridfm_trustlayer.NaiveIntervalCalibrator
     options:
       members: [fit, predict_intervals]
@@ -13,6 +17,10 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
       members: [fit, predict_intervals, diagnostics]
 
 ::: gridfm_trustlayer.conformal.kernel.predict_intervals_jointly
+
+::: gridfm_trustlayer.KernelFallbackWarning
+    options:
+      members: false
 
 ## Data containers
 
@@ -43,6 +51,8 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 ::: gridfm_trustlayer.LoadBins
     options:
       members: [fit, assign]
+
+::: gridfm_trustlayer.strata.strata_from_dict
 
 ## Loading GridFM files
 
@@ -85,6 +95,10 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 ::: gridfm_trustlayer.conformal.tuning.TuningOptions
     options:
       members: false
+
+::: gridfm_trustlayer.conformal.tuning.BandwidthTuningResult
+    options:
+      members: [summary, selected_fallback_share, fallback_note]
 
 ## Config builder
 

@@ -18,6 +18,7 @@ Where things are:
 | `gridfm_trustlayer/io/` | loaders for predictions, ground truth and embeddings; partitioned parquet; artifacts |
 | `gridfm_trustlayer/screening.py` | the status rule (within limits, uncertain, violation) |
 | `gridfm_trustlayer/evaluation.py`, `strata.py` | coverage and screening reports from Python; strata from in-service flags and loads |
+| `gridfm_trustlayer/layer.py` | `TrustLayer`: several calibrators fitted, applied and saved as one |
 | `gridfm_trustlayer/parallel.py` | process pools for blocks of scenarios (on request), and thread counts |
 | `gridfm_trustlayer/guide/own_data.md` | the guide to using trustlayer with your own data, printed by `gridfm_trustlayer guide` and included in the docs |
 | `gridfm_trustlayer/cli/main.py` | the argument parser and the dispatch to the commands |

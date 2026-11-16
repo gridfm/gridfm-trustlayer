@@ -109,6 +109,7 @@ def test_empirical_coverage_meets_target() -> None:
     assert coverage >= 0.9
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 def test_low_effective_sample_size_falls_back_to_stratum_quantiles() -> None:
     # n_eff can never reach this threshold, so every scenario must fall back.
     calibrator, predictions = _fit(n_eff_min=1e9)
@@ -356,6 +357,7 @@ def test_n_eff_bandwidth_hits_its_target() -> None:
     np.testing.assert_allclose(n_eff, 120.0, rtol=5e-3)
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 def test_n_eff_bandwidth_is_invariant_to_embedding_width() -> None:
     """The point of `bandwidth: n_eff`: k_nn drifts with dimension, n_eff does not."""
 

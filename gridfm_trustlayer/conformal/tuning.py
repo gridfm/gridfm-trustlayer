@@ -40,6 +40,7 @@ holding (K-1)/K of the calibration data carries over to the final fit on all of 
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,7 +50,9 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.conformal.calibrator import DEFAULT_SPARSE_STRATA, ChannelSet
 from gridfm_trustlayer.conformal.kernel import (
+    FALLBACK_WARNING_SHARE,
     SUPPORTED_DISTANCES,
+    KernelFallbackWarning,
     KernelIntervalCalibrator,
     _predict_targets,
 )
@@ -219,6 +222,30 @@ class BandwidthTuningResult:
             "candidates": self.candidates.to_dict(orient="records"),
         }
 
+    @property
+    def selected_fallback_share(self) -> float:
+        """Share of held-out scenarios that fell back at the chosen setting.
+
+        NaN when no candidate was chosen (uniform weights).
+        """
+
+        chosen = self.candidates[self.candidates["selected"]]
+        return float(chosen["fallback_share"].iloc[0]) if len(chosen) else math.nan
+
+    def fallback_note(self, name: str = "") -> str | None:
+        """Why the chosen setting is nearly the element method, when it is."""
+
+        share = self.selected_fallback_share
+        if not share >= FALLBACK_WARNING_SHARE:
+            return None
+        return (
+            f"kernel tuning{f' ({name})' if name else ''}: at the chosen "
+            f"n_eff_target = {self.selected_n_eff_target:g}, {share:.0%} of the "
+            "held-out scenarios fall back to the stratum quantiles, so the bounds "
+            "are nearly those of the element method: the kernel does not localize "
+            "usefully on this embedding (see fallback_share per candidate)."
+        )
+
 
 def candidate_settings(
     options: TuningOptions, default_distance: str
@@ -322,7 +349,7 @@ def tune_n_eff_target(
     shares the kernel work between them.
     """
 
-    return tune_n_eff_targets(
+    result = _tune_n_eff_targets(
         {"": (predictions, ground_truth, channel_names)},
         alpha=alpha,
         strat=strat,
@@ -336,6 +363,8 @@ def tune_n_eff_target(
         sparse_strata=sparse_strata,
         n_jobs=n_jobs,
     )[""]
+    _warn_fallback(result, "")
+    return result
 
 
 def tune_n_eff_targets(
@@ -362,7 +391,54 @@ def tune_n_eff_targets(
     once, and each candidate's bandwidths once, for all of them. Every result
     equals that of `tune_n_eff_target` on its family alone. The other
     arguments are those of `tune_n_eff_target`.
+
+    Warns:
+        KernelFallbackWarning: For a family whose chosen setting falls back to
+            the stratum quantiles in at least half of the held-out scenarios.
     """
+
+    results = _tune_n_eff_targets(
+        families,
+        alpha=alpha,
+        strat=strat,
+        embedding_pooling=embedding_pooling,
+        distance=distance,
+        n_eff_min=n_eff_min,
+        options=options,
+        groups=groups,
+        system_load_n_bins=system_load_n_bins,
+        system_load_bin_edges=system_load_bin_edges,
+        sparse_strata=sparse_strata,
+        n_jobs=n_jobs,
+    )
+    for name, result in results.items():
+        _warn_fallback(result, name)
+    return results
+
+
+def _warn_fallback(result: BandwidthTuningResult, name: str) -> None:
+    note = result.fallback_note(name)
+    if note is not None:
+        # Two frames up: the caller of tune_n_eff_target(s).
+        warnings.warn(note[0].upper() + note[1:], KernelFallbackWarning, stacklevel=3)
+
+
+def _tune_n_eff_targets(
+    families: Mapping[str, tuple[ChannelSet, ChannelSet, Sequence[str]]],
+    *,
+    alpha: float,
+    strat: str | None = None,
+    embedding_pooling: str = "mean",
+    distance: str = "euclidean",
+    n_eff_min: float = 5.0,
+    options: TuningOptions | None = None,
+    groups: np.ndarray | None = None,
+    system_load_n_bins: int | None = None,
+    system_load_bin_edges: np.ndarray | None = None,
+    sparse_strata: str = DEFAULT_SPARSE_STRATA,
+    n_jobs: int | None = None,
+) -> dict[str, BandwidthTuningResult]:
+    """`tune_n_eff_targets` without the warning (the CLI prints the note instead)."""
 
     options = options or TuningOptions()
     for predictions, _, _ in families.values():
@@ -389,7 +465,7 @@ def tune_n_eff_targets(
         for predictions, _, _ in families.values()
     ):
         return {
-            name: tune_n_eff_targets({name: family}, **shared)[name]
+            name: _tune_n_eff_targets({name: family}, **shared)[name]
             for name, family in families.items()
         }
 

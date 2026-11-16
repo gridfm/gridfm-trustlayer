@@ -74,6 +74,7 @@ def calibration() -> tuple[ChannelSet, ChannelSet]:
     return _channel_set(strata, seed=1), _channel_set(strata, seed=2)
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 @pytest.mark.parametrize("method", ["element", "kernel"])
 def test_sparse_and_unseen_strata_get_infinite_bounds_when_asked(
     calibration, method
@@ -89,6 +90,7 @@ def test_sparse_and_unseen_strata_get_infinite_bounds_when_asked(
     assert calibrator.sparse_strata_counts() == {"Vm": {2: N_ELEMENTS}}
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 @pytest.mark.parametrize("method", ["element", "kernel"])
 def test_pooled_sparse_strata_use_the_quantile_of_all_scenarios(
     calibration, method
@@ -115,6 +117,7 @@ def test_pooled_sparse_strata_use_the_quantile_of_all_scenarios(
     np.testing.assert_array_equal(upper[0], default_upper[0])
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 @pytest.mark.parametrize("method", ["element", "kernel"])
 def test_pooled_is_the_default(calibration, method) -> None:
     predictions, truth = calibration
@@ -141,6 +144,7 @@ def test_pooled_is_the_default(calibration, method) -> None:
     assert np.isfinite(lower).all() and np.isfinite(upper).all()
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 def test_kernel_marks_an_unseen_stratum_as_a_fallback(calibration) -> None:
     calibrator = _fit("kernel", "infinite", *calibration)
     calibrator.predict_intervals(_channel_set(np.array([1, 3]), seed=3))

@@ -27,7 +27,7 @@ from gridfm_trustlayer.cli.config import (
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import (
     KernelIntervalCalibrator,
-    predict_intervals_jointly,
+    _predict_jointly,
 )
 from gridfm_trustlayer.io import (
     GroundTruthSet,
@@ -212,7 +212,8 @@ def _predict_all(
     ]
     intervals: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
     if kernel:
-        joint = predict_intervals_jointly(
+        # Without the KernelFallbackWarning: the end-of-run notes report it.
+        joint = _predict_jointly(
             [cast(KernelIntervalCalibrator, calibrators[kind]) for kind in kernel],
             [applications[kind] for kind in kernel],
         )

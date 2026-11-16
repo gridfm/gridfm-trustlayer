@@ -5,6 +5,7 @@ The CLI covers the usual workflow from parquet files. The Python API exposes the
 ```python title="Public API"
 from gridfm_trustlayer import (
     ChannelSet,  # aligned (scenario x entity) arrays
+    TrustLayer,  # several sets of variables fitted, applied and saved as one
     NaiveIntervalCalibrator,  # cp_type: element
     KernelIntervalCalibrator,  # cp_type: kernel
     check_inputs,  # checks the data for the calibrators
@@ -169,7 +170,7 @@ element  coverage easy 1.00, hard 0.80 | width easy 0.051, hard 0.051
 kernel   coverage easy 0.95, hard 0.90 | width easy 0.027, hard 0.066
 ```
 
-Both reach about 90% overall, but `element` gives every scenario the same margin: easy scenarios are over-covered and hard ones under-covered. The kernel adapts the margin to each scenario and gets much closer to 90% in both groups. After `predict_intervals`, `kernel.diagnostics` holds the per-scenario `n_eff`, `kernel_bandwidth_sq` and `kernel_fallback` arrays ([what they mean](kernel.md#checking-that-it-works)).
+Both reach about 90% overall, but `element` gives every scenario the same margin: easy scenarios are over-covered and hard ones under-covered. The kernel adapts the margin to each scenario and gets much closer to 90% in both groups. After `predict_intervals`, `kernel.diagnostics` holds the per-scenario `n_eff`, `kernel_bandwidth_sq` and `kernel_fallback` arrays ([what they mean](kernel.md#checking-that-it-works)). When at least half of the scenarios fall back to the stratum quantiles, so that the bounds are nearly those of `element`, `predict_intervals` raises a `KernelFallbackWarning` that says why and what to try; the tuning below raises it too when the setting it chooses falls back that often.
 
 The keyword arguments mirror the config keys: `bandwidth`, `n_eff_target`, `k_nn`, `n_eff_min`, `distance` and `strat`. In practice, embeddings come from `load_scenario_embeddings`, which reads graphkit's embeddings parquet and pools it per scenario.
 
@@ -236,6 +237,28 @@ lower, upper = calibrator.predict_intervals(test_predicted)["Vm"]
 `load_predictions` applies task-specific corrections: for `PowerFlow`, the predictions of the known set-points are replaced by their values (`Vm` at PV buses, `Va` at the reference bus), as graphkit's evaluation does, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). Their residuals are then zero; the `valid_masks` above leave them out of the fit, which is what the CLI does. Without them, a bus's bounds shrink in the scenarios where it is not PV (e.g. its generator is out). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, with the formula of datakit's branch-flow routine (datakit itself is not needed). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
 
 ## Saving and loading
+
+`TrustLayer` fits one calibrator per `ChannelSet` with the same settings, sends new data to the calibrator of its variables, and saves them in one file together with the definitions of the strata (`OutageStrata`, `LoadBins`):
+
+```python title="Buses and lines together"
+from gridfm_trustlayer import TrustLayer
+
+layer = TrustLayer.fit(
+    [buses, lines],  # calibration predictions
+    [bus_truth, line_truth],
+    alpha=0.1,
+    strat="n_outages",
+    strata={"n_outages": outage_strata},
+    method="kernel",
+    n_eff_target="auto",  # tuned for both sets at once
+)
+layer.save("layer.trustlayer")
+
+layer = TrustLayer.load("layer.trustlayer")  # also reads a CLI artifact
+bounds = layer.predict_intervals([new_buses, new_lines])  # {variable: (lower, upper)}
+```
+
+[Using trustlayer with your own data](own-data.md#5-buses-and-lines-together-and-saving) shows it on an example. A single calibrator can also be saved on its own:
 
 ```python title="Artifacts"
 from gridfm_trustlayer import load_interval_artifact, save_interval_artifact

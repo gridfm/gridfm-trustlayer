@@ -10,12 +10,14 @@ scenarios, so that a scenario gets the same stratum whatever data it comes with:
 
 Inputs are `(n_scenarios, n_elements)` in-service arrays, or wide DataFrames
 indexed by scenario id (then the results are Series with the same index, ready
-for `ChannelSet.from_frame(..., strata={...})`).
+for `ChannelSet.from_frame(..., strata={...})`). Both are saved with a
+`TrustLayer`, to compute the same strata for new scenarios later.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -33,14 +35,22 @@ class OutageStrata:
     the scenario but in service in at least one calibration scenario, so
     elements never in service (e.g. a line not built yet) are not outages.
 
+    Fitted on DataFrames, it keeps their column labels as element ids, and the
+    columns of later DataFrames are matched by label; arrays must have the
+    same columns, in the same order, as at fit.
+
     Attributes:
         branches: Which branches count, `(n_branches,)`.
         generators: Which generators count, `(n_generators,)`, or None when
             fitted on branches only.
+        branch_ids: The branch column labels when fitted on a DataFrame.
+        generator_ids: The generator column labels when fitted on a DataFrame.
     """
 
     branches: np.ndarray
     generators: np.ndarray | None = None
+    branch_ids: np.ndarray | None = None
+    generator_ids: np.ndarray | None = None
 
     @classmethod
     def fit(
@@ -61,6 +71,8 @@ class OutageStrata:
             generators=None
             if generator_in_service is None
             else _ever(generator_in_service, "generator_in_service"),
+            branch_ids=_labels(branch_in_service),
+            generator_ids=_labels(generator_in_service),
         )
 
     def n_outages(
@@ -94,8 +106,9 @@ class OutageStrata:
         branch_in_service: np.ndarray | pd.DataFrame,
         generator_in_service: np.ndarray | pd.DataFrame | None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        branch = _flags(branch_in_service, "branch_in_service")
-        _check_width(branch, self.branches, "branches")
+        branch = _fitted_flags(
+            branch_in_service, self.branches, self.branch_ids, "branches"
+        )
         branch_out = (~branch & self.branches).sum(axis=1).astype(np.int64)
         if generator_in_service is None:
             if self.generators is not None:
@@ -108,14 +121,43 @@ class OutageStrata:
                 "Fitted without generators: fit again with generator_in_service "
                 "to count generator outages."
             )
-        generator = _flags(generator_in_service, "generator_in_service")
-        _check_width(generator, self.generators, "generators")
+        generator = _fitted_flags(
+            generator_in_service, self.generators, self.generator_ids, "generators"
+        )
         if generator.shape[0] != branch.shape[0]:
             raise ValueError(
                 f"branch_in_service has {branch.shape[0]} scenarios and "
                 f"generator_in_service {generator.shape[0]}."
             )
         return branch_out, (~generator & self.generators).sum(axis=1).astype(np.int64)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly form, as saved with a `TrustLayer`."""
+
+        return {
+            "kind": "outages",
+            "branches": self.branches.tolist(),
+            "generators": None if self.generators is None else self.generators.tolist(),
+            "branch_ids": None if self.branch_ids is None else self.branch_ids.tolist(),
+            "generator_ids": None
+            if self.generator_ids is None
+            else self.generator_ids.tolist(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OutageStrata:
+        """The inverse of `to_dict`."""
+
+        def optional(key: str, dtype: Any = None) -> np.ndarray | None:
+            value = data.get(key)
+            return None if value is None else np.asarray(value, dtype=dtype)
+
+        return cls(
+            branches=np.asarray(data["branches"], dtype=bool),
+            generators=optional("generators", bool),
+            branch_ids=optional("branch_ids"),
+            generator_ids=optional("generator_ids"),
+        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -146,6 +188,30 @@ class LoadBins:
         if isinstance(system_load, pd.Series):
             return pd.Series(bins, index=system_load.index, name="system_load_bin")
         return bins
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly form, as saved with a `TrustLayer`."""
+
+        return {"kind": "load_bins", "edges": self.edges.tolist()}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LoadBins:
+        """The inverse of `to_dict`; the edges come back exactly."""
+
+        return cls(edges=np.asarray(data["edges"], dtype=np.float32))
+
+
+def strata_from_dict(data: dict[str, Any]) -> OutageStrata | LoadBins:
+    """An `OutageStrata` or `LoadBins` from its `to_dict` form."""
+
+    kind = data.get("kind")
+    if kind == "outages":
+        return OutageStrata.from_dict(data)
+    if kind == "load_bins":
+        return LoadBins.from_dict(data)
+    raise ValueError(
+        f"Unknown strata kind {kind!r}; expected 'outages' or 'load_bins'."
+    )
 
 
 def percentile_edges(values: np.ndarray, n_bins: int) -> np.ndarray:
@@ -197,6 +263,35 @@ def _ever(values: np.ndarray | pd.DataFrame, name: str) -> np.ndarray:
     """Elements in service in at least one scenario."""
 
     return np.asarray(_flags(values, name).any(axis=0), dtype=bool)
+
+
+def _labels(values: np.ndarray | pd.DataFrame | None) -> np.ndarray | None:
+    return np.asarray(values.columns) if isinstance(values, pd.DataFrame) else None
+
+
+def _fitted_flags(
+    values: np.ndarray | pd.DataFrame,
+    fitted: np.ndarray,
+    ids: np.ndarray | None,
+    what: str,
+) -> np.ndarray:
+    """In-service flags in the columns of the fit (matched by label when known)."""
+
+    name = "branch_in_service" if what == "branches" else "generator_in_service"
+    if isinstance(values, pd.DataFrame) and ids is not None:
+        columns = pd.Index(values.columns)
+        missing = pd.Index(ids).difference(columns)
+        unknown = columns.difference(pd.Index(ids))
+        if len(missing) or len(unknown):
+            raise ValueError(
+                f"The {what} of {name} differ from those of the fit: "
+                f"{len(missing)} missing (e.g. {missing[:3].tolist()}), "
+                f"{len(unknown)} not seen at fit (e.g. {unknown[:3].tolist()})."
+            )
+        values = values.loc[:, list(ids)]
+    flags = _flags(values, name)
+    _check_width(flags, fitted, what)
+    return flags
 
 
 def _check_width(flags: np.ndarray, fitted: np.ndarray, what: str) -> None:

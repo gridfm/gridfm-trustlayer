@@ -186,6 +186,7 @@ def _kernel_diagnostics(width: int, valid: np.ndarray) -> dict[str, np.ndarray]:
     return calibrator.diagnostics
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 def test_kernel_n_eff_is_reported_for_wide_embeddings() -> None:
     # Far apart in 512 dimensions, the weights underflow in float32 (and the
     # level is out of reach, so the bounds fall back); the reported n_eff is
@@ -194,6 +195,7 @@ def test_kernel_n_eff_is_reported_for_wide_embeddings() -> None:
     np.testing.assert_allclose(diagnostics["n_eff"], 40.0, rtol=1e-4)
 
 
+@pytest.mark.filterwarnings("ignore::gridfm_trustlayer.KernelFallbackWarning")
 def test_a_known_value_does_not_make_a_scenario_fall_back() -> None:
     # Element 1 is a set-point: valid in a few calibration scenarios only, too
     # few to reach the level, and known (no interval) in every test scenario,

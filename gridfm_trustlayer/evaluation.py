@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from gridfm_trustlayer.conformal.calibrator import ChannelSet, _limits
+from gridfm_trustlayer.conformal.calibrator import ChannelSet, Limit, _limits
 from gridfm_trustlayer.screening import ELEMENT_STATUSES, status_codes
 from gridfm_trustlayer.strata import OUTAGE_TYPES
 
@@ -151,7 +151,7 @@ class ScreeningReport:
 def screening_report(
     predictions: Sets,
     intervals: Intervals,
-    limits: Mapping[str, Mapping[str, float]],
+    limits: Mapping[str, Mapping[str, Limit]],
     *,
     true_values: Sets | None = None,
     strat: str | None = None,
@@ -171,7 +171,9 @@ def screening_report(
             list of `ChannelSet`s such as `[buses, lines]`.
         intervals: `{variable: (lower, upper)}` from `predict_intervals`.
         limits: Per variable to screen, e.g. `{"line_loading": {"upper": 1.0},
-            "Vm": {"lower": 0.95, "upper": 1.05}}`.
+            "Vm": {"lower": 0.95, "upper": 1.05}}`. A limit can also differ per
+            element: a Series (or dict) by element id, or an array in the order
+            of the element ids; NaN means no limit.
         true_values: The true values, to count caught, missed and false alarms
             (a list in the same order when `predictions` is one).
         strat: A stratum column of `predictions` to report per stratum.
@@ -192,7 +194,7 @@ def screening_report(
     alarm_rows: list[dict[str, object]] = []
     for name, bounds in limits.items():
         data, truth_set = holders[name]
-        limit = _limits(bounds, name)
+        limit = _limits(bounds, name, data.entity_ids)
         low = limit.get("lower_limit", math.nan)
         high = limit.get("upper_limit", math.nan)
         point = np.asarray(data.channels[name], dtype=float)
@@ -222,11 +224,8 @@ def screening_report(
         if strat is not None:
             frame[strat] = np.asarray(data.scenario_columns[strat])[rows]
         if truth is not None:
-            beyond = np.zeros(truth.shape, dtype=bool)
-            if not math.isnan(high):
-                beyond |= truth > high
-            if not math.isnan(low):
-                beyond |= truth < low
+            # A comparison with a NaN limit is False: no limit on that side.
+            beyond = (truth > high) | (truth < low)
             frame["truth"] = beyond[rows, columns]
             for method, codes in (("interval", interval_codes), ("point", point_codes)):
                 alarm = codes > 0

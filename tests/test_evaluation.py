@@ -311,3 +311,38 @@ def test_to_frame_refuses_limits_it_cannot_apply() -> None:
         predictions.to_frame(intervals, limits={"y": {"upper": 1.0}})
     with pytest.raises(ValueError, match="take 'lower'"):
         predictions.to_frame(intervals, limits={"x": {"high": 1.0}})
+
+
+# ------------------------------------------------------------------ per-element limits
+
+
+def test_limits_can_differ_per_element() -> None:
+    predictions, true_values, intervals = _screening_data()
+    lines, line_truth = predictions[0], true_values[0]
+    # Line 10 rated 0.65 (its bounds 0.5-0.8 cross it), line 20 without a limit.
+    per_line = pd.Series({20: np.nan, 10: 0.65})
+
+    for limit in (per_line, {10: 0.65, 20: np.nan}, np.array([0.65, np.nan])):
+        report = screening_report(
+            lines,
+            {"x": intervals["x"]},
+            {"x": {"upper": limit}},
+            true_values=line_truth,
+        )
+        assert report.scenarios["x_status"].tolist() == ["uncertain"] * 3
+
+    frame = lines.to_frame({"x": intervals["x"]}, limits={"x": {"upper": per_line}})
+    assert frame["x_status"].tolist() == ["uncertain", "within_limits"] * 3
+    assert frame["x_point_status"].tolist() == ["within_limits"] * 6
+
+
+def test_per_element_limits_must_cover_every_element() -> None:
+    predictions, _, intervals = _screening_data()
+    lines = predictions[0]
+
+    with pytest.raises(ValueError, match="no value for 1 element"):
+        lines.to_frame(intervals, limits={"x": {"upper": pd.Series({10: 1.0})}})
+    with pytest.raises(ValueError, match="one value per element"):
+        lines.to_frame(intervals, limits={"x": {"upper": np.ones(5)}})
+    with pytest.raises(ValueError, match="not numeric"):
+        lines.to_frame(intervals, limits={"x": {"upper": "high"}})

@@ -158,7 +158,7 @@ line_status = classify_status(lower, upper, upper_limit=1.0)
 scenario = scenario_status(line_status, axis=1)  # secure, uncertain or insecure
 ```
 
-See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files. With your own model's outputs in a table, start from [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): `ChannelSet.from_frame` builds the arrays, `check_inputs` says what to fix, and `coverage_report`, `screening_report` and `to_frame` give the results as tables; the notebook [`examples/notebooks/own_model.ipynb`](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/own_model.ipynb) does it all with a model outside GridFM. The same guide ships with the package, for you or an AI coding assistant: `gridfm_trustlayer guide` prints it.
+See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files. With your own model's outputs in a table, start from [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): `ChannelSet.from_frame` builds the arrays, `check_inputs` says what to fix, `TrustLayer` fits, applies and saves the bounds of buses and lines together, and `coverage_report`, `screening_report` and `to_frame` give the results as tables; the notebook [`examples/notebooks/own_model.ipynb`](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/own_model.ipynb) does it all with a model outside GridFM. The same guide ships with the package, for you or an AI coding assistant: `gridfm_trustlayer guide` prints it.
 
 ## Documentation
 

@@ -36,13 +36,25 @@ def test_own_model_notebook_runs_and_its_claims_hold(tmp_path) -> None:
     )
 
     # check_inputs: only the expected warning (the reference bus is never PQ).
-    assert printed.count("No problems found.") == 3
+    assert printed.count("No problems found.") == 1
     warnings = re.findall(r"^warning: .*$", printed, flags=re.MULTILINE)
     expected = (
         "warning: Vm: 1 elements have no valid calibration value (e.g. ids [0]): "
         "they get no finite bound."
     )
     assert warnings == [expected]
+
+    # No KernelFallbackWarning, and no warning from trustlayer's code. (numpy 2.2
+    # with Apple's Accelerate may flag the example model's own matrix products.)
+    stderr = "\n".join(
+        output.get("text", "")
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        for output in cell.outputs
+        if output.get("name") == "stderr"
+    )
+    assert "KernelFallbackWarning" not in stderr
+    assert "gridfm_trustlayer" not in stderr
 
     # Section 6: SCP covers 90%; KCP is close to it, with narrower bounds.
     for variable in ("Vm", "line_loading"):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -252,7 +252,7 @@ class ChannelSet:
         *,
         scenario: str = "scenario",
         entity: str | None = None,
-        limits: Mapping[str, Mapping[str, float]] | None = None,
+        limits: Mapping[str, Mapping[str, Limit]] | None = None,
     ) -> pd.DataFrame:
         """The data back as a long table, one row per scenario and element.
 
@@ -267,10 +267,12 @@ class ChannelSet:
             entity: Name of the element column; `entity_name` when not given.
             limits: Operating limits per variable, e.g.
                 `{"line_loading": {"upper": 1.0}, "Vm": {"lower": 0.95,
-                "upper": 1.05}}` (needs `intervals`). Adds `<variable>_status`,
-                the status of the interval, and `<variable>_point_status`, that
-                of the value alone, by the rule of `classify_status`
-                (within_limits, uncertain, violation).
+                "upper": 1.05}}` (needs `intervals`). A limit can also differ
+                per element: a Series (or dict) by element id, or an array in
+                the order of `entity_ids`; NaN means no limit. Adds
+                `<variable>_status`, the status of the interval, and
+                `<variable>_point_status`, that of the value alone, by the rule
+                of `classify_status` (within_limits, uncertain, violation).
 
         Returns:
             Columns `scenario`, the element column, the strata, and per
@@ -301,17 +303,23 @@ class ChannelSet:
             columns[f"{name}_valid"] = valid
             if intervals is None or name not in intervals:
                 continue
-            lower, upper = (np.asarray(bound).reshape(-1) for bound in intervals[name])
-            columns[f"{name}_lower"] = np.where(valid, lower, np.nan)
-            columns[f"{name}_upper"] = np.where(valid, upper, np.nan)
+            lower, upper = (np.asarray(bound, dtype=float) for bound in intervals[name])
+            if lower.shape != np.shape(values) or upper.shape != np.shape(values):
+                raise ValueError(
+                    f"The intervals of {name!r} have shape {lower.shape}; the "
+                    f"values {np.shape(values)}."
+                )
+            columns[f"{name}_lower"] = np.where(valid, lower.reshape(-1), np.nan)
+            columns[f"{name}_upper"] = np.where(valid, upper.reshape(-1), np.nan)
             if limits and name in limits:
-                bounds = _limits(limits[name], name)
-                point = columns[name].astype(float)
+                bounds = _limits(limits[name], name, self.entity_ids)
+                point = np.asarray(values, dtype=float)
                 for column, (low, high) in (
                     (f"{name}_status", (lower, upper)),
                     (f"{name}_point_status", (point, point)),
                 ):
                     statuses = classify_status(low, high, **bounds).astype(object)
+                    statuses = statuses.reshape(-1)
                     statuses[~valid] = None
                     columns[column] = statuses
         unknown = sorted(set(limits or {}) - set(intervals or {}))
@@ -320,15 +328,64 @@ class ChannelSet:
         return pd.DataFrame(columns)
 
 
-def _limits(bounds: Mapping[str, float], name: str) -> dict[str, float]:
-    """`{"lower_limit": ..., "upper_limit": ...}` from `{"lower": ..., "upper": ...}`."""
+Limit: TypeAlias = float | np.ndarray | pd.Series | Mapping[int, float]
+
+
+def _limits(
+    bounds: Mapping[str, Limit], name: str, entity_ids: np.ndarray
+) -> dict[str, float | np.ndarray]:
+    """`{"lower_limit": ..., "upper_limit": ...}` from `{"lower": ..., "upper": ...}`.
+
+    Each limit is a number, or one value per element: a Series or dict by
+    element id, or an array in the order of `entity_ids`.
+    """
 
     unknown = sorted(set(bounds) - {"lower", "upper"})
     if unknown or not bounds:
         raise ValueError(
             f"The limits of {name!r} take 'lower' and/or 'upper'; got {sorted(bounds)}."
         )
-    return {f"{side}_limit": float(value) for side, value in bounds.items()}
+    return {
+        f"{side}_limit": _limit_values(
+            value, f"the {side} limit of {name!r}", entity_ids
+        )
+        for side, value in bounds.items()
+    }
+
+
+def _limit_values(
+    value: Limit, what: str, entity_ids: np.ndarray
+) -> float | np.ndarray:
+    if isinstance(value, Mapping):
+        value = pd.Series(value, dtype=float)
+    if isinstance(value, pd.Series):
+        ids = _integer_ids(value.index, f"the index of {what}", "Element")
+        if len(np.unique(ids)) != len(ids):
+            raise ValueError(
+                f"{what.capitalize()} has more than one value per element."
+            )
+        position = pd.Index(ids).get_indexer(np.asarray(entity_ids))
+        if (position < 0).any():
+            missing = np.asarray(entity_ids)[position < 0]
+            raise ValueError(
+                f"{what.capitalize()} has no value for {len(missing):,} element(s), "
+                f"e.g. {missing[:5].tolist()}; use NaN for no limit."
+            )
+        values = value.to_numpy(dtype=float)[position]
+    else:
+        try:
+            values = np.asarray(value, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{what.capitalize()} is not numeric.") from exc
+        if values.ndim == 0:
+            return float(values)
+        if values.shape != (len(entity_ids),):
+            raise ValueError(
+                f"{what.capitalize()} has shape {values.shape}: give a number, a "
+                "Series by element id, or one value per element in the order of "
+                f"entity_ids ({len(entity_ids)})."
+            )
+    return values
 
 
 def _require_frame_columns(frame: pd.DataFrame, columns: Iterable[str]) -> None:

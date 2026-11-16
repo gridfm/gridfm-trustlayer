@@ -30,6 +30,13 @@ from gridfm_trustlayer.conformal.kernel import (
 )
 from tests.conformal_reference import weighted_conformal_offsets
 
+# These tests compare bounds with their definitions on small synthetic data,
+# where most scenarios fall back to the stratum quantiles; that is checked,
+# so the KernelFallbackWarning is expected here.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::gridfm_trustlayer.KernelFallbackWarning"
+)
+
 
 def _bank(
     residuals: np.ndarray,

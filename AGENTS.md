@@ -2,7 +2,7 @@
 
 ## Using trustlayer with a user's own model and data
 
-Follow the guide in `gridfm_trustlayer/guide/own_data.md` (printed by `gridfm_trustlayer guide`; online at <https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/>): put the data in a long table, build the predictions and true values with `ChannelSet.from_frame`, run `check_inputs` and fix its errors, fit, and check the coverage on scenarios that were not used for calibration (`coverage_report`). `examples/notebooks/own_model.ipynb` is a complete example with a model outside GridFM.
+Follow the guide in `gridfm_trustlayer/guide/own_data.md` (printed by `gridfm_trustlayer guide`; online at <https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/>): put the data in a long table, build the predictions and true values with `ChannelSet.from_frame`, run `check_inputs` and fix its errors, fit (`TrustLayer` for buses and lines together, and to save the result), and check the coverage on scenarios that were not used for calibration (`coverage_report`). Do not silence a `KernelFallbackWarning`: it means the scenario vector does not work for the kernel method. `examples/notebooks/own_model.ipynb` is a complete example with a model outside GridFM.
 
 ## Working on this repository
 

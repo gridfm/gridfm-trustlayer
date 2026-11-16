@@ -4,8 +4,11 @@ The public Python API is re-exported here; import from the top-level package
 rather than from submodules, whose layout may change.
 
 Calibrators:
+    TrustLayer                calibrators of several sets of variables (e.g. buses and
+                              lines) fitted, applied and saved as one, with their strata
     NaiveIntervalCalibrator   stratified split-conformal intervals (``cp_type: element``)
-    KernelIntervalCalibrator  kernel-weighted conformal intervals (``cp_type: kernel``)
+    KernelIntervalCalibrator  kernel-weighted conformal intervals (``cp_type: kernel``);
+                              KernelFallbackWarning when most bounds are not localized
     ChannelSet                aligned (scenario x entity) arrays to calibrate;
                               from_frame builds them from a long table, to_frame
                               turns them, with their bounds, back into one
@@ -35,6 +38,7 @@ from gridfm_trustlayer.conformal import (
     NaiveIntervalCalibrator,
     check_inputs,
 )
+from gridfm_trustlayer.conformal.kernel import KernelFallbackWarning
 from gridfm_trustlayer.evaluation import (
     ScreeningReport,
     coverage_report,
@@ -53,6 +57,7 @@ from gridfm_trustlayer.io.artifact import (
     save_interval_artifact,
 )
 from gridfm_trustlayer.io.embeddings import load_scenario_embeddings
+from gridfm_trustlayer.layer import TrustLayer
 from gridfm_trustlayer.screening import classify_status, scenario_status
 from gridfm_trustlayer.strata import LoadBins, OutageStrata
 
@@ -60,12 +65,14 @@ __all__ = [
     "ChannelSet",
     "GroundTruthSet",
     "InputCheck",
+    "KernelFallbackWarning",
     "KernelIntervalCalibrator",
     "LoadBins",
     "NaiveIntervalCalibrator",
     "OutageStrata",
     "PredictionSet",
     "ScreeningReport",
+    "TrustLayer",
     "__version__",
     "check_inputs",
     "classify_status",

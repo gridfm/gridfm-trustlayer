@@ -104,9 +104,9 @@ Coverage comes first and width second, because a narrow interval is only useful 
 kernel tuning (line): n_eff_target = 600, distance = euclidean (narrowest eligible candidate; 6 candidates, grid search, 5 grouped folds). Report: trustlayer_outputs/kernel/n_eff_tuned_pf_kernel_tuning.csv
 ```
 
-When no candidate is eligible, the reason reads `no candidate met the coverage target: uniform weights (equivalent to element)`.
+When no candidate is eligible, the reason reads `no candidate met the coverage target: uniform weights (equivalent to element)`. When the chosen candidate falls back to the stratum quantiles in at least half of the held-out scenarios, a second line says so (`BandwidthTuningResult.fallback_note`); from Python, `tune_n_eff_target(s)` raise a `KernelFallbackWarning` instead.
 
-and writes two reports next to the artifact: `<artifact>_kernel_tuning.csv`, one row per candidate (coverage, worst margin to the target, relative width, fallback share, whether it was eligible and selected), and `<artifact>_kernel_tuning_details.csv`, every individual coverage check. The choice is also recorded in the artifact.
+It also writes two reports next to the artifact: `<artifact>_kernel_tuning.csv`, one row per candidate (coverage, worst margin to the target, relative width, fallback share, whether it was eligible and selected), and `<artifact>_kernel_tuning_details.csv`, every individual coverage check. The choice is also recorded in the artifact.
 
 ### Searching over the distance as well
 
@@ -163,7 +163,7 @@ Under `bandwidth: n_eff` the effective sample size is pinned to the target, so t
 | --- | --- |
 | `kcp_n_eff` | Effective number of calibration scenarios behind the bound. Close to the stratum size means the kernel barely localizes (≈ `element`). Under `bandwidth: n_eff` it equals the target by construction. |
 | `kcp_bandwidth_sq` | The bandwidth used. Large values mark regions of the embedding space with few calibration scenarios. |
-| `kcp_fallback` | `True` when the scenario fell back to the stratum quantile for at least one bus or line. A high share means the bandwidth is too small for the geometry: raise `n_eff_target` (or `k_nn`). |
+| `kcp_fallback` | `True` when the scenario fell back to the stratum quantile for at least one bus or line. A high share means the bandwidth is too small for the geometry: raise `n_eff_target` (or `k_nn`). The end-of-run notes give the share; from Python, `predict_intervals` raises a `KernelFallbackWarning` when it reaches half of the scenarios. |
 
 Then compare with an `element` run on the same data:
 

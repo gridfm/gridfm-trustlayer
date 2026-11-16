@@ -15,6 +15,7 @@ an explicit fallback rather than silently returning an over-optimistic bound.
 from __future__ import annotations
 
 import os
+import warnings
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -50,6 +51,26 @@ INT32_DTYPE = np.dtype(np.int32)
 ARTIFACT_VERSION = "trustlayer_kernel_interval_v1"
 
 DEFAULT_K_NN = 20
+
+# Warn when at least this share of the scenarios falls back to the stratum
+# quantiles: the kernel then barely changes the bounds. Real runs fall back in
+# 0 to 5% of the scenarios (strata absent from the calibration data, or a few
+# scenarios far from every calibration scenario).
+FALLBACK_WARNING_SHARE = 0.5
+
+
+class KernelFallbackWarning(UserWarning):
+    """Most scenarios got the stratum quantiles instead of kernel-weighted bounds.
+
+    Raised by `KernelIntervalCalibrator.predict_intervals`,
+    `predict_intervals_jointly` and the bandwidth tuning when at least half of
+    the scenarios fall back, which usually means the calibration scenarios are
+    too far from them in the embedding. The bounds stay valid: they are those
+    of the stratified (element) method. Silence it with
+    `warnings.simplefilter("ignore", KernelFallbackWarning)`.
+    """
+
+
 DEFAULT_N_EFF_MIN = 5.0
 
 DISTANCE_EUCLIDEAN = "euclidean"
@@ -461,7 +482,9 @@ class KernelIntervalCalibrator:
             Per-scenario diagnostics are available afterwards in `diagnostics`.
         """
 
-        return predict_intervals_jointly([self], [predictions])[0]
+        intervals = _predict_jointly([self], [predictions])[0]
+        _warn_if_fallback(self, predictions, stacklevel=2)
+        return intervals
 
     @property
     def diagnostics(self) -> dict[str, np.ndarray]:
@@ -716,7 +739,23 @@ def predict_intervals_jointly(
 
     Returns:
         One `{variable: (lower, upper)}` per calibrator, in order.
+
+    Warns:
+        KernelFallbackWarning: For a calibrator whose bounds fall back to the
+            stratum quantiles in at least half of the scenarios.
     """
+
+    results = _predict_jointly(calibrators, predictions)
+    for calibrator, prediction_set in zip(calibrators, predictions, strict=True):
+        _warn_if_fallback(calibrator, prediction_set, stacklevel=2)
+    return results
+
+
+def _predict_jointly(
+    calibrators: Sequence[KernelIntervalCalibrator],
+    predictions: Sequence[PredictionSet | ChannelSet],
+) -> list[dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """`predict_intervals_jointly` without the warning (the CLI notes it instead)."""
 
     if len(calibrators) != len(predictions):
         raise ValueError("Pass one prediction set per calibrator.")
@@ -732,6 +771,50 @@ def predict_intervals_jointly(
         unit.calibrator._pooled = pooled
         results.append(intervals)
     return results
+
+
+def _warn_if_fallback(
+    calibrator: KernelIntervalCalibrator,
+    predictions: PredictionSet | ChannelSet,
+    *,
+    stacklevel: int,
+) -> None:
+    """Warn when most scenarios of the last prediction fell back (see the class)."""
+
+    flags = np.asarray(calibrator.diagnostics.get("kernel_fallback", ()), dtype=bool)
+    if flags.size == 0 or flags.mean() < FALLBACK_WARNING_SHARE:
+        return
+    absent = 0
+    if calibrator.strat is not None:
+        strata = _get_scenario_column(predictions, calibrator.strat)
+        absent = int((~np.isin(strata, calibrator.stratification_values)).sum())
+    message = (
+        f"Kernel bounds of {', '.join(calibrator.channel_names)}: "
+        f"{flags.mean():.0%} of the {flags.size:,} "
+        f"scenario{'s' if flags.size != 1 else ''} fall back to the "
+        "stratum quantiles (those of NaiveIntervalCalibrator) for at least one "
+        "value, so the kernel barely changes the bounds."
+    )
+    if absent:
+        message += (
+            f" {absent:,} of them are in strata absent from the calibration data."
+        )
+    if int(flags.sum()) > absent:
+        setting, larger = (
+            (f"n_eff_target={calibrator.n_eff_target:g}", "a larger n_eff_target")
+            if calibrator.bandwidth == BANDWIDTH_N_EFF
+            else (f"k_nn={calibrator.k_nn}", "a larger k_nn")
+        )
+        level = 1.0 - calibrator.alpha / 2.0
+        message += (
+            f" {'Otherwise, the' if absent else 'The'} calibration scenarios are "
+            f"too far from them in the embedding to weigh in at {setting}: their "
+            "kernel weights must sum to "
+            f"at least {level / (1.0 - level):.0f}, the scenario itself weighing 1. "
+            f"Try {larger}, or a scenario vector with fewer dimensions."
+        )
+    message += " Per scenario: diagnostics['kernel_fallback']."
+    warnings.warn(message, KernelFallbackWarning, stacklevel=stacklevel + 1)
 
 
 def _predict_targets(
@@ -1126,7 +1209,12 @@ def _squared_distances(
     """Blocked ``||a - b||^2`` via one GEMM, which BLAS runs multi-threaded."""
 
     block_sq = np.einsum("ij,ij->i", block, block)
-    distances = calibration @ block.T
+    # Apple's Accelerate BLAS (e.g. under numpy 2.2 on macOS) can leave
+    # floating-point flags set after a product of finite values, which numpy
+    # reports as "divide by zero encountered in matmul". The embeddings are
+    # checked to be finite, so the flags mean nothing here.
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        distances = calibration @ block.T
     distances *= -2.0
     distances += calibration_sq[:, None]
     distances = distances.T
@@ -1282,7 +1370,10 @@ def _tail_offsets(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """`_weighted_tail_offsets` with the float64 copy of the weights given."""
 
-    total = weights64 @ bank.valid
+    # Finite weights in [0, 1]: any floating-point flag comes from the BLAS
+    # (see `_squared_distances`).
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        total = weights64 @ bank.valid
     slack = total - level * (total + 1.0)
     reached = slack >= 0.0
     n_elements = bank.sorted_residuals.shape[0]

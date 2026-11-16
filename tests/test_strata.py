@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 import pytest
@@ -15,7 +17,7 @@ from gridfm_trustlayer.io.ground_truth import (
     _classify_outage_type,
     _count_reference_outages,
 )
-from gridfm_trustlayer.strata import OUTAGE_TYPES
+from gridfm_trustlayer.strata import OUTAGE_TYPES, strata_from_dict
 
 
 def _in_service(rng: np.random.Generator, n: int, width: int) -> np.ndarray:
@@ -160,3 +162,39 @@ def test_load_bins_keep_the_index_of_a_series_and_refuse_bad_loads() -> None:
         LoadBins.fit(np.ones(10), 4)
     with pytest.raises(ValueError, match="finite"):
         bins.assign(np.array([1.0, np.nan]))
+
+
+def test_outage_strata_match_frame_columns_by_label() -> None:
+    calibration = pd.DataFrame({7: [1, 1, 0], 3: [1, 0, 1], 5: [0, 0, 0]})
+    strata = OutageStrata.fit(calibration)
+
+    shuffled = calibration[[5, 7, 3]]
+    np.testing.assert_array_equal(strata.n_outages(shuffled), [0, 1, 1])
+    np.testing.assert_array_equal(strata.n_outages(calibration.to_numpy()), [0, 1, 1])
+    with pytest.raises(ValueError, match="1 missing"):
+        strata.n_outages(calibration[[7, 3]])
+    with pytest.raises(ValueError, match="1 not seen at fit"):
+        strata.n_outages(calibration.assign(**{"9": 1}))
+
+
+def test_strata_survive_a_json_round_trip() -> None:
+    branch = pd.DataFrame({"a": [1, 0], "b": [1, 1]}, index=[4, 5])
+    generator = pd.DataFrame({10: [1, 1], 11: [0, 1]}, index=[4, 5])
+    outages = OutageStrata.fit(branch, generator)
+    bins = LoadBins.fit(np.array([0.1, 0.7, 0.3, 0.9, 0.5], dtype=np.float32), 3)
+
+    for strata in (outages, bins):
+        restored = strata_from_dict(json.loads(json.dumps(strata.to_dict())))
+        assert type(restored) is type(strata)
+    restored_outages = strata_from_dict(json.loads(json.dumps(outages.to_dict())))
+    assert isinstance(restored_outages, OutageStrata)
+    np.testing.assert_array_equal(
+        restored_outages.n_outages(branch, generator),
+        outages.n_outages(branch, generator),
+    )
+    restored_bins = strata_from_dict(json.loads(json.dumps(bins.to_dict())))
+    assert isinstance(restored_bins, LoadBins)
+    np.testing.assert_array_equal(restored_bins.edges, bins.edges)
+    assert restored_bins.edges.dtype == np.float32
+    with pytest.raises(ValueError, match="Unknown strata kind"):
+        strata_from_dict({"kind": "weather"})

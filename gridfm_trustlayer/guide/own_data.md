@@ -119,7 +119,7 @@ print(
 )
 ```
 
-`check_inputs` prints `No problems found.`, or the errors to fix and the warnings to read (section 5). Fit both methods with 90% intervals (`alpha=0.1`, 5% per tail), stratified by the number of outages:
+`check_inputs` prints `No problems found.`, or the errors to fix and the warnings to read (section 6). Fit both methods with 90% intervals (`alpha=0.1`, 5% per tail), stratified by the number of outages:
 
 ```python
 settings = {"alpha": 0.1, "channel_names": ("line_loading",), "strat": "n_outages"}
@@ -198,9 +198,52 @@ interval        4417    4386      31          2903
 ['scenario', 'line', 'n_outages', 'line_loading', 'line_loading_valid', 'line_loading_lower', 'line_loading_upper', 'line_loading_status', 'line_loading_point_status']
 ```
 
-A value is `within_limits` when its whole interval is inside the limits, a `violation` when it is entirely beyond one and `uncertain` otherwise; the `point` rows judge the prediction alone. Here the bounds miss 31 of the 4,417 overloads, the point predictions 676. `report.scenarios` gives each scenario's status (`secure`, `uncertain` or `insecure`, the worst of its values). Pass the buses and the lines together, `screening_report([buses, lines], ...)`, for that status to cover both. Unlike the command-line tool, which widens the limits by 1e-6 to absorb rounding, the reports use the limits as given.
+A value is `within_limits` when its whole interval is inside the limits, a `violation` when it is entirely beyond one and `uncertain` otherwise; the `point` rows judge the prediction alone. Here the bounds miss 31 of the 4,417 overloads, the point predictions 676. `report.scenarios` gives each scenario's status (`secure`, `uncertain` or `insecure`, the worst of its values). Pass the buses and the lines together, `screening_report([buses, lines], ...)`, for that status to cover both. A limit can also differ per element, e.g. `{"Vm": {"lower": vmin, "upper": vmax}}` with `vmin` and `vmax` Series indexed by bus id (NaN: no limit). Unlike the command-line tool, which widens the limits by 1e-6 to absorb rounding, the reports use the limits as given.
 
-## 5. What `check_inputs` reports
+## 5. Buses and lines together, and saving
+
+The calibrators above handle one `ChannelSet` each. `TrustLayer` fits one per set with the same settings, sends new data to the calibrator of its variables, and saves them all in one file, with the definitions of the strata:
+
+- `TrustLayer.fit([buses, lines], [bus_truth, line_truth], alpha=..., strat=..., method="element" or "kernel")`, then `predict_intervals([new_buses, new_lines])`;
+- `n_eff_target="auto"` chooses the kernel's `n_eff_target` by cross-validation on the calibration set, for all sets at once;
+- `strata={"n_outages": outage_strata}` saves an `OutageStrata` or `LoadBins` with the layer: after `TrustLayer.load`, `layer.strata["n_outages"].n_outages(...)` gives the strata of new scenarios as at fit.
+
+With the example's lines alone:
+
+```python
+import tempfile
+from pathlib import Path
+
+from gridfm_trustlayer import TrustLayer
+
+layer = TrustLayer.fit(
+    calibration_predictions,
+    calibration_true,
+    alpha=0.1,
+    strat="n_outages",
+    method="kernel",
+    n_eff_target="auto",  # cross-validated on the calibration set
+)
+print(f"n_eff_target: {layer.tuning['line_loading'].selected_n_eff_target:g}")
+with tempfile.TemporaryDirectory() as folder:
+    layer.save(Path(folder) / "lines.trustlayer")
+    loaded = TrustLayer.load(Path(folder) / "lines.trustlayer")
+bounds = loaded.predict_intervals(test_predictions)
+lower, upper = bounds["line_loading"]
+covered = (lower <= truth) & (truth <= upper)
+print(
+    f"coverage {covered[valid].mean():.3f}, mean width {(upper - lower)[valid].mean():.3f}"
+)
+```
+
+```text title="Output"
+n_eff_target: 200
+coverage 0.924, mean width 0.141
+```
+
+The cross-validation picks the `n_eff_target` used above, so the bounds are those of `kcp`. `fit` runs `check_inputs` first and raises its errors. The file is an ordinary `.trustlayer` artifact, and `TrustLayer.load` also reads those of the command-line tool.
+
+## 6. What `check_inputs` reports
 
 `check_inputs(predictions, true_values, strat=..., alpha=..., kernel=...)` before fitting, and `check_inputs(new_predictions, calibrator=...)` before predicting, return an `InputCheck` with:
 
@@ -209,15 +252,15 @@ A value is `within_limits` when its whole interval is inside the limits, a `viol
 
 `check.ok` is `True` when there are no errors, and `check.raise_for_errors()` raises them.
 
-## 6. Choosing a method
+## 7. Choosing a method
 
 - **`NaiveIntervalCalibrator` (SCP)** needs only predictions and true values. When calibration and new scenarios are exchangeable, its intervals cover with probability at least `1 - alpha` within each stratum, for any calibration size. An element needs at least `ceil(2 / alpha) - 1` valid calibration values in a stratum (19 at `alpha=0.1`) for a finite bound there.
-- **`KernelIntervalCalibrator` (KCP)** also needs one vector per scenario, and adapts the margin to each scenario. Choose `n_eff_target` with `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`, a cross-validation on the calibration set alone, or check the coverage on held-out data. A model without embeddings can use any vector that describes the scenario (e.g. its loads and outages); whether it separates easy from hard scenarios has to be checked the same way.
+- **`KernelIntervalCalibrator` (KCP)** also needs one vector per scenario, and adapts the margin to each scenario. Choose `n_eff_target` with `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`, a cross-validation on the calibration set alone, or check the coverage on held-out data. A model without embeddings can use any vector that describes the scenario (e.g. its loads and outages, or its own predictions); whether it separates easy from hard scenarios has to be checked the same way. When the calibration scenarios are too far from the new ones in that vector (often with many dimensions), most scenarios fall back to the stratum quantiles, the bounds of SCP: `predict_intervals` and the tuning then raise a `KernelFallbackWarning`, and `diagnostics["kernel_fallback"]` marks those scenarios.
 - `alpha` is two-sided: `alpha=0.1` gives 90% intervals with 5% per tail. For a one-sided screen at level `1 - a`, fit with `alpha = 2 * a` and use the upper bound.
 
-## 7. Next steps
+## 8. Next steps
 
 - The notebook `examples/notebooks/own_model.ipynb`: the whole workflow with a model of your own on real data, including the kernel method with a model that has no embeddings.
 - The status rule alone: `classify_status` and `scenario_status` apply it to any bounds.
-- Saving and loading a fitted calibrator: `save_interval_artifact` and `load_interval_artifact`.
+- Saving and loading a single calibrator: `save_interval_artifact` and `load_interval_artifact`.
 - More: the Python API guide (<https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/>), the API reference (<https://gridfm.github.io/gridfm-trustlayer/reference/api/>) and the kernel method (<https://gridfm.github.io/gridfm-trustlayer/user-guide/kernel/>).

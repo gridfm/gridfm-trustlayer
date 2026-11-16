@@ -8,7 +8,9 @@ Two on-disk encodings are supported:
   written as a compressed ``npz`` container with a ``__meta__`` JSON entry.
 
 Both encodings are read back through the same two loader functions; the format
-is detected from the file's magic bytes rather than its extension.
+is detected from the file's magic bytes rather than its extension. A bundle can
+also carry extra top-level entries next to `artifacts` (a `TrustLayer` saves its
+`strata` there); readers that do not know them ignore them.
 """
 
 from __future__ import annotations
@@ -55,6 +57,19 @@ def save_interval_artifacts(
 ) -> None:
     """Persist one or more interval calibrators to a single artifact file."""
 
+    _write_artifact(calibrators, output_path, {})
+
+
+def _write_artifact(
+    calibrators: dict[str, IntervalCalibrator],
+    output_path: str | Path,
+    extras: dict[str, Any],
+) -> None:
+    """Write the calibrators, and `extras` as top-level entries of the bundle."""
+
+    reserved = sorted(set(extras) & {"version", "artifacts"})
+    if reserved:
+        raise ValueError(f"Extra artifact entries may not be named {reserved}.")
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not calibrators:
@@ -65,10 +80,10 @@ def save_interval_artifacts(
         isinstance(calibrator, KernelIntervalCalibrator)
         for calibrator in calibrators.values()
     ):
-        _save_kernel_artifacts(calibrators, path)
+        _save_kernel_artifacts(calibrators, path, extras)
         return
 
-    if len(calibrators) == 1:
+    if len(calibrators) == 1 and not extras:
         payload: dict[str, object] = next(iter(calibrators.values())).to_dict()
     else:
         payload = {
@@ -76,6 +91,7 @@ def save_interval_artifacts(
             "artifacts": {
                 name: calibrator.to_dict() for name, calibrator in calibrators.items()
             },
+            **extras,
         }
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True),
@@ -118,6 +134,14 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, IntervalCalibrator]
         (`line_loading`).
     """
 
+    return _read_artifact(artifact_path)[0]
+
+
+def _read_artifact(
+    artifact_path: str | Path,
+) -> tuple[dict[str, IntervalCalibrator], dict[str, Any]]:
+    """The calibrators of a `.trustlayer` file, and its extra top-level entries."""
+
     path = Path(artifact_path)
     raw = path.read_bytes()
     if raw[: len(_NPZ_MAGIC)] == _NPZ_MAGIC:
@@ -143,12 +167,19 @@ def load_interval_artifacts(artifact_path: str) -> dict[str, IntervalCalibrator]
             raise ValueError(
                 "Interval artifact bundle must contain a non-empty 'artifacts' mapping."
             )
-        return {
+        loaded: dict[str, IntervalCalibrator] = {
             str(name): NaiveIntervalCalibrator.from_dict(dict(calibrator_data))
             for name, calibrator_data in artifacts.items()
         }
+        return loaded, _extras(data)
     calibrator = NaiveIntervalCalibrator.from_dict(data)
-    return {_artifact_key(calibrator): calibrator}
+    return {_artifact_key(calibrator): calibrator}, {}
+
+
+def _extras(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value for key, value in data.items() if key not in ("version", "artifacts")
+    }
 
 
 def is_interval_artifact(path: str | Path) -> bool:
@@ -199,10 +230,12 @@ def load_ground_truth_reference(artifact_path: str) -> dict[str, Any] | None:
 def _save_kernel_artifacts(
     calibrators: dict[str, IntervalCalibrator],
     path: Path,
+    extras: dict[str, Any],
 ) -> None:
     meta: dict[str, object] = {
         "version": KERNEL_BUNDLE_VERSION,
         "artifacts": {},
+        **extras,
     }
     arrays: dict[str, np.ndarray] = {}
     for name, calibrator in calibrators.items():
@@ -224,7 +257,9 @@ def _save_kernel_artifacts(
         np.savez_compressed(handle, **cast(dict[str, Any], arrays))
 
 
-def _load_kernel_artifacts(raw: bytes) -> dict[str, IntervalCalibrator]:
+def _load_kernel_artifacts(
+    raw: bytes,
+) -> tuple[dict[str, IntervalCalibrator], dict[str, Any]]:
     with np.load(io.BytesIO(raw), allow_pickle=False) as payload:
         if _META_KEY not in payload:
             raise ValueError(
@@ -254,7 +289,7 @@ def _load_kernel_artifacts(raw: bytes) -> dict[str, IntervalCalibrator]:
                 loaded[str(name)] = KernelIntervalCalibrator.from_dict(entry, arrays)
             else:
                 loaded[str(name)] = NaiveIntervalCalibrator.from_dict(entry)
-    return loaded
+    return loaded, _extras(meta)
 
 
 def _artifact_key(calibrator: IntervalCalibrator) -> str:

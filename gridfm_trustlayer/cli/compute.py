@@ -62,7 +62,7 @@ from gridfm_trustlayer.conformal.kernel import (
 from gridfm_trustlayer.conformal.tuning import (
     BandwidthTuningResult,
     TuningOptions,
-    tune_n_eff_targets,
+    _tune_n_eff_targets,
 )
 from gridfm_trustlayer.io import (
     load_ground_truth,
@@ -250,7 +250,7 @@ def _run_compute(args: argparse.Namespace) -> None:
         # Cross-validated on the calibration data only; the test set is untouched.
         # The families share their folds and the kernel work.
         first_predictions = next(iter(families.values()))[0]
-        tuning_results = tune_n_eff_targets(
+        tuning_results = _tune_n_eff_targets(
             {
                 target_kind: (predictions, ground_truth, variable_groups[target_kind])
                 for target_kind, (predictions, ground_truth, _) in families.items()
@@ -563,6 +563,9 @@ def _write_tuning_reports(
             f"{result.options.folds} {'grouped ' if result.grouped else ''}folds). "
             f"Report: {summary_path}"
         )
+        note = result.fallback_note(kind)
+        if note is not None:
+            print(note)
 
 
 def _compute_prediction_bin_edges(
