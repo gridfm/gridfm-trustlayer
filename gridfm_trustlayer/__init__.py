@@ -7,8 +7,13 @@ Calibrators:
     NaiveIntervalCalibrator   stratified split-conformal intervals (``cp_type: element``)
     KernelIntervalCalibrator  kernel-weighted conformal intervals (``cp_type: kernel``)
     ChannelSet                aligned (scenario x entity) arrays to calibrate;
-                              ChannelSet.from_frame builds them from a long table
+                              from_frame builds them from a long table, to_frame
+                              turns them, with their bounds, back into one
     check_inputs              checks the data for the calibrators (InputCheck)
+
+Evaluation and strata (your own data):
+    coverage_report, screening_report (ScreeningReport)  the tables of calibrate and screen
+    OutageStrata, LoadBins    n_outages / outage_type and load bins, fitted on calibration
 
 Your own model and data: ``gridfm_trustlayer guide`` prints the guide.
 
@@ -30,6 +35,11 @@ from gridfm_trustlayer.conformal import (
     NaiveIntervalCalibrator,
     check_inputs,
 )
+from gridfm_trustlayer.evaluation import (
+    ScreeningReport,
+    coverage_report,
+    screening_report,
+)
 from gridfm_trustlayer.io import (
     GroundTruthSet,
     PredictionSet,
@@ -44,18 +54,23 @@ from gridfm_trustlayer.io.artifact import (
 )
 from gridfm_trustlayer.io.embeddings import load_scenario_embeddings
 from gridfm_trustlayer.screening import classify_status, scenario_status
+from gridfm_trustlayer.strata import LoadBins, OutageStrata
 
 __all__ = [
     "ChannelSet",
     "GroundTruthSet",
     "InputCheck",
     "KernelIntervalCalibrator",
+    "LoadBins",
     "NaiveIntervalCalibrator",
+    "OutageStrata",
     "PredictionSet",
+    "ScreeningReport",
     "__version__",
     "check_inputs",
     "classify_status",
     "compute_line_loading",
+    "coverage_report",
     "load_ground_truth",
     "load_interval_artifact",
     "load_interval_artifacts",
@@ -63,4 +78,5 @@ __all__ = [
     "load_scenario_embeddings",
     "save_interval_artifact",
     "scenario_status",
+    "screening_report",
 ]

@@ -7,12 +7,16 @@ include breaking changes; they are listed under **Changed**.
 
 ## [Unreleased]
 
-Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**. And a path for models outside GridFM: a guide, a table loader and input checks.
+Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**. And a path for models outside GridFM: a guide, a table loader, input checks, results as tables, coverage and screening reports, and an example notebook.
 
 ### Added
 - **Using trustlayer with your own data**: a guide for any model, from a table of predictions and true values to calibrated bounds and their coverage, with the mistakes to avoid. It is a page of the documentation and ships with the package: `gridfm_trustlayer guide` prints it (`--path`: its location), for you or an AI coding assistant. Its example runs as a test.
 - `ChannelSet.from_frame`: a `ChannelSet` from a long table, one row per scenario and element, with optional validity, strata and per-scenario embeddings aligned by scenario id. Absent rows and NaN values are marked invalid; duplicated rows, non-integer ids and strata that vary within a scenario are refused with a message.
 - `check_inputs` (and `InputCheck`): checks the data before fitting, or new scenarios against a fitted calibrator, and says what to fix: misaligned or differently ordered scenarios and elements, missing variables or strata, NaN, missing or constant embeddings, a different embedding width (errors); NaN values marked valid, strata too small for a finite bound, strata absent from the calibration data (warnings).
+- `ChannelSet.to_frame`: the bounds back as a long table, one row per scenario and element, with each value's status against operating limits (and that of the prediction alone), to join onto your own data.
+- `coverage_report` and `screening_report`: the tables of `calibrate` and `screen` from Python, for any `ChannelSet`s and intervals: coverage and width per stratum (or per element); violations caught, missed and falsely flagged, status counts and each scenario's status. On the CLI's outputs they give the same numbers as `coverage_by_stratum.csv`, and, with the CLI's 1e-6 tolerance added to the limits, as `status_by_stratum.csv` and `scenarios.csv`.
+- `OutageStrata` and `LoadBins`: the CLI's `n_outages`, `outage_type` and `system_load_bin` from your own in-service flags and loads, learned on the calibration set; `from_frame` takes their results as strata (a Series indexed by scenario id).
+- A notebook, `examples/notebooks/own_model.ipynb`: the whole workflow with a model outside GridFM (a ridge regression in numpy) on the demo's IEEE 14-bus contingencies, including kernel bounds for a model without embeddings. It runs as a test.
 - `llms.txt` at the root of the documentation site, an index for AI assistants, and `AGENTS.md` in the repository.
 
 ### Changed

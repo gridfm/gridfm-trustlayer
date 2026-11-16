@@ -32,9 +32,10 @@ def test_guide_example_runs_and_prints_its_documented_output(capsys) -> None:
     for block in re.findall(r"```python\n(.*?)```", text, flags=re.DOTALL):
         exec(compile(block, str(GUIDE), "exec"), namespace)  # noqa: S102
     printed = capsys.readouterr().out.splitlines()
-    documented = re.search(r'```text title="Output"\n(.*?)```', text, flags=re.DOTALL)
-    assert documented is not None
-    expected = documented.group(1).strip().splitlines()
+    documented = re.findall(r'```text title="Output"\n(.*?)```', text, flags=re.DOTALL)
+    assert documented
+    # The Output blocks, in order, hold everything the code blocks print.
+    expected = [line for block in documented for line in block.rstrip().splitlines()]
 
     assert len(printed) == len(expected)
     for got, want in zip(printed, expected, strict=True):

@@ -6,7 +6,8 @@ To use trustlayer with your own model and data, read the guide first. After `pip
 
 ## Guides
 
-- [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): a long table of predictions and true values, `ChannelSet.from_frame`, `check_inputs`, fitting, checking coverage, mistakes to avoid
+- [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): a long table of predictions and true values, `ChannelSet.from_frame`, strata (`OutageStrata`, `LoadBins`), `check_inputs`, fitting, `coverage_report`, `screening_report`, `to_frame`, mistakes to avoid
+- [Notebook: your own model on real data](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/own_model.ipynb): the whole workflow with a ridge regression on IEEE 14-bus contingencies, including the kernel method without embeddings
 - [Python API](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/): the calibrators on NumPy arrays, screening statuses, artifacts, bandwidth tuning
 - [Kernel-weighted calibration](https://gridfm.github.io/gridfm-trustlayer/user-guide/kernel/): embeddings, bandwidth, tuning, diagnostics
 - [Quick start](https://gridfm.github.io/gridfm-trustlayer/getting-started/quickstart/): the command-line workflow with GridFM data

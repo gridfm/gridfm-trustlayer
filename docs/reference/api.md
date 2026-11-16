@@ -18,7 +18,7 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ::: gridfm_trustlayer.ChannelSet
     options:
-      members: [from_frame]
+      members: [from_frame, to_frame]
 
 ::: gridfm_trustlayer.check_inputs
 
@@ -33,6 +33,16 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 ::: gridfm_trustlayer.GroundTruthSet
     options:
       members: false
+
+## Strata
+
+::: gridfm_trustlayer.OutageStrata
+    options:
+      members: [fit, n_outages, outage_type]
+
+::: gridfm_trustlayer.LoadBins
+    options:
+      members: [fit, assign]
 
 ## Loading GridFM files
 
@@ -52,7 +62,15 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ::: gridfm_trustlayer.load_interval_artifacts
 
-## Screening
+## Coverage and screening
+
+::: gridfm_trustlayer.coverage_report
+
+::: gridfm_trustlayer.screening_report
+
+::: gridfm_trustlayer.ScreeningReport
+    options:
+      members: false
 
 ::: gridfm_trustlayer.classify_status
 

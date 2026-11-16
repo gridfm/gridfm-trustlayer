@@ -51,6 +51,7 @@ from gridfm_trustlayer.io.parquet import (
     read_frame,
 )
 from gridfm_trustlayer.io.predictions import _predictions_from_frame
+from gridfm_trustlayer.strata import assign_bins, percentile_edges
 
 SCREEN_BOUND_TOLERANCE = 1e-6
 
@@ -1034,35 +1035,29 @@ def _compute_system_load_bin_edges(
     """Interior percentile edges of `n_bins` bins (also used for `pred_bins`)."""
 
     finite_load = np.asarray(system_load, dtype=np.float32)
-    finite_load = finite_load[np.isfinite(finite_load)]
-    if finite_load.size == 0:
+    if not np.isfinite(finite_load).any():
         raise ValueError(
             "Unable to derive system_load_bin strata because bus demand column 'Pd' is missing or invalid."
             if stratification == "system_load_bin"
             else f"Unable to derive {stratification} strata: no finite values."
         )
-    quantiles = np.linspace(0.0, 1.0, num=int(n_bins) + 1)
-    edges = np.quantile(finite_load, quantiles).astype(np.float32, copy=False)
-    interior_edges = np.unique(edges[1:-1])
-    assigned = _assign_system_load_bins(finite_load, interior_edges)
-    if np.unique(assigned).size < 2:
+    try:
+        return percentile_edges(finite_load, n_bins)
+    except ValueError as exc:
         raise ValueError(
             f"{stratification} stratification requires at least two distinct percentile bins."
-        )
-    return interior_edges.astype(np.float32, copy=True)
+        ) from exc
 
 
 def _assign_system_load_bins(
     system_load: np.ndarray,
     system_load_bin_edges: np.ndarray,
 ) -> np.ndarray:
-    values = np.asarray(system_load, dtype=np.float32)
-    if not np.all(np.isfinite(values)):
+    if not np.all(np.isfinite(np.asarray(system_load, dtype=np.float32))):
         raise ValueError(
             "system_load_bin stratification requires finite per-scenario system load values."
         )
-    edges = np.asarray(system_load_bin_edges, dtype=np.float32)
-    return np.searchsorted(edges, values, side="right").astype(np.int32, copy=False)
+    return assign_bins(system_load, system_load_bin_edges).astype(np.int32, copy=False)
 
 
 def _build_system_load_bin_labels(

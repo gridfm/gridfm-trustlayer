@@ -104,7 +104,7 @@ class ChannelSet:
         scenario: str = "scenario",
         entity_name: str = "bus",
         valid: Mapping[str, str] | str | None = None,
-        strata: Mapping[str, str] | Sequence[str] = (),
+        strata: Mapping[str, str | pd.Series] | Sequence[str] = (),
         embeddings: pd.DataFrame | np.ndarray | None = None,
     ) -> ChannelSet:
         """A `ChannelSet` from a long table: one row per scenario and element.
@@ -128,7 +128,9 @@ class ChannelSet:
                 values that are inputs of the model rather than predictions).
             strata: Columns used for stratification (e.g. the number of
                 outages), as a list or `{name: column}`: integers, the same for
-                every row of a scenario.
+                every row of a scenario. A value of the mapping can also be a
+                Series indexed by scenario id, e.g. from
+                `gridfm_trustlayer.OutageStrata` or `LoadBins`.
             embeddings: For `KernelIntervalCalibrator`: one vector per scenario,
                 as a DataFrame indexed by scenario id (or with the scenario
                 column) whose other columns are the dimensions, or an array
@@ -151,11 +153,16 @@ class ChannelSet:
             if isinstance(channels, Mapping)
             else {str(column): str(column) for column in channels}
         )
-        strata_columns = (
+        strata_sources: dict[str, str | pd.Series] = (
             dict(strata)
             if isinstance(strata, Mapping)
             else {str(column): str(column) for column in strata}
         )
+        strata_columns = {
+            name: source
+            for name, source in strata_sources.items()
+            if isinstance(source, str)
+        }
         valid_columns: dict[str, str] = (
             {}
             if valid is None
@@ -221,9 +228,11 @@ class ChannelSet:
                 masks[name] = mask
         scenario_columns = {
             name: _per_scenario(
-                frame[column], column, scenario_index, len(scenario_ids)
+                frame[source], source, scenario_index, len(scenario_ids)
             )
-            for name, column in strata_columns.items()
+            if isinstance(source, str)
+            else _series_per_scenario(source, name, scenario_ids)
+            for name, source in strata_sources.items()
         }
         return cls(
             scenario_ids=scenario_ids,
@@ -236,6 +245,90 @@ class ChannelSet:
             if embeddings is None
             else _aligned_embeddings(embeddings, scenario_ids, scenario),
         )
+
+    def to_frame(
+        self,
+        intervals: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        *,
+        scenario: str = "scenario",
+        entity: str | None = None,
+        limits: Mapping[str, Mapping[str, float]] | None = None,
+    ) -> pd.DataFrame:
+        """The data back as a long table, one row per scenario and element.
+
+        The inverse of `from_frame`, with the bounds added: merge the result
+        onto your own table on the scenario and element columns.
+
+        Args:
+            intervals: `{variable: (lower, upper)}`, e.g. from
+                `predict_intervals`; adds `<variable>_lower` and
+                `<variable>_upper`.
+            scenario: Name of the scenario column.
+            entity: Name of the element column; `entity_name` when not given.
+            limits: Operating limits per variable, e.g.
+                `{"line_loading": {"upper": 1.0}, "Vm": {"lower": 0.95,
+                "upper": 1.05}}` (needs `intervals`). Adds `<variable>_status`,
+                the status of the interval, and `<variable>_point_status`, that
+                of the value alone, by the rule of `classify_status`
+                (within_limits, uncertain, violation).
+
+        Returns:
+            Columns `scenario`, the element column, the strata, and per
+            variable its value, `<variable>_valid` and the columns above.
+            Invalid values get no bounds or status (their interval is the
+            value itself).
+        """
+
+        from gridfm_trustlayer.screening import classify_status
+
+        if limits and intervals is None:
+            raise ValueError("limits need intervals to classify.")
+        n_scenarios, n_entities = len(self.scenario_ids), len(self.entity_ids)
+        columns: dict[str, np.ndarray] = {
+            scenario: np.repeat(np.asarray(self.scenario_ids), n_entities),
+            entity or self.entity_name: np.tile(
+                np.asarray(self.entity_ids), n_scenarios
+            ),
+        }
+        for name, values in self.scenario_columns.items():
+            columns[name] = np.repeat(np.asarray(values), n_entities)
+        for name, values in self.channels.items():
+            valid = np.asarray(
+                self.valid_masks.get(name, np.ones(np.shape(values), dtype=bool)),
+                dtype=bool,
+            ).reshape(-1)
+            columns[name] = np.asarray(values).reshape(-1)
+            columns[f"{name}_valid"] = valid
+            if intervals is None or name not in intervals:
+                continue
+            lower, upper = (np.asarray(bound).reshape(-1) for bound in intervals[name])
+            columns[f"{name}_lower"] = np.where(valid, lower, np.nan)
+            columns[f"{name}_upper"] = np.where(valid, upper, np.nan)
+            if limits and name in limits:
+                bounds = _limits(limits[name], name)
+                point = columns[name].astype(float)
+                for column, (low, high) in (
+                    (f"{name}_status", (lower, upper)),
+                    (f"{name}_point_status", (point, point)),
+                ):
+                    statuses = classify_status(low, high, **bounds).astype(object)
+                    statuses[~valid] = None
+                    columns[column] = statuses
+        unknown = sorted(set(limits or {}) - set(intervals or {}))
+        if unknown:
+            raise ValueError(f"limits name variables without intervals: {unknown}.")
+        return pd.DataFrame(columns)
+
+
+def _limits(bounds: Mapping[str, float], name: str) -> dict[str, float]:
+    """`{"lower_limit": ..., "upper_limit": ...}` from `{"lower": ..., "upper": ...}`."""
+
+    unknown = sorted(set(bounds) - {"lower", "upper"})
+    if unknown or not bounds:
+        raise ValueError(
+            f"The limits of {name!r} take 'lower' and/or 'upper'; got {sorted(bounds)}."
+        )
+    return {f"{side}_limit": float(value) for side, value in bounds.items()}
 
 
 def _require_frame_columns(frame: pd.DataFrame, columns: Iterable[str]) -> None:
@@ -295,6 +388,32 @@ def _per_scenario(
             "describes the whole scenario, e.g. its number of outages."
         )
     return first
+
+
+def _series_per_scenario(
+    series: pd.Series, name: str, scenario_ids: np.ndarray
+) -> np.ndarray:
+    """One integer per scenario from a Series indexed by scenario id."""
+
+    ids = _integer_ids(series.index, f"the index of {name!r}", "Scenario")
+    if len(np.unique(ids)) != len(ids):
+        raise ValueError(
+            f"The stratum {name!r} has more than one value for some scenarios."
+        )
+    position = pd.Index(ids).get_indexer(scenario_ids)
+    if (position < 0).any():
+        missing = scenario_ids[position < 0]
+        raise ValueError(
+            f"The stratum {name!r} has no value for {len(missing):,} scenario(s) of "
+            f"the table, e.g. {missing[:5].tolist()}."
+        )
+    values = np.asarray(series)[position]
+    if not _is_integral(values):
+        raise ValueError(
+            f"The stratum {name!r} must hold integers (e.g. the number of outages, "
+            f"or bin numbers); it holds {values.dtype}."
+        )
+    return values.astype(np.int64)
 
 
 def _aligned_embeddings(

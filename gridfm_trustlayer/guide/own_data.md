@@ -6,6 +6,8 @@ Trustlayer adds calibrated bounds to the predictions of any model: a GridFM mode
 - the **predictions for new scenarios** (and, to check the coverage on test scenarios, their true values);
 - for the kernel method (`KernelIntervalCalibrator`), **one vector per scenario** that describes it, e.g. your model's embeddings averaged over the buses.
 
+The notebook [`examples/notebooks/own_model.ipynb`](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/own_model.ipynb) goes through every step with a simple regression model on real contingency scenarios of the IEEE 14-bus grid.
+
 This guide ships with the package: `gridfm_trustlayer guide` prints it and `gridfm_trustlayer guide --path` gives its location, so that you, or an AI coding assistant, can read the version that matches your installation. It is also online at <https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/>.
 
 ## 1. Put your data in a long table
@@ -24,6 +26,11 @@ One row per scenario and element (bus or line):
 For the kernel method, add a second table with one row per scenario: the scenario id as its index (or a `scenario` column) and one column per embedding dimension.
 
 Every scenario should list the same elements. An element that does not apply in a scenario (e.g. an out-of-service line) can be left out of the table or marked invalid: either way it is not used for fitting and gets no interval.
+
+Strata can also come from a table with one row per scenario. `ChannelSet.from_frame(..., strata={"n_outages": series})` takes a Series indexed by scenario id, such as those of two helpers that compute the command-line tool's strata:
+
+- `OutageStrata.fit(branch_in_service, generator_in_service)` on the calibration set, then `.n_outages(...)` or `.outage_type(...)` on any dataset. The inputs are in-service flags, one row per scenario and one column per line (or generator). An element counts as an outage when it is out of service but in service in some calibration scenario.
+- `LoadBins.fit(total_load, n_bins)` on the calibration set, then `.assign(total_load)`: percentile bins of the total load of each scenario.
 
 ## 2. Mistakes to avoid
 
@@ -112,7 +119,7 @@ print(
 )
 ```
 
-`check_inputs` prints `No problems found.`, or the errors to fix and the warnings to read (section 4). Fit both methods with 90% intervals (`alpha=0.1`, 5% per tail), stratified by the number of outages:
+`check_inputs` prints `No problems found.`, or the errors to fix and the warnings to read (section 5). Fit both methods with 90% intervals (`alpha=0.1`, 5% per tail), stratified by the number of outages:
 
 ```python
 settings = {"alpha": 0.1, "channel_names": ("line_loading",), "strat": "n_outages"}
@@ -156,7 +163,44 @@ KCP: coverage 0.924 (easy 0.944, hard 0.903), mean width 0.141
 
 SCP covers 90% overall, as guaranteed, but with one margin per line and stratum: easy scenarios are over-covered and hard ones under-covered. KCP weighs the calibration scenarios by their distance to each test scenario in the embedding, so its margins follow the difficulty of each scenario: it gets close to 90% in both groups, with narrower intervals on average. Its coverage is checked on test data, not guaranteed: here it is slightly above the target.
 
-## 4. What `check_inputs` reports
+## 4. Results as tables
+
+`coverage_report` gives the coverage and width per stratum (or per element, with `by_element=True`), as the command-line tool's `coverage_by_stratum.csv`. `screening_report` compares the bounds with operating limits: the violations caught, missed and falsely flagged when the true values are known, and the status of every scenario. `to_frame` returns the bounds and statuses as a long table, one row per scenario and element, to join back onto your own data:
+
+```python
+from gridfm_trustlayer import coverage_report, screening_report
+
+bounds = kcp.predict_intervals(test_predictions)
+coverage = coverage_report(
+    test_predictions, test_true, bounds, alpha=0.1, strat="n_outages"
+)
+print(coverage[["stratum", "coverage", "mean_width"]].round(3).to_string(index=False))
+
+limits = {"line_loading": {"upper": 1.0}}
+report = screening_report(test_predictions, bounds, limits, true_values=test_true)
+alarms = report.alarms[report.alarms["stratum"] == "all"]
+counts = ["method", "violations", "caught", "missed", "false_alarms"]
+print(alarms[counts].to_string(index=False))
+
+rows = test_predictions.to_frame(bounds, entity="line", limits=limits)
+print(list(rows.columns))
+```
+
+```text title="Output"
+    stratum  coverage  mean_width
+        all     0.924       0.141
+n_outages=1     0.920       0.071
+n_outages=2     0.925       0.142
+n_outages=3     0.928       0.213
+  method  violations  caught  missed  false_alarms
+interval        4417    4386      31          2903
+   point        4417    3741     676           607
+['scenario', 'line', 'n_outages', 'line_loading', 'line_loading_valid', 'line_loading_lower', 'line_loading_upper', 'line_loading_status', 'line_loading_point_status']
+```
+
+A value is `within_limits` when its whole interval is inside the limits, a `violation` when it is entirely beyond one and `uncertain` otherwise; the `point` rows judge the prediction alone. Here the bounds miss 31 of the 4,417 overloads, the point predictions 676. `report.scenarios` gives each scenario's status (`secure`, `uncertain` or `insecure`, the worst of its values). Pass the buses and the lines together, `screening_report([buses, lines], ...)`, for that status to cover both. Unlike the command-line tool, which widens the limits by 1e-6 to absorb rounding, the reports use the limits as given.
+
+## 5. What `check_inputs` reports
 
 `check_inputs(predictions, true_values, strat=..., alpha=..., kernel=...)` before fitting, and `check_inputs(new_predictions, calibrator=...)` before predicting, return an `InputCheck` with:
 
@@ -165,14 +209,15 @@ SCP covers 90% overall, as guaranteed, but with one margin per line and stratum:
 
 `check.ok` is `True` when there are no errors, and `check.raise_for_errors()` raises them.
 
-## 5. Choosing a method
+## 6. Choosing a method
 
 - **`NaiveIntervalCalibrator` (SCP)** needs only predictions and true values. When calibration and new scenarios are exchangeable, its intervals cover with probability at least `1 - alpha` within each stratum, for any calibration size. An element needs at least `ceil(2 / alpha) - 1` valid calibration values in a stratum (19 at `alpha=0.1`) for a finite bound there.
 - **`KernelIntervalCalibrator` (KCP)** also needs one vector per scenario, and adapts the margin to each scenario. Choose `n_eff_target` with `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`, a cross-validation on the calibration set alone, or check the coverage on held-out data. A model without embeddings can use any vector that describes the scenario (e.g. its loads and outages); whether it separates easy from hard scenarios has to be checked the same way.
 - `alpha` is two-sided: `alpha=0.1` gives 90% intervals with 5% per tail. For a one-sided screen at level `1 - a`, fit with `alpha = 2 * a` and use the upper bound.
 
-## 6. Next steps
+## 7. Next steps
 
-- Screening against limits: `classify_status` and `scenario_status` give the status of every value and scenario (within limits, uncertain, violation; secure, uncertain, insecure).
+- The notebook `examples/notebooks/own_model.ipynb`: the whole workflow with a model of your own on real data, including the kernel method with a model that has no embeddings.
+- The status rule alone: `classify_status` and `scenario_status` apply it to any bounds.
 - Saving and loading a fitted calibrator: `save_interval_artifact` and `load_interval_artifact`.
 - More: the Python API guide (<https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/>), the API reference (<https://gridfm.github.io/gridfm-trustlayer/reference/api/>) and the kernel method (<https://gridfm.github.io/gridfm-trustlayer/user-guide/kernel/>).

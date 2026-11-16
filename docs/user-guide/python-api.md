@@ -8,6 +8,10 @@ from gridfm_trustlayer import (
     NaiveIntervalCalibrator,  # cp_type: element
     KernelIntervalCalibrator,  # cp_type: kernel
     check_inputs,  # checks the data for the calibrators
+    coverage_report,  # coverage and width per stratum
+    screening_report,  # alarms and statuses against operating limits
+    OutageStrata,  # number of outages and outage type per scenario
+    LoadBins,  # percentile bins of the total load
     load_predictions,
     load_ground_truth,
     load_scenario_embeddings,
@@ -18,7 +22,7 @@ from gridfm_trustlayer import (
 )
 ```
 
-Every function and class is documented in the [API reference](../reference/api.md). With your own model's outputs in a table (one row per scenario and bus or line), start from [Using trustlayer with your own data](own-data.md): `ChannelSet.from_frame` builds the `ChannelSet`s below from it, and `check_inputs` checks them before fitting.
+Every function and class is documented in the [API reference](../reference/api.md). With your own model's outputs in a table (one row per scenario and bus or line), start from [Using trustlayer with your own data](own-data.md): `ChannelSet.from_frame` builds the `ChannelSet`s below from it, `check_inputs` checks them before fitting, and `to_frame` returns the bounds as a table. The notebook [`examples/notebooks/own_model.ipynb`](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/own_model.ipynb) runs the whole workflow with a model outside GridFM.
 
 ## Data: `ChannelSet`
 
@@ -96,6 +100,8 @@ Two conventions worth knowing:
 - **Too few calibration samples.** An element needs at least `ceil(2 / alpha) - 1` valid residuals (19 at `alpha=0.1`) in a stratum for a finite bound from that stratum. With fewer, or in a stratum absent from the calibration data, it uses its quantile over all strata (`sparse_strata="pooled"`, the default; `calibrator.pooled_masks` marks those entries after `predict_intervals`), or gets `+inf` / `-inf` with `fit(..., sparse_strata="infinite")`. Too few over all strata together always gives infinite bounds rather than a falsely narrow interval.
 
 `classify_status` and `scenario_status` apply the screening rule of the CLI to any bounds: a value is `within_limits` when its whole interval lies inside the limits, a `violation` when it lies entirely beyond a limit, and `uncertain` otherwise; a scenario takes the worst status of its values (`secure`, `uncertain`, `insecure`). Pass the prediction as both bounds, `classify_status(pred, pred, upper_limit=1.0)`, to classify the point prediction alone, and `valid=` to `scenario_status` to leave out entries such as out-of-service lines. Unlike `screen`, no tolerance is added to the limits.
+
+`coverage_report(predictions, true_values, intervals, alpha=..., strat=...)` and `screening_report(predictions, intervals, limits, true_values=..., strat=...)` give the tables of `calibrate` and `screen` from Python: the coverage and width per stratum, and the violations caught and missed, the status counts and each scenario's status. Both take one `ChannelSet` or a list such as `[buses, lines]`; see [Results as tables](own-data.md#4-results-as-tables).
 
 ## Kernel-weighted intervals
 
@@ -227,7 +233,7 @@ test_predicted, test_true = load(
 lower, upper = calibrator.predict_intervals(test_predicted)["Vm"]
 ```
 
-`load_predictions` applies task-specific corrections: for `PowerFlow`, the predictions of the known set-points are replaced by their values (`Vm` at PV buses, `Va` at the reference bus), as graphkit's evaluation does, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). Their residuals are then zero; the `valid_masks` above leave them out of the fit, which is what the CLI does. Without them, a bus's bounds shrink in the scenarios where it is not PV (e.g. its generator is out). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, using datakit's branch-flow routine (requires the `datakit` extra). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
+`load_predictions` applies task-specific corrections: for `PowerFlow`, the predictions of the known set-points are replaced by their values (`Vm` at PV buses, `Va` at the reference bus), as graphkit's evaluation does, as described in [Data schemas](../reference/schemas.md#powerflow-semantics). Their residuals are then zero; the `valid_masks` above leave them out of the fit, which is what the CLI does. Without them, a bus's bounds shrink in the scenarios where it is not PV (e.g. its generator is out). For line loading, `compute_line_loading(Vm, Va, ground_truth)` returns the `(n_scenarios, n_branches)` loading of given voltages, with the formula of datakit's branch-flow routine (datakit itself is not needed). Apply it to the predicted and to the true voltages and calibrate the two arrays like any other channel.
 
 ## Saving and loading
 
