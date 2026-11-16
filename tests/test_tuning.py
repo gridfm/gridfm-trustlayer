@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import textwrap
+from dataclasses import replace
+from typing import Any
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -28,6 +30,7 @@ from gridfm_trustlayer.conformal.tuning import (
     candidate_settings,
     select_candidate,
     tune_n_eff_target,
+    tune_n_eff_targets,
 )
 
 # ------------------------------------------------------------------ options
@@ -512,6 +515,34 @@ def test_compute_tunes_n_eff_target_and_records_it(tmp_path, capsys) -> None:
 
     assert main(["calibrate", "--config", str(config_path)]) == 0
     assert (tmp_path / "out" / "calibrated.parquet").exists()
+
+
+def test_families_tuned_together_get_their_own_results() -> None:
+    # Two families on the same scenarios (as voltages and line loading in one
+    # config) share folds, distances and bandwidths; each result must equal
+    # tuning that family alone.
+    predictions, truth = _synthetic()
+    other_predictions, other_truth = _synthetic(seed=1)
+    second = (
+        replace(predictions, channels={"Vm": other_predictions.channels["Vm"] * 2.0}),
+        replace(truth, channels={"Vm": other_truth.channels["Vm"] * 2.0}),
+    )
+    options = TuningOptions(
+        folds=3, grid=(50.0, 200.0), distances=("euclidean", "cosine")
+    )
+    shared: dict[str, Any] = {"alpha": 0.2, "strat": "n_outages", "options": options}
+    together = tune_n_eff_targets(
+        {"first": (predictions, truth, ("Vm",)), "second": (*second, ("Vm",))},
+        **shared,
+    )
+    alone = {
+        "first": tune_n_eff_target(predictions, truth, channel_names=("Vm",), **shared),
+        "second": tune_n_eff_target(*second, channel_names=("Vm",), **shared),
+    }
+    for name, result in alone.items():
+        pd.testing.assert_frame_equal(together[name].candidates, result.candidates)
+        pd.testing.assert_frame_equal(together[name].details, result.details)
+        assert together[name].summary() == result.summary()
 
 
 def test_cross_validation_in_parallel_gives_the_serial_result() -> None:

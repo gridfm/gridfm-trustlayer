@@ -22,6 +22,7 @@ from gridfm_trustlayer.cli.common import (
     _analysis_scenario_metadata_columns_from_frame,
     _artifact_path,
     _block_jobs,
+    _block_predictions,
     _bounds_notes,
     _build_bus_channel_set,
     _build_calibration_sets,
@@ -41,8 +42,11 @@ from gridfm_trustlayer.cli.common import (
     _known_mask,
     _merge_kernel_diagnostics,
     _merge_pooled_columns,
+    _notes_part,
+    _NotesPart,
     _ordered_analysis_strat_columns,
     _output_task_name,
+    _predict_all,
     _prediction_fingerprint,
     _report_progress,
     _require_set_points,
@@ -62,7 +66,7 @@ from gridfm_trustlayer.cli.config import (
     validate_cp_type,
     validate_strat,
 )
-from gridfm_trustlayer.conformal import NaiveIntervalCalibrator
+from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import (
     KernelIntervalCalibrator,
 )
@@ -82,7 +86,6 @@ from gridfm_trustlayer.io.parquet import (
     clear_partitioned_output,
     column_names,
     is_trustlayer_output,
-    read_frame,
     read_scenario_ids,
     rows_per_scenario,
     scenario_blocks,
@@ -200,7 +203,10 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         n_jobs=n_jobs,
         progress=partial(_report_progress, "calibrate", blocks=blocks),
     )
-    partials = {kind: [result[kind] for result in results] for kind in calibrators}
+    partials = {kind: [result[0][kind] for result in results] for kind in calibrators}
+    notes_parts = {
+        kind: [result[1][kind] for result in results] for kind in output_paths
+    }
 
     data_dir = Path(_common_parent(output_paths.values()))
     coverage_dir = Path(str(config.get("coverage_dir") or data_dir / "coverage"))
@@ -279,7 +285,7 @@ def _run_calibrate(args: argparse.Namespace) -> None:
         known_where=_known_where(sample.task_name),
     )
     _report_coverage(by_stratum)
-    for note in _bounds_notes(output_paths.values()):
+    for note in _bounds_notes(notes_parts):
         print(f"calibrate: {note}", flush=True)
     data_text = (
         next(iter(output_paths.values())) if len(output_paths) == 1 else data_dir
@@ -312,26 +318,28 @@ class _CalibrateJob:
     _embeddings: _EmbeddingSource | None = None
 
     def __getstate__(self) -> dict[str, Any]:
-        # Workers rebuild the heavy state in `setup`.
-        return {**self.__dict__, "calibrators": None, "_embeddings": None}
+        # Workers load the artifact themselves; the pooled embeddings go along
+        # (as a file the workers map, see `_EmbeddingSource`).
+        return {**self.__dict__, "calibrators": None}
 
     def setup(self, threads: int | None) -> None:
         if self.calibrators is None:
             self.calibrators = load_interval_artifacts(self.artifact_path)
         _share_threads(self.calibrators, threads)
-        if self.embeddings is not None:
+        if self.embeddings is not None and self._embeddings is None:
             path, pooling = self.embeddings
-            self._embeddings = _EmbeddingSource(
-                path, pooling, self.scenario_ids, preload=threads is None
-            )
+            self._embeddings = _EmbeddingSource(path, pooling, self.scenario_ids)
 
-    def run(self, index: int, block: np.ndarray) -> dict[str, pd.DataFrame]:
+    def run(
+        self, index: int, block: np.ndarray
+    ) -> tuple[dict[str, pd.DataFrame], dict[str, _NotesPart]]:
         assert self.calibrators is not None
-        predictions = load_predictions(
+        predictions, original_frame = _block_predictions(
             self.predictions_path,
+            block,
             task_name=self.task_name,
-            generator_parquet_path=self.generator_path,
-            scenario_ids=block,
+            generator_path=self.generator_path,
+            whole_rows=self.has_bus_targets,
         )
         _require_set_points(predictions)
         if self._embeddings is not None:
@@ -343,21 +351,31 @@ class _CalibrateJob:
                 scenario_ids=predictions.scenario_ids,
                 reference=self.reference,
             )
-        original_frame = (
-            read_frame(self.predictions_path, scenario_ids=block)
-            if self.has_bus_targets
-            else None
+        applications = {
+            kind: _calibration_application(calibrator, predictions, ground_truth)
+            for kind, calibrator in self.calibrators.items()
+        }
+        intervals = _predict_all(
+            self.calibrators,
+            {kind: application[0] for kind, application in applications.items()},
         )
         partials: dict[str, pd.DataFrame] = {}
+        notes: dict[str, _NotesPart] = {}
         for kind, calibrator in self.calibrators.items():
             frame = _calibrated_block_frame(
-                calibrator, predictions, ground_truth, original_frame
+                calibrator,
+                *applications[kind],
+                intervals[kind],
+                predictions,
+                ground_truth,
+                original_frame,
             )
+            notes[kind] = _notes_part(frame)
             _write_block(self.output_paths[kind], frame, index, self.schemas, kind)
             partials[kind] = _analysis_partials(
                 frame, calibrator.channel_names, entity_column=calibrator.entity_name
             )
-        return partials
+        return partials, notes
 
 
 _BUS_TYPE_WORDS = {"PV": "PV buses", "REF": "the reference bus"}
@@ -398,8 +416,57 @@ def _report_coverage(by_stratum: pd.DataFrame) -> None:
         print(line, flush=True)
 
 
+def _calibration_application(
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
+    predictions: PredictionSet,
+    ground_truth: GroundTruthSet | None,
+) -> tuple[ChannelSet, ChannelSet | None]:
+    """What one target family's calibrator is applied to, for one block.
+
+    Line loading also returns its true values (computed from the true voltages);
+    bus targets take theirs from the predictions file or the ground truth.
+    """
+
+    if calibrator.entity_name == "branch":
+        assert ground_truth is not None
+        return _build_calibration_sets(
+            predictions,
+            ground_truth,
+            calibrator.channel_names,
+            strat=calibrator.strat,
+            system_load_n_bins=calibrator.system_load_n_bins,
+            system_load_bin_edges=calibrator.system_load_bin_edges,
+            pred_n_bins=calibrator.pred_n_bins,
+            pred_bin_edges=calibrator.pred_bin_edges,
+        )
+    scenario_columns: dict[str, np.ndarray] = {}
+    if ground_truth is not None:
+        scenario_columns = _build_scenario_columns(
+            _build_bus_channel_set(
+                predictions, calibrator.channel_names, scenario_columns=None
+            ),
+            ground_truth,
+            calibrator.strat,
+            system_load_n_bins=calibrator.system_load_n_bins,
+            system_load_bin_edges=calibrator.system_load_bin_edges,
+            pred_n_bins=calibrator.pred_n_bins,
+            pred_bin_edges=calibrator.pred_bin_edges,
+        )
+    return (
+        _build_bus_channel_set(
+            predictions,
+            calibrator.channel_names,
+            scenario_columns=scenario_columns,
+        ),
+        None,
+    )
+
+
 def _calibrated_block_frame(
     calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
+    application_predictions: ChannelSet,
+    application_ground_truth: ChannelSet | None,
+    intervals: dict[str, tuple[np.ndarray, np.ndarray]],
     predictions: PredictionSet,
     ground_truth: GroundTruthSet | None,
     original_frame: pd.DataFrame | None,
@@ -411,18 +478,7 @@ def _calibrated_block_frame(
     """
 
     if calibrator.entity_name == "branch":
-        assert ground_truth is not None
-        application_predictions, application_ground_truth = _build_calibration_sets(
-            predictions,
-            ground_truth,
-            calibrator.channel_names,
-            strat=calibrator.strat,
-            system_load_n_bins=calibrator.system_load_n_bins,
-            system_load_bin_edges=calibrator.system_load_bin_edges,
-            pred_n_bins=calibrator.pred_n_bins,
-            pred_bin_edges=calibrator.pred_bin_edges,
-        )
-        intervals = calibrator.predict_intervals(application_predictions)
+        assert application_ground_truth is not None
         output_frame = _build_entity_output_frame(
             application_predictions,
             application_ground_truth,
@@ -440,25 +496,6 @@ def _calibrated_block_frame(
             )
     else:
         assert original_frame is not None
-        scenario_columns: dict[str, np.ndarray] = {}
-        if ground_truth is not None:
-            scenario_columns = _build_scenario_columns(
-                _build_bus_channel_set(
-                    predictions, calibrator.channel_names, scenario_columns=None
-                ),
-                ground_truth,
-                calibrator.strat,
-                system_load_n_bins=calibrator.system_load_n_bins,
-                system_load_bin_edges=calibrator.system_load_bin_edges,
-                pred_n_bins=calibrator.pred_n_bins,
-                pred_bin_edges=calibrator.pred_bin_edges,
-            )
-        application_predictions = _build_bus_channel_set(
-            predictions,
-            calibrator.channel_names,
-            scenario_columns=scenario_columns,
-        )
-        intervals = calibrator.predict_intervals(application_predictions)
         interval_frame = _build_interval_frame(application_predictions, intervals)
         if calibrator.strat == "pred_bins":
             interval_frame = interval_frame.merge(

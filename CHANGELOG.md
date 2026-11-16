@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 [semantic versioning](https://semver.org/). Before 1.0, minor versions may
 include breaking changes; they are listed under **Changed**.
 
+## [Unreleased]
+
+Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**.
+
+### Changed
+- **`numba` is now a dependency.** The kernel's bandwidth solve and weighted quantiles run as compiled loops, spread over the calibrator's threads. On IEEE-118 (20,000 calibration scenarios in five outage strata, 20,000 test scenarios, voltages and line loading) the kernel part of `apply` and `calibrate` went from 9.2 s to 0.8 s on a 12-core laptop. The code is compiled on first use and cached, once per installation.
+- **Calibrators of one artifact share the kernel work.** The voltage and line-loading calibrators are fitted on the same scenarios and embeddings, so their distances and, with the same settings, bandwidths and weights are computed once per block for both (`gridfm_trustlayer.conformal.kernel.predict_intervals_jointly`).
+- **`n_eff_target: auto` runs in one pass per fold**, in threads of one process instead of 4 processes: each fold is fitted once, its distances are computed once for all candidate targets, and each target's bandwidths once for both families (`tune_n_eff_targets`). On the IEEE-118 calibration set above, the default grid took 28 s with 0.1.1's 4 processes and takes 5 s; on case24, `compute` with `auto` went from 5.1 s to 1.8 s. `n_jobs` now sets the number of threads (every CPU by default).
+- **Line loading no longer needs gridfm-datakit**: `compute_line_loading` applies datakit's branch-flow formula to the voltage arrays directly, with the same values, 20-30 times faster. The `datakit` and `graphkit` extras remain, to install those packages alongside.
+- **Embeddings are pooled once per command, one column at a time.** Peak memory of pooling graphkit's per-bus embeddings of case24 (543 MB file) went from 2.1 GB to 0.7 GB, and blocks no longer read the file again; worker processes (`n_jobs`) map the pooled array instead.
+- Reading a block of scenarios from a partitioned dataset (datakit's raw data) opens only the files that hold them, found from their statistics: 1.3 s to 0.1 s per block of the IEEE-118 test set (996 partitions).
+- `apply` and `calibrate` read each block of predictions once instead of twice, and take the end-of-run notes from the blocks instead of reading their outputs again.
+- `matplotlib` is imported only when a figure is drawn, and `numba` only when a kernel runs: commands start about 0.15 s sooner.
+- On case24 (7,070 new scenarios), `apply` went from 2.8 s to 2.0 s and its peak memory from 1.7 GB to 0.9 GB.
+
+### Fixed
+- **The `n_eff` bandwidth solve could stop at a wrong bandwidth.** Where `n_eff` is nearly flat at one end of the search bracket and steep at the other, Newton steps could alternate between the two ends until the iteration limit; the scenario then got, e.g., `n_eff` 2,862 instead of the target 600 (near-uniform weights), or 9 (a fallback to the stratum quantile). This happened for about 3 in 120,000 scenario solves on IEEE-118. After 30 Newton steps the solve now continues by bisection and converges; scenarios whose solve converged are unchanged. In strata with fewer calibration scenarios than `n_eff_target`, where the weights approach uniform, `kcp_bandwidth_sq` can differ from 0.1.1's in its last digit, with the same bounds.
+
 ## [0.1.1] - 2026-10-16
 
 Fixes from testing the first release as a user would: following the documentation, and on edge cases of real data.

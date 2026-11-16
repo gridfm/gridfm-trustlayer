@@ -1,6 +1,6 @@
-"""Process pools: the bandwidth-tuning folds and, on request, blocks of scenarios.
+"""Process pools for blocks of scenarios (on request), and thread counts.
 
-Work runs in separate processes started with `spawn`, which is safe whatever
+Blocks run in separate processes started with `spawn`, which is safe whatever
 threads the parent runs (Arrow starts some) and works on every platform. The
 number of processes comes from `n_jobs`:
 
@@ -11,6 +11,9 @@ number of processes comes from `n_jobs`:
 
 Each worker caps its native thread pools (BLAS, OpenMP, Arrow) at its share of
 the CPUs, so that processes and threads do not oversubscribe the machine.
+
+The kernel calibrator and the cross-validated bandwidth choice run in threads
+of one process instead; `resolve_threads` reads `n_jobs` as a thread count.
 """
 
 from __future__ import annotations
@@ -38,6 +41,17 @@ def resolve_jobs(n_jobs: int | None) -> int:
     cpus = os.cpu_count() or 1
     if n_jobs is None or n_jobs == 0:
         return max(1, min(DEFAULT_MAX_JOBS, cpus))
+    if n_jobs < 0:
+        return max(1, cpus + 1 + n_jobs)
+    return int(n_jobs)
+
+
+def resolve_threads(n_jobs: int | None) -> int:
+    """Threads `n_jobs` asks for: every CPU unless set (negative as for processes)."""
+
+    cpus = os.cpu_count() or 1
+    if n_jobs is None or n_jobs == 0:
+        return cpus
     if n_jobs < 0:
         return max(1, cpus + 1 + n_jobs)
     return int(n_jobs)

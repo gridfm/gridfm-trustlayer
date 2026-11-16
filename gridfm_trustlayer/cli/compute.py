@@ -62,7 +62,7 @@ from gridfm_trustlayer.conformal.kernel import (
 from gridfm_trustlayer.conformal.tuning import (
     BandwidthTuningResult,
     TuningOptions,
-    tune_n_eff_target,
+    tune_n_eff_targets,
 )
 from gridfm_trustlayer.io import (
     load_ground_truth,
@@ -214,15 +214,17 @@ def _run_compute(args: argparse.Namespace) -> None:
     fingerprint = _prediction_fingerprint(scenario_ids, sample)
     calibrators: dict[str, NaiveIntervalCalibrator | KernelIntervalCalibrator] = {}
     tuning_results: dict[str, BandwidthTuningResult] = {}
-    for target_kind, target_variables in variable_groups.items():
+    alpha = float(coalesce_option(args.alpha, config, "alpha", required=True))
+    system_load_bin_edges = None
+    if strat == "system_load_bin":
+        assert system_load_n_bins is not None
+        system_load_bin_edges = _compute_system_load_bin_edges(
+            data.scenarios.system_load,
+            system_load_n_bins,
+        )
+    families: dict[str, tuple[ChannelSet, ChannelSet, Any]] = {}
+    for target_kind in variable_groups:
         base_predictions = data.predictions[target_kind]
-        system_load_bin_edges = None
-        if strat == "system_load_bin":
-            assert system_load_n_bins is not None
-            system_load_bin_edges = _compute_system_load_bin_edges(
-                data.scenarios.system_load,
-                system_load_n_bins,
-            )
         pred_bin_edges = None
         if strat == "pred_bins":
             assert pred_n_bins is not None
@@ -239,40 +241,44 @@ def _run_compute(args: argparse.Namespace) -> None:
             pred_n_bins=pred_n_bins,
             pred_bin_edges=pred_bin_edges,
         )
-        calibration_predictions = _with_scenario_columns(
-            base_predictions, scenario_columns
+        families[target_kind] = (
+            _with_scenario_columns(base_predictions, scenario_columns),
+            _with_scenario_columns(data.ground_truth[target_kind], scenario_columns),
+            pred_bin_edges,
         )
-        calibration_ground_truth = _with_scenario_columns(
-            data.ground_truth[target_kind], scenario_columns
+    if cp_type == "kernel" and tuning_options is not None:
+        # Cross-validated on the calibration data only; the test set is untouched.
+        # The families share their folds and the kernel work.
+        first_predictions = next(iter(families.values()))[0]
+        tuning_results = tune_n_eff_targets(
+            {
+                target_kind: (predictions, ground_truth, variable_groups[target_kind])
+                for target_kind, (predictions, ground_truth, _) in families.items()
+            },
+            alpha=alpha,
+            strat=strat,
+            embedding_pooling=embedding_pooling,
+            distance=distance,
+            n_eff_min=n_eff_min,
+            options=tuning_options,
+            groups=None
+            if tuning_groups is None
+            else tuning_groups.reindex(first_predictions.scenario_ids).to_numpy(),
+            system_load_n_bins=system_load_n_bins,
+            system_load_bin_edges=system_load_bin_edges,
+            sparse_strata=sparse_strata,
+            n_jobs=_n_jobs(args, config),
         )
-        alpha = float(coalesce_option(args.alpha, config, "alpha", required=True))
+    for target_kind, target_variables in variable_groups.items():
+        calibration_predictions, calibration_ground_truth, pred_bin_edges = families[
+            target_kind
+        ]
         calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator
         if cp_type == "kernel":
             assert calibration_predictions.scenario_embeddings is not None
             family_n_eff_target = fixed_n_eff_target
             family_distance = distance
-            if tuning_options is not None:
-                # Cross-validated on the calibration data only; the test set is untouched.
-                tuning_results[target_kind] = tune_n_eff_target(
-                    calibration_predictions,
-                    calibration_ground_truth,
-                    alpha=alpha,
-                    channel_names=target_variables,
-                    strat=strat,
-                    embedding_pooling=embedding_pooling,
-                    distance=distance,
-                    n_eff_min=n_eff_min,
-                    options=tuning_options,
-                    groups=None
-                    if tuning_groups is None
-                    else tuning_groups.reindex(
-                        calibration_predictions.scenario_ids
-                    ).to_numpy(),
-                    system_load_n_bins=system_load_n_bins,
-                    system_load_bin_edges=system_load_bin_edges,
-                    sparse_strata=sparse_strata,
-                    n_jobs=_n_jobs(args, config),
-                )
+            if target_kind in tuning_results:
                 family_n_eff_target = tuning_results[target_kind].selected_n_eff_target
                 family_distance = tuning_results[target_kind].selected_distance
             calibrator = KernelIntervalCalibrator.fit(
@@ -424,15 +430,12 @@ class _ComputeJob:
     reference: GroundTruthReference
     _embeddings: _EmbeddingSource | None = None
 
-    def __getstate__(self) -> dict[str, Any]:
-        return {**self.__dict__, "_embeddings": None}
-
     def setup(self, threads: int | None) -> None:
-        if self.embeddings is not None:
+        # Pooled once, here; worker processes get the result with the job
+        # (as a file they map, see `_EmbeddingSource`).
+        if self.embeddings is not None and self._embeddings is None:
             path, pooling = self.embeddings
-            self._embeddings = _EmbeddingSource(
-                path, pooling, self.scenario_ids, preload=threads is None
-            )
+            self._embeddings = _EmbeddingSource(path, pooling, self.scenario_ids)
 
     def run(
         self, index: int, block: np.ndarray

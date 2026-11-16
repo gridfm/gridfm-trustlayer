@@ -30,7 +30,7 @@ The [demo notebook](https://github.com/gridfm/gridfm-trustlayer/blob/main/exampl
 **Run it.**
 
 ```bash
-pip install "gridfm-trustlayer[datakit]" jupyterlab
+pip install gridfm-trustlayer jupyterlab
 git clone https://github.com/gridfm/gridfm-trustlayer.git
 cd gridfm-trustlayer/examples/demo
 jupyter lab demo.ipynb

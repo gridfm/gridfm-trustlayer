@@ -296,9 +296,10 @@ def test_block_loading_with_the_dataset_reference_matches_a_full_load(tmp_path) 
     assert not np.allclose(naive.Va, full.Va[first])
 
 
-def test_kernel_runs_read_embeddings_once_or_per_block_with_the_same_result(
+def test_kernel_runs_with_one_or_many_blocks_give_the_same_result(
     tmp_path, monkeypatch
 ) -> None:
+    # The embeddings are pooled once per command and each block takes its rows.
     once = _config(tmp_path, "once", METHODS["kernel_n_outages"])
     assert main(["compute", "--config", str(once)]) == 0
     _run(once)
@@ -307,7 +308,6 @@ def test_kernel_runs_read_embeddings_once_or_per_block_with_the_same_result(
     per_block.write_text(
         once.read_text().replace("/once/", "/per_block/"), encoding="utf-8"
     )
-    monkeypatch.setattr(cli_common, "_EMBEDDINGS_PRELOAD_BYTES", 0)
     monkeypatch.setattr(parquet_io, "SCENARIOS_PER_PARTITION", FIRST_BLOCK)
     monkeypatch.setattr(cli_common, "_BLOCK_ROWS", 1)
     _run(per_block)

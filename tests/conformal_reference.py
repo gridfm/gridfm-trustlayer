@@ -74,3 +74,36 @@ def weighted_conformal_offsets(
     upper = np.where(reached, sorted_residuals[upper_index, element], np.nan)
     lower = np.where(reached, sorted_residuals[lower_index, element], np.nan)
     return lower, upper, reached
+
+
+def pooled_embeddings_frame_reference(
+    path: str, pooling: str, scenario_ids: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Scenario embeddings pooled through one pandas frame, as in 0.1.1.
+
+    Reads every column at once, sorts the rows by (scenario, bus), reshapes to
+    `(n_scenarios, n_buses, d)` and applies the pooling: the straightforward
+    version that the column-by-column loader must reproduce bit for bit.
+    """
+
+    import pandas as pd  # type: ignore[import-untyped]
+
+    frame = pd.read_parquet(path)
+    if scenario_ids is not None:
+        frame = frame[frame["scenario"].isin(np.asarray(scenario_ids))]
+    columns = sorted(c for c in frame.columns if str(c).startswith("emb_"))
+    frame = frame[["scenario", "bus", *columns]].sort_values(
+        ["scenario", "bus"], kind="stable"
+    )
+    scenarios, counts = np.unique(frame["scenario"].to_numpy(), return_counts=True)
+    values = frame[columns].to_numpy(dtype=np.float32, copy=False)
+    stacked = values.reshape(len(scenarios), int(counts[0]), len(columns))
+    pooled = {
+        "mean": lambda: stacked.mean(axis=1),
+        "max": lambda: stacked.max(axis=1),
+        "meanmax": lambda: np.concatenate(
+            [stacked.mean(axis=1), stacked.max(axis=1)], axis=1
+        ),
+        "concat": lambda: stacked.reshape(stacked.shape[0], -1),
+    }[pooling]()
+    return scenarios, np.ascontiguousarray(pooled, dtype=np.float32)

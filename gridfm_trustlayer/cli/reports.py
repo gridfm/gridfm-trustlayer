@@ -14,12 +14,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, cast
 
-import matplotlib  # type: ignore[import-untyped]
-import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+
+if TYPE_CHECKING:
+    import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 
 # Units of the variables, and the factor that converts stored values to them.
 UNITS: dict[str, tuple[str, float]] = {
@@ -74,13 +76,26 @@ def write_csv(frame: pd.DataFrame, path: Path) -> None:
     frame.to_csv(path, index=False, float_format="%.6g")
 
 
-# Horizontal box plots: `orientation` exists from matplotlib 3.10, and `vert`,
-# its predecessor, is deprecated from 3.11 and removed in 3.13.
-_HORIZONTAL: dict[str, Any] = (
-    {"orientation": "horizontal"}
-    if tuple(int(part) for part in matplotlib.__version__.split(".")[:2]) >= (3, 10)
-    else {"vert": False}
-)
+def _pyplot() -> ModuleType:
+    """matplotlib's pyplot, imported when the first figure is drawn.
+
+    Commands that draw no figure (`compute`, `apply`, runs with
+    `save_figures: false`) then never load matplotlib.
+    """
+
+    from matplotlib import pyplot  # type: ignore[import-untyped]
+
+    return pyplot
+
+
+def _horizontal() -> dict[str, Any]:
+    """Horizontal box plots: `orientation` exists from matplotlib 3.10, and `vert`,
+    its predecessor, is deprecated from 3.11 and removed in 3.13."""
+
+    import matplotlib  # type: ignore[import-untyped]
+
+    version = tuple(int(part) for part in matplotlib.__version__.split(".")[:2])
+    return {"orientation": "horizontal"} if version >= (3, 10) else {"vert": False}
 
 
 def unit_of(variable: str) -> tuple[str, float]:
@@ -346,6 +361,7 @@ def coverage_figure_tasks(
 
 
 def _coverage_by_stratum_figure(rows: pd.DataFrame, path: Path) -> Path:
+    plt = _pyplot()
     variable = rows["variable"].iloc[0]
     target = float(rows["target_coverage"].iloc[0])
     labels = [_short_stratum(stratum) for stratum in rows["stratum"]]
@@ -407,6 +423,7 @@ def _coverage_by_element_figure(
     entity_label: str,
     path: Path,
 ) -> Path:
+    plt = _pyplot()
     coverage = elements["coverage"].dropna().to_numpy(dtype=float)
     fig, ax = plt.subplots(figsize=(7.5, 3.6))
     if coverage.size:
@@ -436,6 +453,7 @@ def _coverage_by_element_figure(
 
 
 def _width_by_stratum_figure(variable: str, elements: pd.DataFrame, path: Path) -> Path:
+    plt = _pyplot()
     unit, factor = unit_of(variable)
     strata = elements.drop_duplicates(["stratification", "stratum_value"])
     strata = sort_by_stratum(strata)
@@ -461,7 +479,7 @@ def _width_by_stratum_figure(variable: str, elements: pd.DataFrame, path: Path) 
     box = ax.boxplot(
         data,
         positions=positions,
-        **_HORIZONTAL,
+        **_horizontal(),
         patch_artist=True,
         widths=0.55,
         showmeans=True,
@@ -595,6 +613,7 @@ def confusion_cells(row: pd.Series) -> list[list[tuple[str, int]]]:
 
 
 def _confusion_figure(variable: str, side: str, row: pd.Series, path: Path) -> Path:
+    plt = _pyplot()
     cells = confusion_cells(row)
     colors = [["#d5ecd4", "#f6d0cc"], ["#f6d0cc", "#d5ecd4"]]
     fig, ax = plt.subplots(figsize=(6.2, 4.2))
@@ -649,6 +668,7 @@ def _confusion_figure(variable: str, side: str, row: pd.Series, path: Path) -> P
 
 
 def _screening_by_stratum_figure(variable: str, rows: pd.DataFrame, path: Path) -> Path:
+    plt = _pyplot()
     labels = [_short_stratum(stratum) for stratum in rows["stratum"]]
     positions = np.arange(len(rows))[::-1]
     fig, axes = plt.subplots(1, 2, figsize=(9, 0.45 * len(rows) + 1.8), sharey=True)
@@ -872,6 +892,7 @@ def _finish(ax: plt.Axes, *, legend: bool = False) -> None:
 
 
 def _save(fig: plt.Figure, path: Path) -> Path:
+    plt = _pyplot()
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

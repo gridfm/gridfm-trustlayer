@@ -23,7 +23,7 @@ In N-k contingency screening, a line is flagged when the upper bound of its pred
 
 - **Two conformal methods.** Stratified split-conformal prediction (`cp_type: element`), with a finite-sample coverage guarantee when calibration and test scenarios are exchangeable. Kernel-weighted conformal prediction (`cp_type: kernel`), which adapts the margin to each scenario using the model's embeddings and whose coverage is verified empirically.
 - **Stratification** by number of outages, outage type, system load or predicted value, so bounds widen where the model is less accurate.
-- **Voltages and line loading.** `Vm` and `Va` are calibrated directly; `line_loading` is derived from the predicted voltages with datakit's branch-flow routine.
+- **Voltages and line loading.** `Vm` and `Va` are calibrated directly; `line_loading` is derived from the predicted voltages with the AC branch-flow formula of gridfm-datakit.
 - **Screening** against operating limits: every value is *within limits*, *uncertain* or a *violation*, and every operating scenario *secure*, *uncertain* or *insecure*, compared with the point prediction alone. On test scenarios, checked against the true AC solution; on new scenarios, with no solution needed.
 - **Works with any model** whose predictions follow the GridFM parquet layout, or with plain NumPy arrays through the Python API. CPU only.
 
@@ -35,10 +35,10 @@ Requires Python 3.10–3.12.
 python -m pip install gridfm-trustlayer
 ```
 
-Optional extras: `datakit` (needed for `line_loading`) and `interactive` (the Jupyter config builder):
+Optional extra: `interactive` (the Jupyter config builder):
 
 ```bash
-python -m pip install "gridfm-trustlayer[datakit,interactive]"
+python -m pip install "gridfm-trustlayer[interactive]"
 ```
 
 The development version: `python -m pip install "git+https://github.com/gridfm/gridfm-trustlayer"`.

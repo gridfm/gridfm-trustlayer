@@ -81,7 +81,7 @@ sparse_strata: infinite   # default: pooled
 ## Variables
 
 - `Vm` and `Va` are calibrated from the predictions directly.
-- `line_loading` is derived: trustlayer computes the branch flows from the predicted voltages and the branch parameters, divides by the rating `rate_a`, and calibrates the result. It needs the `datakit` extra.
+- `line_loading` is derived: trustlayer computes the branch flows from the predicted voltages and the branch parameters, divides by the rating `rate_a`, and calibrates the result.
 - You can calibrate several at once. Voltage and line results are written to separate files, because one is per bus and the other per branch.
 
 Only `Vm` and `line_loading` have operating limits to screen against. If you calibrate `Va` too, restrict screening with `commands.screen.variables: [Vm, line_loading]`.

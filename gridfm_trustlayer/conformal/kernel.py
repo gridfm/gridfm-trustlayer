@@ -15,9 +15,10 @@ an explicit fallback rather than silently returning an over-optimistic bound.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any, cast
 
 import numpy as np
@@ -74,27 +75,24 @@ _LEGACY_ARTIFACT_BANDWIDTH = BANDWIDTH_KNN
 # Settings of the n_eff bandwidth solve (Newton steps in log space, see
 # `_solve_bandwidth_for_n_eff`). A tight tolerance makes each bound independent
 # of how the solve gets there: a bandwidth anywhere within a loose tolerance can
-# move a weighted quantile to a neighbouring residual.
-_N_EFF_SOLVE_MAX_ITER = 60
+# move a weighted quantile to a neighbouring residual. Rows that have not
+# converged after `_N_EFF_SOLVE_NEWTON_ITER` iterations continue by bisection,
+# which needs well under `_N_EFF_SOLVE_MAX_ITER` in total.
+_N_EFF_SOLVE_NEWTON_ITER = 30
+_N_EFF_SOLVE_MAX_ITER = 90
 _N_EFF_SOLVE_RTOL = 1e-6
 _N_EFF_BRACKET_SPAN = 1e3
 
-# Target working-set size for one distance/quantile block, in bytes. Chunk
-# sizes are derived from this so memory stays bounded regardless of how many
-# calibration scenarios or grid elements a run carries.
+# Target working-set size for one block of test scenarios, in bytes, and the
+# largest block: small blocks keep every thread busy when a stratum is small.
+# Neither changes any result.
 _TARGET_BLOCK_BYTES = 48 * 1024 * 1024
-# Weighted quantile: the first scan from each end covers this many times the
-# tail share `1 - level` of the sorted positions (at least `_MIN_TAIL_WINDOW`).
-# `_TAIL_SCAN_ARRAYS` counts the (rows x window x elements) float64 arrays a
-# scan holds at once, for the memory budget.
-_TAIL_WINDOW_FACTOR = 3.0
-_MIN_TAIL_WINDOW = 32
-_TAIL_SCAN_ARRAYS = 2
-# Positions summed together in the first level of the two-level tail scan.
-_SCAN_BLOCK = 16
+_MAX_BLOCK_ROWS = 128
 # Skip the quantile search only when the weight sum is clearly below the
 # minimum, so float rounding can never skip a reachable case.
 _UNREACHABLE_MARGIN = 1.0 - 1e-6
+# Columns (elements) argsorted together when a calibration bank is built.
+_SORT_CHUNK = 64
 
 # Embedding dimensions with (near) zero spread carry no distance information
 # and would blow up the standardized values.
@@ -110,19 +108,68 @@ class _StratumBank:
     """Sorted calibration residuals for one stratum and one channel."""
 
     rows: np.ndarray
+    # Element-major, `(n_elements, n_calibration)`: per element, the residuals
+    # in increasing order, and the calibration index of each sorted position
+    # with invalid entries pointing at `n_calibration` (a zero weight).
     sorted_residuals: np.ndarray
-    sort_order: np.ndarray
-    sorted_valid: np.ndarray
+    order: np.ndarray
     # Validity in calibration order, float64: kernel weights @ valid gives the
     # total weight per element in one matrix product.
     valid: np.ndarray
-    # `sort_order` with invalid entries pointing at index `n_calibration`, a
-    # zero-weight column appended to the weights before gathering.
-    sort_order_masked: np.ndarray
     fallback_lower: np.ndarray
     fallback_upper: np.ndarray
     # Per element: whether the stratum holds at least one valid residual.
     has_data: np.ndarray
+
+    @classmethod
+    def build(
+        cls,
+        rows: np.ndarray,
+        residuals: np.ndarray,
+        valid: np.ndarray,
+        fallback_lower: np.ndarray,
+        fallback_upper: np.ndarray,
+        executor: ThreadPoolExecutor | None = None,
+    ) -> _StratumBank:
+        """Sort `(n_calibration, n_elements)` residuals per element (stable).
+
+        Columns are sorted in chunks, on `executor` when given; a stable sort
+        gives the same order whichever way the columns are split.
+        """
+
+        n_calibration, n_elements = residuals.shape
+        by_element = np.ascontiguousarray(residuals.T, dtype=FLOAT32_DTYPE)
+        valid_by_element = np.ascontiguousarray(np.asarray(valid, dtype=bool).T)
+        sorted_residuals = np.empty_like(by_element)
+        order = np.empty(by_element.shape, dtype=INT32_DTYPE)
+
+        def sort(start: int) -> None:
+            part = slice(start, start + _SORT_CHUNK)
+            part_order = np.argsort(by_element[part], axis=1, kind="stable")
+            sorted_residuals[part] = np.take_along_axis(
+                by_element[part], part_order, axis=1
+            )
+            order[part] = np.where(
+                np.take_along_axis(valid_by_element[part], part_order, axis=1),
+                part_order,
+                n_calibration,
+            )
+
+        starts = range(0, n_elements, _SORT_CHUNK) if n_calibration else range(0)
+        if executor is None:
+            for start in starts:
+                sort(start)
+        else:
+            list(executor.map(sort, starts))
+        return cls(
+            rows=rows,
+            sorted_residuals=sorted_residuals,
+            order=order,
+            valid=np.ascontiguousarray(valid, dtype=np.float64),
+            fallback_lower=fallback_lower,
+            fallback_upper=fallback_upper,
+            has_data=np.asarray(np.asarray(valid, dtype=bool).any(axis=0)),
+        )
 
 
 @dataclass
@@ -414,120 +461,7 @@ class KernelIntervalCalibrator:
             Per-scenario diagnostics are available afterwards in `diagnostics`.
         """
 
-        _validate_entity_alignment(self.entity_ids, _get_entity_ids(predictions))
-        test_embeddings = _require_scenario_embeddings(predictions)
-        if test_embeddings.shape[1] != self.calibration_embeddings.shape[1]:
-            raise ValueError(
-                "Test embedding width "
-                f"({test_embeddings.shape[1]}) does not match the calibration bank "
-                f"({self.calibration_embeddings.shape[1]}). The same embedding_pooling "
-                "must be used for compute and calibrate.",
-            )
-        standardized_test = _prepare_embeddings(
-            test_embeddings,
-            self.embedding_mean,
-            self.embedding_scale,
-            self.distance,
-        )
-
-        n_test = standardized_test.shape[0]
-        test_strata: np.ndarray
-        if self.strat is None:
-            test_strata = np.zeros(n_test, dtype=np.int64)
-        else:
-            test_strata = _get_scenario_column(predictions, self.strat).astype(
-                np.int64, copy=False
-            )
-
-        self._ensure_banks()
-        self._pooled = {}
-        n_eff_out = np.zeros(n_test, dtype=FLOAT32_DTYPE)
-        bandwidth_out = np.zeros(n_test, dtype=FLOAT32_DTYPE)
-        fallback_out = np.zeros(n_test, dtype=bool)
-        prediction_values = {
-            name: _get_prediction_channel(predictions, name)
-            for name in self.channel_names
-        }
-        test_valid = {
-            name: _get_valid_mask(predictions, name) for name in self.channel_names
-        }
-        # Scenarios of a stratum the calibration data lacks keep infinite offsets.
-        lower_offsets = {
-            name: np.full(values.shape, -np.inf, dtype=FLOAT32_DTYPE)
-            for name, values in prediction_values.items()
-        }
-        upper_offsets = {
-            name: np.full(values.shape, np.inf, dtype=FLOAT32_DTYPE)
-            for name, values in prediction_values.items()
-        }
-        fallback_out[~np.isin(test_strata, self.stratification_values)] = True
-
-        for stratum_index, stratum_value in enumerate(self.stratification_values):
-            test_rows = np.flatnonzero(test_strata == stratum_value)
-            if test_rows.size == 0:
-                continue
-            banks = {
-                name: self._banks[name][stratum_index] for name in self.channel_names
-            }
-            if next(iter(banks.values())).rows.size == 0:
-                # No calibration data in this stratum: its fallback quantiles
-                # are infinite (pooled ones replace them with sparse_strata).
-                for name in self.channel_names:
-                    lower_offsets[name][test_rows] = self.fallback_lower_quantiles[
-                        name
-                    ][stratum_index]
-                    upper_offsets[name][test_rows] = self.fallback_upper_quantiles[
-                        name
-                    ][stratum_index]
-                fallback_out[test_rows] = True
-                continue
-            self._apply_stratum(
-                banks=banks,
-                test_rows=test_rows,
-                test_embeddings=standardized_test,
-                test_valid=test_valid,
-                lower_offsets=lower_offsets,
-                upper_offsets=upper_offsets,
-                n_eff_out=n_eff_out,
-                bandwidth_out=bandwidth_out,
-                fallback_out=fallback_out,
-            )
-
-        intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        for channel_name in self.channel_names:
-            prediction = prediction_values[channel_name]
-            valid_mask = _get_valid_mask(predictions, channel_name)
-            if self.sparse_strata == "pooled":
-                pooled_lower, pooled_upper = self._pooled_quantiles_of(channel_name)
-                (
-                    lower_offsets[channel_name],
-                    upper_offsets[channel_name],
-                    pooled,
-                ) = pool_sparse_strata(
-                    lower_offsets[channel_name],
-                    upper_offsets[channel_name],
-                    pooled_lower,
-                    pooled_upper,
-                )
-                self._pooled[channel_name] = (
-                    pooled if valid_mask is None else pooled & valid_mask
-                )
-            lower = prediction + lower_offsets[channel_name]
-            upper = prediction + upper_offsets[channel_name]
-            if valid_mask is not None:
-                lower = np.where(valid_mask, lower, prediction)
-                upper = np.where(valid_mask, upper, prediction)
-            intervals[channel_name] = (
-                lower.astype(FLOAT32_DTYPE, copy=False),
-                upper.astype(FLOAT32_DTYPE, copy=False),
-            )
-
-        self._diagnostics = {
-            "n_eff": n_eff_out,
-            "kernel_bandwidth_sq": bandwidth_out,
-            "kernel_fallback": fallback_out,
-        }
-        return intervals
+        return predict_intervals_jointly([self], [predictions])[0]
 
     @property
     def diagnostics(self) -> dict[str, np.ndarray]:
@@ -594,7 +528,9 @@ class KernelIntervalCalibrator:
             )
         return self._pooled_quantiles[channel_name]
 
-    def _ensure_banks(self) -> None:
+    def _ensure_banks(self, executor: ThreadPoolExecutor | None = None) -> None:
+        """Sort the calibration residuals of every channel and stratum, once."""
+
         if self._banks:
             return
         banks: dict[str, list[_StratumBank]] = {}
@@ -604,169 +540,18 @@ class KernelIntervalCalibrator:
             per_stratum: list[_StratumBank] = []
             for index, stratum_value in enumerate(self.stratification_values):
                 rows = np.flatnonzero(self.calibration_strata == stratum_value)
-                stratum_residuals = channel_residuals[rows]
-                stratum_valid = channel_valid[rows]
-                if rows.size == 0:
-                    order = np.zeros((0, channel_residuals.shape[1]), dtype=INT32_DTYPE)
-                    sorted_residuals = np.zeros(
-                        (0, channel_residuals.shape[1]), dtype=FLOAT32_DTYPE
-                    )
-                    sorted_valid = np.zeros(
-                        (0, channel_residuals.shape[1]), dtype=FLOAT32_DTYPE
-                    )
-                else:
-                    order = np.argsort(stratum_residuals, axis=0, kind="stable").astype(
-                        INT32_DTYPE, copy=False
-                    )
-                    sorted_residuals = np.take_along_axis(
-                        stratum_residuals, order, axis=0
-                    ).astype(FLOAT32_DTYPE, copy=False)
-                    sorted_valid = np.take_along_axis(
-                        stratum_valid, order, axis=0
-                    ).astype(FLOAT32_DTYPE, copy=False)
                 per_stratum.append(
-                    _StratumBank(
-                        rows=rows,
-                        sorted_residuals=np.ascontiguousarray(sorted_residuals),
-                        sort_order=np.ascontiguousarray(order),
-                        sorted_valid=np.ascontiguousarray(sorted_valid),
-                        valid=np.ascontiguousarray(stratum_valid, dtype=np.float64),
-                        sort_order_masked=np.ascontiguousarray(
-                            np.where(sorted_valid > 0, order, rows.size),
-                            dtype=INT32_DTYPE,
-                        ),
-                        has_data=np.asarray(
-                            np.asarray(stratum_valid, dtype=bool).any(axis=0)
-                        ),
-                        fallback_lower=self.fallback_lower_quantiles[channel_name][
-                            index
-                        ],
-                        fallback_upper=self.fallback_upper_quantiles[channel_name][
-                            index
-                        ],
+                    _StratumBank.build(
+                        rows,
+                        channel_residuals[rows],
+                        channel_valid[rows],
+                        self.fallback_lower_quantiles[channel_name][index],
+                        self.fallback_upper_quantiles[channel_name][index],
+                        executor,
                     )
                 )
             banks[channel_name] = per_stratum
         self._banks = banks
-
-    def _apply_stratum(
-        self,
-        *,
-        banks: dict[str, _StratumBank],
-        test_rows: np.ndarray,
-        test_embeddings: np.ndarray,
-        test_valid: dict[str, np.ndarray | None],
-        lower_offsets: dict[str, np.ndarray],
-        upper_offsets: dict[str, np.ndarray],
-        n_eff_out: np.ndarray,
-        bandwidth_out: np.ndarray,
-        fallback_out: np.ndarray,
-    ) -> None:
-        """Kernel-weighted bounds of the test scenarios of one stratum.
-
-        Distances, bandwidth and weights depend on the scenario only, so they
-        are computed once and shared by every calibrated variable.
-        """
-
-        rows = next(iter(banks.values())).rows
-        calibration = self.calibration_embeddings[rows]
-        calibration_sq = np.einsum("ij,ij->i", calibration, calibration)
-        n_calibration = calibration.shape[0]
-        n_elements = max(bank.sorted_residuals.shape[1] for bank in banks.values())
-        level = 1.0 - (self.alpha / 2.0)
-        neighbor_index = min(self.k_nn, n_calibration) - 1
-        # A stratum can be smaller than the requested target, in which case the
-        # solve saturates at "all calibration scenarios" rather than failing.
-        n_eff_target = min(self.n_eff_target, float(n_calibration))
-        # Weights at least this large in total are needed to reach `level`.
-        min_weight_sum = level / (1.0 - level)
-
-        chunk = _resolve_chunk_size(
-            n_calibration, n_elements, _initial_tail_window(n_calibration, level)
-        )
-        blocks = [
-            test_rows[start : start + chunk]
-            for start in range(0, test_rows.size, chunk)
-        ]
-
-        def _process(block_rows: np.ndarray) -> None:
-            block = test_embeddings[block_rows]
-            distances = _squared_distances(block, calibration, calibration_sq)
-            solved_n_eff: np.ndarray | None = None
-            if self.bandwidth == BANDWIDTH_N_EFF:
-                solved, solved_n_eff = _solve_bandwidth_for_n_eff(
-                    distances, n_eff_target
-                )
-            else:
-                solved = np.partition(distances, neighbor_index, axis=1)[
-                    :, neighbor_index
-                ]
-            bandwidth = np.maximum(solved, np.float32(1e-12))
-            # Unshifted: the total weight is compared with the test point's own
-            # unit weight, so its scale matters (see `_weighted_tail_offsets`).
-            weights = np.exp(-distances / bandwidth[:, None]).astype(
-                FLOAT32_DTYPE, copy=False
-            )
-            # n_eff does not depend on the scale of the weights, and is computed
-            # on shifted ones: far from every calibration scenario, the squares
-            # of these weights underflow in float32.
-            if solved_n_eff is None or not np.array_equal(bandwidth, solved):
-                solved_n_eff = _effective_sample_size_and_slope(
-                    distances, bandwidth.astype(np.float64)
-                )[0]
-            n_eff = solved_n_eff.astype(FLOAT32_DTYPE, copy=False)
-            n_eff_out[block_rows] = n_eff
-            bandwidth_out[block_rows] = bandwidth
-            # Too few effective neighbours: the stratum quantile. With too little
-            # total weight the level is unreachable for every element, so the
-            # quantile search is skipped too (the margin absorbs rounding).
-            degenerate = n_eff < self.n_eff_min
-            unreachable = (
-                weights.sum(axis=1, dtype=np.float64)
-                < min_weight_sum * _UNREACHABLE_MARGIN
-            )
-            kernel_rows = ~(degenerate | unreachable)
-
-            for name, bank in banks.items():
-                lower = np.broadcast_to(
-                    bank.fallback_lower, (len(block_rows), bank.fallback_lower.size)
-                ).copy()
-                upper = np.broadcast_to(
-                    bank.fallback_upper, (len(block_rows), bank.fallback_upper.size)
-                ).copy()
-                reached = np.zeros(lower.shape, dtype=bool)
-                if kernel_rows.any():
-                    kernel_lower, kernel_upper, kernel_reached = _weighted_tail_offsets(
-                        weights[kernel_rows], bank, level
-                    )
-                    lower[kernel_rows] = np.where(
-                        kernel_reached, kernel_lower, bank.fallback_lower
-                    )
-                    upper[kernel_rows] = np.where(
-                        kernel_reached, kernel_upper, bank.fallback_upper
-                    )
-                    reached[kernel_rows] = kernel_reached
-                # An element with no valid calibration residual in this stratum
-                # (e.g. a branch out of service in every calibration scenario)
-                # always takes the fallback bound. That is a property of the data,
-                # not of the kernel, so it must not flag every test scenario;
-                # nor must an element that has no interval in this test scenario
-                # (a known set-point, an out-of-service line).
-                usable = reached | ~bank.has_data[None, :]
-                valid = test_valid[name]
-                if valid is not None:
-                    usable |= ~np.asarray(valid[block_rows], dtype=bool)
-                fallback_out[block_rows] |= degenerate | ~usable.all(axis=1)
-                lower_offsets[name][block_rows] = lower
-                upper_offsets[name][block_rows] = upper
-
-        workers = _resolve_worker_count(self.n_jobs, len(blocks))
-        if workers <= 1:
-            for block_rows in blocks:
-                _process(block_rows)
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                list(executor.map(_process, blocks))
 
     # ------------------------------------------------------------ artifact
 
@@ -910,6 +695,429 @@ class KernelIntervalCalibrator:
         return self.entity_ids
 
 
+def predict_intervals_jointly(
+    calibrators: Sequence[KernelIntervalCalibrator],
+    predictions: Sequence[PredictionSet | ChannelSet],
+) -> list[dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """`predict_intervals` of several calibrators, sharing the kernel work.
+
+    Calibrators fitted on the same calibration scenarios and embeddings (e.g.
+    the voltage and line-loading families of one artifact), applied to the
+    same test scenarios, need the same distances and, with the same settings,
+    the same bandwidths and weights: these are computed once and shared.
+    Others are processed separately. Each result, and each calibrator's
+    `diagnostics` and `pooled_masks`, equal those of its own
+    `predict_intervals` call.
+
+    Args:
+        calibrators: The calibrators.
+        predictions: One prediction set per calibrator, as for
+            `predict_intervals`.
+
+    Returns:
+        One `{variable: (lower, upper)}` per calibrator, in order.
+    """
+
+    if len(calibrators) != len(predictions):
+        raise ValueError("Pass one prediction set per calibrator.")
+    units = [
+        _Unit.start(calibrator, prediction_set, calibrator.n_eff_target)
+        for calibrator, prediction_set in zip(calibrators, predictions, strict=True)
+    ]
+    _run_units(units)
+    results = []
+    for unit in units:
+        intervals, diagnostics, pooled = unit.finish()
+        unit.calibrator._diagnostics = diagnostics
+        unit.calibrator._pooled = pooled
+        results.append(intervals)
+    return results
+
+
+def _predict_targets(
+    calibrators: Sequence[KernelIntervalCalibrator],
+    predictions: Sequence[PredictionSet | ChannelSet],
+    targets: Sequence[float],
+) -> list[dict[float, tuple[dict[str, tuple[np.ndarray, np.ndarray]], dict]]]:
+    """Intervals and diagnostics of each calibrator at several `n_eff_target`s.
+
+    The same as fitting with each target and calling `predict_intervals`; the
+    distances are computed once for all targets (cross-validated tuning).
+    """
+
+    units = [
+        [_Unit.start(calibrator, prediction_set, float(target)) for target in targets]
+        for calibrator, prediction_set in zip(calibrators, predictions, strict=True)
+    ]
+    _run_units([unit for row in units for unit in row])
+    return [
+        {
+            float(target): unit.finish()[:2]
+            for target, unit in zip(targets, row, strict=True)
+        }
+        for row in units
+    ]
+
+
+@dataclass
+class _Unit:
+    """One calibrator applied to one test set at one `n_eff_target`.
+
+    The offsets and diagnostics are filled in place by `_run_units`.
+    """
+
+    calibrator: KernelIntervalCalibrator
+    predictions: PredictionSet | ChannelSet
+    n_eff_target: float
+    test_embeddings: np.ndarray
+    test_strata: np.ndarray
+    prediction_values: dict[str, np.ndarray]
+    test_valid: dict[str, np.ndarray | None]
+    lower_offsets: dict[str, np.ndarray]
+    upper_offsets: dict[str, np.ndarray]
+    n_eff: np.ndarray
+    bandwidth: np.ndarray
+    fallback: np.ndarray
+
+    @classmethod
+    def start(
+        cls,
+        calibrator: KernelIntervalCalibrator,
+        predictions: PredictionSet | ChannelSet,
+        n_eff_target: float,
+    ) -> _Unit:
+        _validate_entity_alignment(calibrator.entity_ids, _get_entity_ids(predictions))
+        test_embeddings = _require_scenario_embeddings(predictions)
+        if test_embeddings.shape[1] != calibrator.calibration_embeddings.shape[1]:
+            raise ValueError(
+                "Test embedding width "
+                f"({test_embeddings.shape[1]}) does not match the calibration bank "
+                f"({calibrator.calibration_embeddings.shape[1]}). The same "
+                "embedding_pooling must be used for compute and calibrate.",
+            )
+        n_test = test_embeddings.shape[0]
+        test_strata: np.ndarray
+        if calibrator.strat is None:
+            test_strata = np.zeros(n_test, dtype=np.int64)
+        else:
+            test_strata = _get_scenario_column(predictions, calibrator.strat).astype(
+                np.int64, copy=False
+            )
+        prediction_values = {
+            name: _get_prediction_channel(predictions, name)
+            for name in calibrator.channel_names
+        }
+        fallback = np.zeros(n_test, dtype=bool)
+        fallback[~np.isin(test_strata, calibrator.stratification_values)] = True
+        return cls(
+            calibrator=calibrator,
+            predictions=predictions,
+            n_eff_target=float(n_eff_target),
+            test_embeddings=test_embeddings,
+            test_strata=test_strata,
+            prediction_values=prediction_values,
+            test_valid={
+                name: _get_valid_mask(predictions, name)
+                for name in calibrator.channel_names
+            },
+            # Scenarios of a stratum the calibration data lacks keep infinite offsets.
+            lower_offsets={
+                name: np.full(values.shape, -np.inf, dtype=FLOAT32_DTYPE)
+                for name, values in prediction_values.items()
+            },
+            upper_offsets={
+                name: np.full(values.shape, np.inf, dtype=FLOAT32_DTYPE)
+                for name, values in prediction_values.items()
+            },
+            n_eff=np.zeros(n_test, dtype=FLOAT32_DTYPE),
+            bandwidth=np.zeros(n_test, dtype=FLOAT32_DTYPE),
+            fallback=fallback,
+        )
+
+    def shares_kernel_inputs(self, other: _Unit) -> bool:
+        """Same calibration scenarios, embedding geometry and test scenarios."""
+
+        mine, theirs = self.calibrator, other.calibrator
+        return (
+            mine.distance == theirs.distance
+            and _same_array(mine.stratification_values, theirs.stratification_values)
+            and _same_array(mine.calibration_strata, theirs.calibration_strata)
+            and _same_array(mine.embedding_mean, theirs.embedding_mean)
+            and _same_array(mine.embedding_scale, theirs.embedding_scale)
+            and _same_array(mine.calibration_embeddings, theirs.calibration_embeddings)
+            and _same_array(self.test_strata, other.test_strata)
+            and _same_array(self.test_embeddings, other.test_embeddings)
+        )
+
+    def finish(
+        self,
+    ) -> tuple[
+        dict[str, tuple[np.ndarray, np.ndarray]],
+        dict[str, np.ndarray],
+        dict[str, np.ndarray],
+    ]:
+        """`(intervals, diagnostics, pooled masks)` from the filled offsets."""
+
+        calibrator = self.calibrator
+        intervals: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        pooled_masks: dict[str, np.ndarray] = {}
+        for channel_name in calibrator.channel_names:
+            prediction = self.prediction_values[channel_name]
+            valid_mask = self.test_valid[channel_name]
+            lower_offsets = self.lower_offsets[channel_name]
+            upper_offsets = self.upper_offsets[channel_name]
+            if calibrator.sparse_strata == "pooled":
+                pooled_lower, pooled_upper = calibrator._pooled_quantiles_of(
+                    channel_name
+                )
+                lower_offsets, upper_offsets, pooled = pool_sparse_strata(
+                    lower_offsets, upper_offsets, pooled_lower, pooled_upper
+                )
+                pooled_masks[channel_name] = (
+                    pooled if valid_mask is None else pooled & valid_mask
+                )
+            lower = prediction + lower_offsets
+            upper = prediction + upper_offsets
+            if valid_mask is not None:
+                lower = np.where(valid_mask, lower, prediction)
+                upper = np.where(valid_mask, upper, prediction)
+            intervals[channel_name] = (
+                lower.astype(FLOAT32_DTYPE, copy=False),
+                upper.astype(FLOAT32_DTYPE, copy=False),
+            )
+        diagnostics = {
+            "n_eff": self.n_eff,
+            "kernel_bandwidth_sq": self.bandwidth,
+            "kernel_fallback": self.fallback,
+        }
+        return intervals, diagnostics, pooled_masks
+
+
+def _same_array(first: np.ndarray, second: np.ndarray) -> bool:
+    return first is second or (
+        first.shape == second.shape and bool(np.array_equal(first, second))
+    )
+
+
+def _run_units(units: Sequence[_Unit]) -> None:
+    """Fill the offsets and diagnostics of every unit, sharing what they share."""
+
+    groups: list[list[_Unit]] = []
+    for unit in units:
+        for group in groups:
+            if group[0].shares_kernel_inputs(unit):
+                group.append(unit)
+                break
+        else:
+            groups.append([unit])
+    for group in groups:
+        _run_group(group)
+
+
+@dataclass
+class _StratumWork:
+    """What every block of one stratum needs."""
+
+    index: int
+    calibration: np.ndarray
+    calibration_sq: np.ndarray
+
+
+def _run_group(group: Sequence[_Unit]) -> None:
+    """Units with the same calibration and test scenarios: one pass over the blocks.
+
+    Distances, bandwidths and weights depend on the scenario only, so each
+    block computes them once, per bandwidth setting, for every unit and
+    calibrated variable. Blocks of all strata are spread over one thread pool.
+    """
+
+    first_unit = group[0]
+    first = first_unit.calibrator
+    test_embeddings = _prepare_embeddings(
+        first_unit.test_embeddings,
+        first.embedding_mean,
+        first.embedding_scale,
+        first.distance,
+    )
+    test_strata = first_unit.test_strata
+    threads = _resolve_worker_count(first.n_jobs, os.cpu_count() or 1)
+    executor = ThreadPoolExecutor(max_workers=threads) if threads > 1 else None
+    try:
+        for unit in group:
+            unit.calibrator._ensure_banks(executor)
+        n_elements = max(
+            bank.sorted_residuals.shape[0]
+            for unit in group
+            for banks in unit.calibrator._banks.values()
+            for bank in banks[:1]
+        )
+        work: list[tuple[_StratumWork, np.ndarray]] = []
+        for stratum_index, stratum_value in enumerate(first.stratification_values):
+            test_rows = np.flatnonzero(test_strata == stratum_value)
+            if test_rows.size == 0:
+                continue
+            rows = first._banks[first.channel_names[0]][stratum_index].rows
+            if rows.size == 0:
+                # No calibration data in this stratum: its fallback quantiles
+                # are infinite (pooled ones replace them with sparse_strata).
+                for unit in group:
+                    calibrator = unit.calibrator
+                    for name in calibrator.channel_names:
+                        unit.lower_offsets[name][test_rows] = (
+                            calibrator.fallback_lower_quantiles[name][stratum_index]
+                        )
+                        unit.upper_offsets[name][test_rows] = (
+                            calibrator.fallback_upper_quantiles[name][stratum_index]
+                        )
+                    unit.fallback[test_rows] = True
+                continue
+            calibration = first.calibration_embeddings[rows]
+            stratum = _StratumWork(
+                index=stratum_index,
+                calibration=calibration,
+                calibration_sq=np.einsum("ij,ij->i", calibration, calibration),
+            )
+            chunk = _resolve_chunk_size(rows.size, n_elements)
+            work += [
+                (stratum, test_rows[start : start + chunk])
+                for start in range(0, test_rows.size, chunk)
+            ]
+
+        def process(item: tuple[_StratumWork, np.ndarray]) -> None:
+            _process_block(group, test_embeddings, *item)
+
+        if executor is None or len(work) <= 1:
+            for item in work:
+                process(item)
+        else:
+            list(executor.map(process, work))
+    finally:
+        if executor is not None:
+            executor.shutdown()
+
+
+def _process_block(
+    group: Sequence[_Unit],
+    test_embeddings: np.ndarray,
+    stratum: _StratumWork,
+    block_rows: np.ndarray,
+) -> None:
+    """Bounds of one block of test scenarios, for every unit of a group."""
+
+    distances = _squared_distances(
+        test_embeddings[block_rows], stratum.calibration, stratum.calibration_sq
+    )
+    n_calibration = distances.shape[1]
+    # Units with the same bandwidth rule share bandwidths and weights.
+    by_rule: dict[tuple[str, float], list[_Unit]] = {}
+    for unit in group:
+        calibrator = unit.calibrator
+        if calibrator.bandwidth == BANDWIDTH_N_EFF:
+            # A stratum can be smaller than the requested target, in which case
+            # the solve saturates at "all calibration scenarios".
+            rule = (BANDWIDTH_N_EFF, min(unit.n_eff_target, float(n_calibration)))
+        else:
+            rule = (BANDWIDTH_KNN, float(min(calibrator.k_nn, n_calibration) - 1))
+        by_rule.setdefault(rule, []).append(unit)
+    for (name, parameter), units in by_rule.items():
+        solved_n_eff: np.ndarray | None = None
+        if name == BANDWIDTH_N_EFF:
+            solved, solved_n_eff = _solve_bandwidth_for_n_eff(distances, parameter)
+        else:
+            neighbor_index = int(parameter)
+            solved = np.partition(distances, neighbor_index, axis=1)[:, neighbor_index]
+        bandwidth = np.maximum(solved, np.float32(1e-12))
+        # Unshifted: the total weight is compared with the test point's own
+        # unit weight, so its scale matters (see `_weighted_tail_offsets`).
+        weights = np.exp(-distances / bandwidth[:, None]).astype(
+            FLOAT32_DTYPE, copy=False
+        )
+        # n_eff does not depend on the scale of the weights, and is computed
+        # on shifted ones: far from every calibration scenario, the squares
+        # of these weights underflow in float32.
+        if solved_n_eff is None or not np.array_equal(bandwidth, solved):
+            solved_n_eff = _effective_sample_size_and_slope(
+                distances, bandwidth.astype(np.float64)
+            )[0]
+        n_eff = solved_n_eff.astype(FLOAT32_DTYPE, copy=False)
+        weight_sum = weights.sum(axis=1, dtype=np.float64)
+        for unit in units:
+            _unit_block(
+                unit, stratum.index, block_rows, weights, weight_sum, n_eff, bandwidth
+            )
+
+
+def _unit_block(
+    unit: _Unit,
+    stratum_index: int,
+    block_rows: np.ndarray,
+    weights: np.ndarray,
+    weight_sum: np.ndarray,
+    n_eff: np.ndarray,
+    bandwidth: np.ndarray,
+) -> None:
+    """One unit's bounds and diagnostics for one block, from shared weights."""
+
+    calibrator = unit.calibrator
+    level = 1.0 - (calibrator.alpha / 2.0)
+    # Weights at least this large in total are needed to reach `level`.
+    min_weight_sum = level / (1.0 - level)
+    unit.n_eff[block_rows] = n_eff
+    unit.bandwidth[block_rows] = bandwidth
+    # Too few effective neighbours: the stratum quantile. With too little
+    # total weight the level is unreachable for every element, so the
+    # quantile search is skipped too (the margin absorbs rounding).
+    degenerate = n_eff < calibrator.n_eff_min
+    unreachable = weight_sum < min_weight_sum * _UNREACHABLE_MARGIN
+    kernel_rows = ~(degenerate | unreachable)
+    kernel_weights: np.ndarray | None = None
+    kernel_weights64: np.ndarray | None = None
+    if kernel_rows.any():
+        kernel_weights = weights[kernel_rows]
+        kernel_weights64 = kernel_weights.astype(np.float64)
+    for name in calibrator.channel_names:
+        bank = calibrator._banks[name][stratum_index]
+        lower = np.broadcast_to(
+            bank.fallback_lower, (len(block_rows), bank.fallback_lower.size)
+        ).copy()
+        upper = np.broadcast_to(
+            bank.fallback_upper, (len(block_rows), bank.fallback_upper.size)
+        ).copy()
+        reached = np.zeros(lower.shape, dtype=bool)
+        if kernel_weights is not None and kernel_weights64 is not None:
+            kernel_lower, kernel_upper, kernel_reached = _tail_offsets(
+                kernel_weights, kernel_weights64, bank, level
+            )
+            lower[kernel_rows] = np.where(
+                kernel_reached, kernel_lower, bank.fallback_lower
+            )
+            upper[kernel_rows] = np.where(
+                kernel_reached, kernel_upper, bank.fallback_upper
+            )
+            reached[kernel_rows] = kernel_reached
+        # An element with no valid calibration residual in this stratum
+        # (e.g. a branch out of service in every calibration scenario)
+        # always takes the fallback bound. That is a property of the data,
+        # not of the kernel, so it must not flag every test scenario;
+        # nor must an element that has no interval in this test scenario
+        # (a known set-point, an out-of-service line).
+        usable = reached | ~bank.has_data[None, :]
+        valid = unit.test_valid[name]
+        if valid is not None:
+            usable |= ~np.asarray(valid[block_rows], dtype=bool)
+        unit.fallback[block_rows] |= degenerate | ~usable.all(axis=1)
+        unit.lower_offsets[name][block_rows] = lower
+        unit.upper_offsets[name][block_rows] = upper
+
+
+def _jit() -> ModuleType:
+    """The compiled kernels, imported on first use (numba takes a while to load)."""
+
+    from gridfm_trustlayer.conformal import _kernel_jit
+
+    return _kernel_jit
+
+
 def _squared_distances(
     block: np.ndarray,
     calibration: np.ndarray,
@@ -965,47 +1173,42 @@ def _solve_bandwidth_for_n_eff(
     calibration scenario) to the stratum size (uniform weights). It behaves
     close to a power of the bandwidth, so Newton steps on `log n_eff` against
     `log h` converge in a few iterations; a bracket around the root is kept,
-    and a step that would leave it is replaced by a bisection step. The rows of
-    a block are solved together so the work stays vectorized, but each row
-    stops as soon as it converges, so its bandwidth does not depend on the
-    other rows of the block.
+    and a step that would leave it is replaced by a bisection step. Where
+    `n_eff` is flat at one end of the bracket and steep at the other, Newton
+    steps can alternate between the two ends; a row still unconverged after
+    `_N_EFF_SOLVE_NEWTON_ITER` iterations continues by bisection only. Each
+    row is solved on its own (compiled, see `_kernel_jit.solve_bandwidths`),
+    so its bandwidth does not depend on the other rows of the block.
     """
 
-    positive = np.where(distances > 0.0, distances, np.inf)
-    nearest = positive.min(axis=1)
+    distances = np.ascontiguousarray(distances, dtype=FLOAT32_DTYPE)
+    n_rows = distances.shape[0]
+    minimum = np.empty(n_rows, dtype=FLOAT32_DTYPE)
+    nearest: np.ndarray = np.empty(n_rows, dtype=FLOAT32_DTYPE)
+    farthest: np.ndarray = np.empty(n_rows, dtype=FLOAT32_DTYPE)
+    bandwidth = np.zeros(n_rows, dtype=np.float64)
+    reached = np.zeros(n_rows, dtype=np.float64)
+    if n_rows == 0 or distances.shape[1] == 0:
+        return bandwidth.astype(FLOAT32_DTYPE), reached
+    jit = _jit()
+    jit.row_extremes(distances, minimum, nearest, farthest)
     nearest = np.where(np.isfinite(nearest), nearest, 1.0)
-    farthest = np.maximum(distances.max(axis=1), nearest)
-
+    farthest = np.maximum(farthest, nearest)
+    # The bracket is computed in float32, as by every earlier version.
     log_lower = np.log(nearest / _N_EFF_BRACKET_SPAN).astype(np.float64)
     log_upper = np.log(farthest * _N_EFF_BRACKET_SPAN).astype(np.float64)
-    log_target = np.log(target)
-    log_bandwidth = 0.5 * (log_lower + log_upper)
-    bandwidth = np.exp(log_bandwidth)
-    reached = np.zeros(distances.shape[0], dtype=np.float64)
-    active = np.arange(distances.shape[0])
-    step = log_bandwidth.copy()
-    for _ in range(_N_EFF_SOLVE_MAX_ITER):
-        point = step[active]
-        bandwidth[active] = np.exp(point)
-        n_eff, slope = _effective_sample_size_and_slope(
-            distances[active], np.exp(point)
-        )
-        reached[active] = n_eff
-        converged = np.abs(n_eff - target) <= _N_EFF_SOLVE_RTOL * target
-        below_target = n_eff < target
-        lower = np.where(below_target, point, log_lower[active])
-        upper = np.where(below_target, log_upper[active], point)
-        log_lower[active] = lower
-        log_upper[active] = upper
-        # A flat n_eff (slope near 0) gives no usable Newton step: the step is
-        # non-finite or outside the bracket, and bisection takes over below.
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            newton = point - (np.log(n_eff) - log_target) / slope
-        inside = np.isfinite(newton) & (newton > lower) & (newton < upper)
-        step[active] = np.where(inside, newton, 0.5 * (lower + upper))
-        active = active[~converged]
-        if active.size == 0:
-            break
+    jit.solve_bandwidths(
+        distances,
+        minimum,
+        log_lower,
+        log_upper,
+        float(target),
+        _N_EFF_SOLVE_RTOL,
+        _N_EFF_SOLVE_NEWTON_ITER,
+        _N_EFF_SOLVE_MAX_ITER,
+        bandwidth,
+        reached,
+    )
     return bandwidth.astype(FLOAT32_DTYPE, copy=False), reached
 
 
@@ -1034,74 +1237,11 @@ def _effective_sample_size_and_slope(
     return n_eff, slope
 
 
-def _resolve_chunk_size(n_calibration: int, n_elements: int, window: int) -> int:
-    """Test rows per block: distances and weights, plus the tail scans."""
+def _resolve_chunk_size(n_calibration: int, n_elements: int) -> int:
+    """Test rows per block: distances, weights and temporaries, per-element totals."""
 
-    per_row_bytes = max(
-        n_calibration * 4 * 3,
-        window * max(n_elements, 1) * 8 * _TAIL_SCAN_ARRAYS,
-        1,
-    )
-    return int(max(1, min(4096, _TARGET_BLOCK_BYTES // per_row_bytes)))
-
-
-def _first_crossing(
-    weights: np.ndarray,
-    positions: np.ndarray,
-    slack: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """First scan position at which the accumulated weight exceeds `slack`.
-
-    `weights` is `(n_rows, n_calibration + 1)` with a final zero column,
-    `positions` is `(window, n_elements)` calibration indices in scan order and
-    `slack` is `(n_rows, n_elements)`. Returns, per row and element, whether
-    the weight of the first `k + 1` positions exceeds the slack for some `k`,
-    and the first such `k`.
-
-    Two levels: sums over blocks of `_SCAN_BLOCK` positions locate the block
-    of the crossing, and a running sum inside that block finds the position.
-    Both levels add the float64 values in the same sequential order, so the
-    block that crosses always contains the crossing.
-    """
-
-    n_rows = weights.shape[0]
-    window, n_elements = positions.shape
-    n_blocks = -(-window // _SCAN_BLOCK)
-    padded = np.full(
-        (n_blocks * _SCAN_BLOCK, n_elements), weights.shape[1] - 1, dtype=INT32_DTYPE
-    )
-    padded[:window] = positions
-    gathered = weights[:, padded].reshape(n_rows, n_blocks, _SCAN_BLOCK, n_elements)
-    block_sums = gathered[:, :, 0, :].astype(np.float64)
-    for offset in range(1, _SCAN_BLOCK):
-        block_sums += gathered[:, :, offset, :]
-    cumulative = np.cumsum(block_sums, axis=1)
-    crossed = cumulative > slack[:, None, :]
-    found = np.asarray(crossed.any(axis=1))
-    block = np.argmax(crossed, axis=1)
-    before = np.where(
-        block > 0,
-        np.take_along_axis(cumulative, np.maximum(block - 1, 0)[:, None, :], axis=1)[
-            :, 0
-        ],
-        0.0,
-    )
-    inside = np.take_along_axis(gathered, block[:, None, None, :], axis=1)[:, 0]
-    running = before[:, None, :] + np.cumsum(inside, axis=1, dtype=np.float64)
-    offset_in_block = np.argmax(running > slack[:, None, :], axis=1)
-    return found, block * _SCAN_BLOCK + offset_in_block
-
-
-def _initial_tail_window(n_calibration: int, level: float) -> int:
-    """Sorted positions scanned first from each end for the weighted quantile.
-
-    The bound sits where the tail holds a share `1 - level` of the weight; a few
-    times that share of positions settles almost every case, and the rest are
-    scanned again with a doubled window.
-    """
-
-    window = int(np.ceil(_TAIL_WINDOW_FACTOR * (1.0 - level) * n_calibration))
-    return max(1, min(n_calibration, max(_MIN_TAIL_WINDOW, window)))
+    per_row_bytes = max(n_calibration * 4 * 6 + max(n_elements, 1) * 8 * 4, 1)
+    return int(max(1, min(_MAX_BLOCK_ROWS, _TARGET_BLOCK_BYTES // per_row_bytes)))
 
 
 def _weighted_tail_offsets(
@@ -1117,9 +1257,10 @@ def _weighted_tail_offsets(
     test residual), and the lower bound mirrors it from the top. Both depend
     only on the weight in the tails: the upper bound is where the weight above
     it stops exceeding `T - level * (T + 1)`. So `T` comes from one matrix
-    product and only the ends of the sorted order are scanned, widening the
-    scan where it does not settle the bound. The result equals the full scan
-    over all residuals.
+    product, and each bound is found by accumulating weight from its end of
+    the sorted order until it exceeds that slack (compiled, see
+    `_kernel_jit.tail_bounds`). The result equals the full scan over all
+    residuals.
 
     Returns:
         `(lower, upper, reached)` of shape `(n_rows, n_elements)`; `reached` is
@@ -1129,54 +1270,34 @@ def _weighted_tail_offsets(
 
     # Weights are gathered in float32 and summed in float64: the conversion is
     # exact, so the sums equal a float64 computation at half the memory traffic.
-    weights = np.asarray(weights, dtype=FLOAT32_DTYPE)
-    n_rows = weights.shape[0]
-    n_calibration, n_elements = bank.sorted_residuals.shape
-    total = weights.astype(np.float64) @ bank.valid
+    weights = np.ascontiguousarray(weights, dtype=FLOAT32_DTYPE)
+    return _tail_offsets(weights, weights.astype(np.float64), bank, level)
+
+
+def _tail_offsets(
+    weights: np.ndarray,
+    weights64: np.ndarray,
+    bank: _StratumBank,
+    level: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`_weighted_tail_offsets` with the float64 copy of the weights given."""
+
+    total = weights64 @ bank.valid
     slack = total - level * (total + 1.0)
     reached = slack >= 0.0
-
-    upper_index = np.zeros((n_rows, n_elements), dtype=np.int64)
-    lower_index = np.zeros((n_rows, n_elements), dtype=np.int64)
-    pending = reached.copy()
-    window = _initial_tail_window(n_calibration, level)
-    while True:
-        pending_rows = np.flatnonzero(pending.any(axis=1))
-        if pending_rows.size == 0:
-            break
-        window = min(window, n_calibration)
-        top = bank.sort_order_masked[n_calibration - window :][::-1]
-        bottom = bank.sort_order_masked[:window]
-        rows_per_step = max(
-            1,
-            _TARGET_BLOCK_BYTES // (window * n_elements * 8 * _TAIL_SCAN_ARRAYS),
+    n_elements = bank.sorted_residuals.shape[0]
+    lower = np.zeros((weights.shape[0], n_elements), dtype=FLOAT32_DTYPE)
+    upper = np.zeros_like(lower)
+    if reached.any():
+        _jit().tail_bounds(
+            weights,
+            np.ascontiguousarray(slack),
+            np.ascontiguousarray(reached),
+            bank.order,
+            bank.sorted_residuals,
+            lower,
+            upper,
         )
-        for start in range(0, pending_rows.size, rows_per_step):
-            rows = pending_rows[start : start + rows_per_step]
-            # A zero column for the invalid entries, which index it.
-            row_weights = np.concatenate(
-                [weights[rows], np.zeros((rows.size, 1), dtype=FLOAT32_DTYPE)], axis=1
-            )
-            row_slack = slack[rows]
-            # First k at which the weight of the k + 1 largest (smallest)
-            # residuals exceeds the slack.
-            above_found, above_k = _first_crossing(row_weights, top, row_slack)
-            below_found, below_k = _first_crossing(row_weights, bottom, row_slack)
-            settle = pending[rows] & above_found & below_found
-            upper_index[rows] = np.where(
-                settle, n_calibration - 1 - above_k, upper_index[rows]
-            )
-            lower_index[rows] = np.where(settle, below_k, lower_index[rows])
-            pending[rows] &= ~(above_found & below_found)
-        if window == n_calibration:
-            # Over all residuals the weight is T > slack, so every reachable
-            # bound settles at the latest here.
-            break
-        window *= 2
-
-    element = np.arange(n_elements)
-    upper = bank.sorted_residuals[upper_index, element]
-    lower = bank.sorted_residuals[lower_index, element]
     return lower, upper, reached
 
 

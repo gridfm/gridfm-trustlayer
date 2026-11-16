@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+import pytest
 
 from gridfm_trustlayer.io import (
     compute_line_loading,
     load_ground_truth,
     load_predictions,
 )
+from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 
 
 def test_predictions_roundtrip(tmp_path) -> None:
@@ -165,6 +167,84 @@ def test_line_loading_simple_case_and_removed_sentinel(tmp_path) -> None:
     assert loading.shape == (2, 1)
     np.testing.assert_allclose(loading[0, 0], np.float32(1.0), atol=1e-6)
     assert loading[1, 0] == np.float32(-1.0)
+
+
+def test_line_loading_equals_datakits_branch_flow_routine() -> None:
+    # The dense computation must reproduce datakit's routine bit for bit, on
+    # the long tables 0.1.1 built for it.
+    power_balance = pytest.importorskip("gridfm_datakit.utils.power_balance")
+    rng = np.random.default_rng(3)
+    n_scenarios, bus_ids = 6, np.array([7, 2, 11, 4, 9])
+    f_bus = np.array([7, 2, 2, 11, 4, 9, 7])
+    t_bus = np.array([2, 11, 4, 9, 9, 7, 2])  # the last one is a parallel line
+    n_branches = len(f_bus)
+    shape = (n_scenarios, n_branches)
+    ground_truth = GroundTruthSet(
+        scenario_ids=np.arange(n_scenarios),
+        bus_ids=bus_ids,
+        branch_ids=np.arange(n_branches),
+        n_outages=np.zeros(n_scenarios),
+        outage_type=np.zeros(n_scenarios),
+        system_load=np.zeros(n_scenarios),
+        removed_mask=rng.random(shape) < 0.2,
+        Vm=np.zeros((n_scenarios, len(bus_ids))),
+        Va=np.zeros((n_scenarios, len(bus_ids))),
+        channels={},
+        admittances={
+            f"{name}_{part}": rng.normal(size=shape).astype(np.float32)
+            for name in ("Yff", "Yft", "Ytf", "Ytt")
+            for part in ("r", "i")
+        },
+        f_bus=f_bus,
+        t_bus=t_bus,
+        rate_a=np.array([100.0, 150.0, 0.0, 80.0, 120.0, 90.0, 100.0]),
+        base_kv=np.ones(len(bus_ids)),
+        sn_mva=100.0,
+        bus_type_masks={},
+    )
+    vm = rng.uniform(0.9, 1.1, size=(n_scenarios, len(bus_ids))).astype(np.float32)
+    va = rng.uniform(-0.5, 0.5, size=vm.shape).astype(np.float32)
+
+    bus_frame = pd.DataFrame(
+        {
+            "scenario": np.repeat(ground_truth.scenario_ids, len(bus_ids)),
+            "bus": np.tile(bus_ids, n_scenarios),
+            "Vm": vm.reshape(-1).astype(np.float64),
+            "Va": np.rad2deg(va.reshape(-1).astype(np.float64)),
+        }
+    )
+    branch_frame = pd.DataFrame(
+        {
+            "scenario": np.repeat(ground_truth.scenario_ids, n_branches),
+            "idx": np.tile(ground_truth.branch_ids, n_scenarios),
+            "from_bus": np.tile(f_bus, n_scenarios),
+            "to_bus": np.tile(t_bus, n_scenarios),
+        }
+    )
+    for key, values in ground_truth.admittances.items():
+        branch_frame[key] = values.reshape(-1).astype(np.float64)
+    pf, qf, pt, qt = power_balance.compute_branch_powers_vectorized(
+        branch_frame, bus_frame, dc=False, sn_mva=ground_truth.sn_mva
+    )
+    rate = np.tile(ground_truth.rate_a, n_scenarios)
+    with np.errstate(divide="ignore"):
+        expected = np.maximum(np.sqrt(pf**2 + qf**2), np.sqrt(pt**2 + qt**2)) / rate
+    expected[ground_truth.removed_mask.reshape(-1) | (rate <= 0.0)] = -1.0
+
+    loading = compute_line_loading(vm, va, ground_truth)
+
+    np.testing.assert_array_equal(loading, expected.reshape(shape).astype(np.float32))
+
+
+def test_line_loading_rejects_a_branch_to_an_unknown_bus(tmp_path) -> None:
+    bus_path = tmp_path / "bus_data.parquet"
+    branch_path = tmp_path / "branch_data.parquet"
+    _write_ground_truth_fixture(bus_path, branch_path)
+    ground_truth = load_ground_truth(str(bus_path), str(branch_path))
+    ground_truth.t_bus = ground_truth.t_bus + 100
+
+    with pytest.raises(ValueError, match="not among the buses"):
+        compute_line_loading(ground_truth.Vm, ground_truth.Va, ground_truth)
 
 
 def test_task_specific_channels_are_preserved(tmp_path) -> None:

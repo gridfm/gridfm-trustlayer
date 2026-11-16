@@ -12,6 +12,8 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
     options:
       members: [fit, predict_intervals, diagnostics]
 
+::: gridfm_trustlayer.conformal.kernel.predict_intervals_jointly
+
 ## Data containers
 
 ::: gridfm_trustlayer.ChannelSet
@@ -53,6 +55,8 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 ## Kernel bandwidth tuning
 
 ::: gridfm_trustlayer.conformal.tuning.tune_n_eff_target
+
+::: gridfm_trustlayer.conformal.tuning.tune_n_eff_targets
 
 ::: gridfm_trustlayer.conformal.tuning.TuningOptions
     options:

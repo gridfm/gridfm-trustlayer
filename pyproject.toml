@@ -25,6 +25,9 @@ classifiers = [
 ]
 dependencies = [
   "matplotlib>=3.8.4",
+  # Compiled inner loops of cp_type kernel (gridfm_trustlayer.conformal._kernel_jit);
+  # 0.61.2 is the first release that supports numpy 2.2.
+  "numba>=0.61.2",
   "numpy>=2.2",
   "pandas>=2.3",
   "pyarrow>=16",
@@ -40,7 +43,8 @@ Changelog = "https://github.com/gridfm/gridfm-trustlayer/blob/main/CHANGELOG.md"
 Paper = "https://arxiv.org/abs/2602.07995"
 
 [project.optional-dependencies]
-# Line loading uses datakit's branch-flow routine (gridfm_trustlayer.io.loading).
+# gridfm-datakit in the same environment, e.g. to generate data. Trustlayer does
+# not need it: line loading uses datakit's formula without importing datakit.
 datakit = ["gridfm-datakit>=1.1.0"]
 # The same, next to gridfm-graphkit for running models in one environment;
 # graphkit needs PyTorch and its extensions, see its installation guide.

@@ -30,18 +30,18 @@ gridfm_trustlayer --help
 
 ## Optional extras
 
-Some features need extra packages. Install them by adding the extra's name in brackets:
+Every command, including `line_loading`, works with the base install. The extras add packages for other uses; install them by adding the extra's name in brackets:
 
 | Extra | Adds | You need it to |
 | --- | --- | --- |
-| `datakit` | `gridfm-datakit` | calibrate **`line_loading`**: trustlayer computes line loading with datakit's branch-flow routine. Not needed for `Vm` and `Va` alone. |
-| `graphkit` | `gridfm-graphkit` and `gridfm-datakit` | the same, in an environment where you also run models with graphkit, which needs PyTorch (install it first, following graphkit's guide). |
 | `interactive` | `ipywidgets` | use the [config builder](config-builder.md), a Jupyter form that writes the config file for you. |
+| `datakit` | `gridfm-datakit` | generate data with datakit in the same environment. Trustlayer itself does not need it: it computes line loading with datakit's branch-flow formula, without importing datakit. |
+| `graphkit` | `gridfm-graphkit` and `gridfm-datakit` | also run models with graphkit in the same environment, which needs PyTorch (install it first, following graphkit's guide). |
 
-For example, both at once:
+For example:
 
 ```bash
-python -m pip install "gridfm-trustlayer[datakit,interactive]"
+python -m pip install "gridfm-trustlayer[interactive]"
 ```
 
 !!! tip "Using the GridFM tools in one environment"

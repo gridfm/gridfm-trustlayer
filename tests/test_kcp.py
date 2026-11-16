@@ -286,6 +286,62 @@ def test_embedding_pooling_strategies(tmp_path) -> None:
     )
 
 
+@pytest.mark.parametrize("pooling", ["mean", "max", "meanmax", "concat"])
+@pytest.mark.parametrize("subset", [False, True])
+def test_pooling_column_by_column_equals_the_whole_frame(
+    tmp_path, pooling, subset
+) -> None:
+    import pandas as pd  # type: ignore[import-untyped]
+
+    from tests.conformal_reference import pooled_embeddings_frame_reference
+
+    rng = np.random.default_rng(1)
+    n_scenarios, n_buses, dim = 40, 24, 70  # more buses than one pairwise block
+    scenarios = rng.permutation(np.arange(100, 100 + n_scenarios))
+    frame = pd.DataFrame(
+        {
+            "scenario": np.repeat(scenarios, n_buses),
+            "bus": np.tile(rng.permutation(n_buses), n_scenarios),
+        }
+    )
+    values = rng.normal(size=(len(frame), dim)).astype(np.float32) * 10.0
+    for index in rng.permutation(dim):  # column order differs from name order
+        frame[f"emb_{index:03d}"] = values[:, index]
+    frame = frame.sample(frac=1.0, random_state=2)  # rows in no particular order
+    path = tmp_path / "emb.parquet"
+    frame.to_parquet(path, index=False, row_group_size=97)
+    wanted = np.sort(scenarios)[::3] if subset else None
+
+    loaded = load_scenario_embeddings(str(path), pooling=pooling, scenario_ids=wanted)
+    expected_ids, expected = pooled_embeddings_frame_reference(
+        str(path), pooling, wanted
+    )
+
+    np.testing.assert_array_equal(loaded.scenario_ids, expected_ids)
+    np.testing.assert_array_equal(loaded.embeddings, expected)
+
+
+def test_pooling_strategies_added_to_the_registry_get_the_whole_array(
+    tmp_path, monkeypatch
+) -> None:
+    import pandas as pd  # type: ignore[import-untyped]
+
+    rng = np.random.default_rng(2)
+    values = rng.normal(size=(6, 3, 4)).astype(np.float32)
+    frame = pd.DataFrame(
+        {"scenario": np.repeat(np.arange(6), 3), "bus": np.tile(np.arange(3), 6)}
+    )
+    for index in range(4):
+        frame[f"emb_{index:03d}"] = values.reshape(-1, 4)[:, index]
+    path = tmp_path / "emb.parquet"
+    frame.to_parquet(path, index=False)
+    monkeypatch.setitem(POOLING_REGISTRY, "first", lambda stacked: stacked[:, 0, :])
+
+    loaded = load_scenario_embeddings(str(path), pooling="first")
+
+    np.testing.assert_array_equal(loaded.embeddings, values[:, 0, :])
+
+
 def test_validate_pooling_rejects_unknown() -> None:
     assert validate_pooling(None) == "mean"
     with pytest.raises(ValueError, match="Unsupported embedding_pooling"):

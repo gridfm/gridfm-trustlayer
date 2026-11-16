@@ -6,7 +6,11 @@ import argparse
 import hashlib
 import math
 import os
-from collections.abc import Callable, Iterable, Mapping
+import shutil
+import tempfile
+import weakref
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,13 +27,16 @@ from gridfm_trustlayer.cli.config import (
 from gridfm_trustlayer.conformal import ChannelSet, NaiveIntervalCalibrator
 from gridfm_trustlayer.conformal.kernel import (
     KernelIntervalCalibrator,
+    predict_intervals_jointly,
 )
 from gridfm_trustlayer.io import (
     GroundTruthSet,
     PredictionSet,
     compute_line_loading,
+    load_predictions,
 )
 from gridfm_trustlayer.io.embeddings import (
+    ScenarioEmbeddingSet,
     load_scenario_embeddings,
 )
 from gridfm_trustlayer.io.ground_truth import (
@@ -43,6 +50,7 @@ from gridfm_trustlayer.io.parquet import (
     open_dataset,
     read_frame,
 )
+from gridfm_trustlayer.io.predictions import _predictions_from_frame
 
 SCREEN_BOUND_TOLERANCE = 1e-6
 
@@ -53,12 +61,6 @@ _BLOCK_ROWS = DEFAULT_BLOCK_ROWS
 
 # Scenarios whose predictions enter the in-sample fingerprint (with every id).
 _FINGERPRINT_SCENARIOS = 1000
-
-
-# Test embeddings are read and pooled once when the file is small enough to
-# decode at once (e.g. one row per scenario); larger ones, such as per-bus
-# embeddings of a big grid, are read again for each block.
-_EMBEDDINGS_PRELOAD_BYTES = 1 << 30
 
 
 BASE_ANALYSIS_STRAT_COLUMNS = ("n_outages", "outage_type", "system_load_bin")
@@ -105,28 +107,22 @@ def _sparse_stratum_label(strat: str | None, variable: str, value: int) -> str:
 
 
 class _EmbeddingSource:
-    """Scenario embeddings for a kernel artifact, attached block by block.
+    """Scenario embeddings for a kernel artifact, pooled once per command.
 
-    Small files are read and pooled once; larger ones (e.g. per-bus embeddings
-    of a big grid) are read again for each block, which keeps memory bounded.
+    The file is read and pooled one column at a time (see
+    `load_scenario_embeddings`), so memory stays bounded whatever its size, and
+    each block takes its rows from the result. Worker processes receive the
+    pooled array through a temporary file, which they map into memory instead
+    of reading the embeddings again; it is removed with this object.
     """
 
-    def __init__(
-        self,
-        path: str,
-        pooling: str,
-        scenario_ids: np.ndarray,
-        *,
-        preload: bool = True,
-    ) -> None:
+    def __init__(self, path: str, pooling: str, scenario_ids: np.ndarray) -> None:
         self.path = path
         self.pooling = pooling
-        self.preloaded = None
-        # Parallel workers read only their own blocks (`preload=False`).
-        if preload and _decoded_size_estimate(path) <= _EMBEDDINGS_PRELOAD_BYTES:
-            self.preloaded = load_scenario_embeddings(
-                path, pooling=pooling, scenario_ids=scenario_ids
-            )
+        self.pooled = load_scenario_embeddings(
+            path, pooling=pooling, scenario_ids=scenario_ids
+        )
+        self._spilled: str | None = None
 
     @classmethod
     def for_artifact(
@@ -140,43 +136,146 @@ class _EmbeddingSource:
         return None if spec is None else cls(*spec, scenario_ids)
 
     def attach(self, predictions: PredictionSet) -> None:
-        if self.preloaded is not None:
-            predictions.scenario_embeddings = self.preloaded.align_to(
-                predictions.scenario_ids
-            )
-        else:
-            _attach_scenario_embeddings(predictions, self.path, pooling=self.pooling)
+        predictions.scenario_embeddings = self.pooled.align_to(predictions.scenario_ids)
+
+    def __getstate__(self) -> dict[str, Any]:
+        if self._spilled is None:
+            directory = tempfile.mkdtemp(prefix="gridfm-trustlayer-embeddings-")
+            weakref.finalize(self, shutil.rmtree, directory, True)
+            np.save(Path(directory) / "embeddings.npy", self.pooled.embeddings)
+            np.save(Path(directory) / "scenario_ids.npy", self.pooled.scenario_ids)
+            self._spilled = directory
+        return {
+            "path": self.path,
+            "pooling": self.pooling,
+            "source_dim": self.pooled.source_dim,
+            "directory": self._spilled,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        directory = Path(state["directory"])
+        self.path = state["path"]
+        self.pooling = state["pooling"]
+        # The process that pooled the embeddings owns the files.
+        self._spilled = str(directory)
+        self.pooled = ScenarioEmbeddingSet(
+            scenario_ids=np.load(directory / "scenario_ids.npy"),
+            embeddings=np.load(directory / "embeddings.npy", mmap_mode="r"),
+            pooling=state["pooling"],
+            source_dim=int(state["source_dim"]),
+        )
 
 
-def _bounds_notes(output_paths: Iterable[str]) -> list[str]:
+def _block_predictions(
+    path: str,
+    block: np.ndarray,
+    *,
+    task_name: str | None,
+    generator_path: str | None,
+    whole_rows: bool,
+) -> tuple[PredictionSet, pd.DataFrame | None]:
+    """A block's predictions, and with `whole_rows` its rows with every column.
+
+    The rows are read once: the loader takes its columns from them.
+    """
+
+    if not whole_rows:
+        return (
+            load_predictions(
+                path,
+                task_name=task_name,
+                generator_parquet_path=generator_path,
+                scenario_ids=block,
+            ),
+            None,
+        )
+    frame = read_frame(path, scenario_ids=block)
+    return (
+        _predictions_from_frame(
+            frame, path, task_name=task_name, generator_parquet_path=generator_path
+        ),
+        frame,
+    )
+
+
+def _predict_all(
+    calibrators: Mapping[str, NaiveIntervalCalibrator | KernelIntervalCalibrator],
+    applications: Mapping[str, ChannelSet],
+) -> dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """Intervals of every calibrator; kernel ones share their kernel work."""
+
+    kernel = [
+        kind
+        for kind, calibrator in calibrators.items()
+        if isinstance(calibrator, KernelIntervalCalibrator)
+    ]
+    intervals: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+    if kernel:
+        joint = predict_intervals_jointly(
+            [cast(KernelIntervalCalibrator, calibrators[kind]) for kind in kernel],
+            [applications[kind] for kind in kernel],
+        )
+        intervals.update(zip(kernel, joint, strict=True))
+    for kind, calibrator in calibrators.items():
+        if kind not in intervals:
+            intervals[kind] = calibrator.predict_intervals(applications[kind])
+    return {kind: intervals[kind] for kind in calibrators}
+
+
+@dataclass
+class _NotesPart:
+    """What the end-of-run notes need from one block of one output."""
+
+    # Values with pooled bounds, per variable.
+    pooled: dict[str, int]
+    # kcp_fallback of each scenario of the block (None without the column).
+    fallback: pd.Series | None
+
+
+def _notes_part(frame: pd.DataFrame) -> _NotesPart:
+    """The note counts of one block's output rows, as they are written."""
+
+    pooled = {
+        column.removesuffix("_pooled"): int(
+            frame[column].fillna(False).astype(bool).sum()
+        )
+        for column in frame.columns
+        if str(column).endswith("_pooled")
+    }
+    fallback = (
+        frame.groupby("scenario")["kcp_fallback"].first()
+        if "kcp_fallback" in frame.columns
+        else None
+    )
+    return _NotesPart(pooled=pooled, fallback=fallback)
+
+
+def _bounds_notes(parts: Mapping[str, Sequence[_NotesPart]]) -> list[str]:
     """What the bounds of a run rest on, when it is not the usual case.
 
     The values whose bounds come from all calibration scenarios pooled across
     strata (too few samples in their stratum), and the share of scenarios in
-    which the kernel fell back to the stratum quantile. Read from the written
-    outputs, so that `calibrate` and `apply` report alike.
+    which the kernel fell back to the stratum quantile. `parts` holds, per
+    output in order, the `_notes_part` of each block, taken from the rows as
+    they are written, so that `calibrate` and `apply` report alike.
     """
 
     pooled_notes: dict[str, str] = {}
     fallback_scenarios: dict[int, bool] = {}
-    for path in output_paths:
-        columns = column_names(path)
-        pooled = [c for c in columns if c.endswith("_pooled")]
-        fallback = ["kcp_fallback"] if "kcp_fallback" in columns else []
-        if not pooled and not fallback:
-            continue
-        frame = read_frame(path, ["scenario", *pooled, *fallback])
-        for column in pooled:
-            n = int(frame[column].fillna(False).astype(bool).sum())
+    for output_parts in parts.values():
+        pooled: dict[str, int] = {}
+        for part in output_parts:
+            for variable, count in part.pooled.items():
+                pooled[variable] = pooled.get(variable, 0) + count
+        for variable, n in pooled.items():
             if n:
-                variable = column.removesuffix("_pooled")
                 pooled_notes[variable] = (
                     f"{variable}: {n:,} values use pooled bounds (their stratum has "
                     "too few calibration samples; no guarantee within it)"
                 )
-        if fallback:
-            flags = frame.groupby("scenario")["kcp_fallback"].first()
-            fallback_scenarios.update(flags.astype(bool).to_dict())
+        for part in output_parts:
+            if part.fallback is not None:
+                fallback_scenarios.update(part.fallback.astype(bool).to_dict())
     notes = [pooled_notes[v] for v in sorted(pooled_notes, key=reports.variable_rank)]
     if fallback_scenarios:
         share = sum(fallback_scenarios.values()) / len(fallback_scenarios)
@@ -360,13 +459,6 @@ def _ground_truth_paths(
             "inputs.test.pf_edge (or --pf-node / --pf-edge).",
         )
     return str(pf_node), str(pf_edge)
-
-
-def _decoded_size_estimate(path: str) -> int:
-    """Rough in-memory size of a whole dataset once decoded, from its metadata."""
-
-    dataset = open_dataset(path)
-    return dataset.count_rows() * len(dataset.schema.names) * 4 * 3
 
 
 def _scan_bus_types(path: str) -> dict[int, str]:
@@ -1043,23 +1135,6 @@ def _merge_kernel_diagnostics(
         }
     )
     return frame.merge(diagnostic_frame, on="scenario", how="left")
-
-
-def _attach_scenario_embeddings(
-    predictions,
-    embeddings_path: str,
-    *,
-    pooling: str,
-):
-    """Load, pool, and align scenario embeddings onto a prediction set."""
-
-    embedding_set = load_scenario_embeddings(
-        embeddings_path,
-        pooling=pooling,
-        scenario_ids=predictions.scenario_ids,
-    )
-    predictions.scenario_embeddings = embedding_set.align_to(predictions.scenario_ids)
-    return predictions
 
 
 def _default_output_dir(task_name: str, cp_type: str, *, create: bool = True) -> Path:

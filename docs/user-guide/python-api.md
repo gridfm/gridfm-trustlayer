@@ -166,6 +166,8 @@ Both reach about 90% overall, but `element` gives every scenario the same margin
 
 The keyword arguments mirror the config keys: `bandwidth`, `n_eff_target`, `k_nn`, `n_eff_min`, `distance` and `strat`. In practice, embeddings come from `load_scenario_embeddings`, which reads graphkit's embeddings parquet and pools it per scenario.
 
+Kernel calibrators fitted on the same calibration scenarios, such as one for `Vm` and `Va` and one for `line_loading`, need the same distances and, with the same settings, the same bandwidths. `gridfm_trustlayer.conformal.kernel.predict_intervals_jointly([volt, line], [volt_test, line_test])` computes them once for all and returns one result per calibrator, equal to its own `predict_intervals`; the CLI uses it for every block.
+
 ## From GridFM parquet files
 
 The loaders read the files the CLI reads. `load_predictions` returns a `PredictionSet` and `load_ground_truth` a `GroundTruthSet`; both hold `(n_scenarios, n_buses)` arrays such as `.Vm` and `.Va`, aligned on the same scenarios when you pass `scenario_ids`. The ground truth also provides the per-scenario `n_outages`, `outage_type` and `system_load` for stratification:
@@ -249,4 +251,4 @@ volt_calibrator = calibrators["volt"]  # Vm, Va
 
 ## Choosing the kernel bandwidth from Python
 
-The cross-validated choice of `n_eff_target` behind `n_eff_target: auto` is available as `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`. It takes the calibration `ChannelSet`s and a `TuningOptions` object, and returns the chosen target and distance with a table of all candidates. It runs in one process unless you pass `n_jobs` (e.g. `n_jobs=4`, as the CLI does); the result is the same either way. The worker processes are spawned, so a script that uses them must start from an `if __name__ == "__main__":` block. See [Kernel-weighted calibration](kernel.md#choosing-the-bandwidth-automatically) for the procedure.
+The cross-validated choice of `n_eff_target` behind `n_eff_target: auto` is available as `gridfm_trustlayer.conformal.tuning.tune_n_eff_target`. It takes the calibration `ChannelSet`s and a `TuningOptions` object, and returns the chosen target and distance with a table of all candidates. It runs in threads, every CPU unless you pass `n_jobs`; the result is the same whatever their number. `tune_n_eff_targets` tunes several families of variables on the same calibration scenarios at once (as the CLI does for voltages and line loading), sharing the folds and the kernel work; each result equals that of `tune_n_eff_target` on its family alone. See [Kernel-weighted calibration](kernel.md#choosing-the-bandwidth-automatically) for the procedure.

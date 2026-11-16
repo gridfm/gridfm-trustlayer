@@ -87,7 +87,74 @@ def read_frame(
         ids = np.unique(np.asarray(list(scenario_ids), dtype=np.int64))
         scenario_type = dataset.schema.field("scenario").type
         expression = ds.field("scenario").isin(pa.array(ids).cast(scenario_type))
+        dataset = _files_holding(path, dataset, ids)
     return dataset.to_table(columns=selected, filter=expression).to_pandas()
+
+
+def _files_holding(
+    path: str | Path, dataset: ds.Dataset, ids: np.ndarray
+) -> ds.Dataset:
+    """`dataset` restricted to the files whose scenario range meets sorted `ids`.
+
+    A filter alone makes Arrow open every file of a partitioned dataset (e.g.
+    datakit's raw data, one directory per 200 scenarios) for each read; reading
+    one block of scenarios at a time would open them all for every block. The
+    ranges come from the files' statistics, so this holds for any layout.
+    """
+
+    ranges = _scenario_ranges(path)
+    if ranges is None or ids.size == 0:
+        return dataset
+    fragments, lows, highs = ranges
+    first = np.minimum(np.searchsorted(ids, lows, side="left"), ids.size - 1)
+    keep = ids[first] >= lows
+    keep &= ids[first] <= highs
+    if keep.all():
+        return dataset
+    return ds.FileSystemDataset(
+        [fragment for fragment, kept in zip(fragments, keep, strict=True) if kept],
+        dataset.schema,
+        dataset.format,
+        dataset.filesystem,
+    )
+
+
+def _scenario_ranges(
+    path: str | Path,
+) -> tuple[list[ds.Fragment], np.ndarray, np.ndarray] | None:
+    """Per file of a multi-file dataset: its smallest and largest scenario.
+
+    None for a single file, where Arrow skips row groups by their statistics
+    itself. A file without statistics gets an unbounded range.
+    """
+
+    resolved = Path(path).resolve()
+    return _scenario_ranges_cached(str(resolved), resolved.stat().st_mtime_ns)
+
+
+@lru_cache(maxsize=16)
+def _scenario_ranges_cached(
+    path: str, modified_ns: int
+) -> tuple[list[ds.Fragment], np.ndarray, np.ndarray] | None:
+    fragments = list(_open_dataset(path, modified_ns).get_fragments())
+    if len(fragments) <= 1:
+        return None
+    lows = np.full(len(fragments), -np.inf)
+    highs = np.full(len(fragments), np.inf)
+    for index, fragment in enumerate(fragments):
+        row_groups = getattr(fragment, "row_groups", None)
+        if not row_groups:
+            continue
+        bounds = [
+            (group.statistics or {}).get("scenario") or {} for group in row_groups
+        ]
+        if all(b.get("min") is not None and b.get("max") is not None for b in bounds):
+            lows[index] = min(float(b["min"]) for b in bounds)
+            highs[index] = max(float(b["max"]) for b in bounds)
+    return fragments, lows, highs
+
+
+atexit.register(_scenario_ranges_cached.cache_clear)
 
 
 def read_scenario_ids(path: str | Path) -> np.ndarray:
