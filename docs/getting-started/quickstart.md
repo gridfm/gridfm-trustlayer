@@ -4,7 +4,7 @@ This page takes you from a trained GridFM model to calibrated intervals and scre
 
 You need:
 
-- `gridfm-trustlayer` installed with the `datakit` extra, since this example calibrates line loading ([Installation](installation.md));
+- `gridfm-trustlayer` installed ([Installation](installation.md));
 - [gridfm-datakit](https://github.com/gridfm/gridfm-datakit) to generate scenarios;
 - [gridfm-graphkit](https://github.com/gridfm/gridfm-graphkit) and a trained power-flow model to predict them.
 

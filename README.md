@@ -23,7 +23,7 @@ In N-k contingency screening, a line is flagged when the upper bound of its pred
 
 - **Two conformal methods.** Stratified split-conformal prediction (`cp_type: element`), with a finite-sample coverage guarantee when calibration and test scenarios are exchangeable. Kernel-weighted conformal prediction (`cp_type: kernel`), which adapts the margin to each scenario using the model's embeddings and whose coverage is verified empirically.
 - **Stratification** by number of outages, outage type, system load or predicted value, so bounds widen where the model is less accurate.
-- **Voltages and line loading.** `Vm` and `Va` are calibrated directly; `line_loading` is derived from the predicted voltages with datakit's branch-flow routine.
+- **Voltages and line loading.** `Vm` and `Va` are calibrated directly; `line_loading` is derived from the predicted voltages with the AC branch-flow formula of gridfm-datakit.
 - **Screening** against operating limits: every value is *within limits*, *uncertain* or a *violation*, and every operating scenario *secure*, *uncertain* or *insecure*, compared with the point prediction alone. On test scenarios, checked against the true AC solution; on new scenarios, with no solution needed.
 - **Works with any model** whose predictions follow the GridFM parquet layout, or with plain NumPy arrays through the Python API. CPU only.
 
@@ -35,10 +35,10 @@ Requires Python 3.10–3.12.
 python -m pip install gridfm-trustlayer
 ```
 
-Optional extras: `datakit` (needed for `line_loading`) and `interactive` (the Jupyter config builder):
+Optional extra: `interactive` (the Jupyter config builder):
 
 ```bash
-python -m pip install "gridfm-trustlayer[datakit,interactive]"
+python -m pip install "gridfm-trustlayer[interactive]"
 ```
 
 The development version: `python -m pip install "git+https://github.com/gridfm/gridfm-trustlayer"`.
@@ -158,14 +158,15 @@ line_status = classify_status(lower, upper, upper_limit=1.0)
 scenario = scenario_status(line_status, axis=1)  # secure, uncertain or insecure
 ```
 
-See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files.
+See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/python-api/) for the kernel method and for loading GridFM files. With your own model's outputs in a table, start from [Using trustlayer with your own data](https://gridfm.github.io/gridfm-trustlayer/user-guide/own-data/): `ChannelSet.from_frame` builds the arrays, `check_inputs` says what to fix, `TrustLayer` fits, applies and saves the bounds of buses and lines together, and `coverage_report`, `screening_report` and `to_frame` give the results as tables; the notebook [`examples/notebooks/own_model.ipynb`](https://github.com/gridfm/gridfm-trustlayer/blob/main/examples/notebooks/own_model.ipynb) does it all with a model outside GridFM. The same guide ships with the package, for you or an AI coding assistant: `gridfm_trustlayer guide` prints it.
 
 ## Documentation
 
 - [Getting started](https://gridfm.github.io/gridfm-trustlayer/getting-started/installation/): installation, demo notebook, quick start, config builder
-- [User guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/data/): preparing the data, choosing a setup, kernel-weighted calibration, reading the results, troubleshooting
+- [User guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/data/): preparing the data, choosing a setup, kernel-weighted calibration, reading the results, your own model and data, troubleshooting
 - [Reference](https://gridfm.github.io/gridfm-trustlayer/reference/cli/): CLI, configuration keys, data schemas, Python API
 - [Methodology](https://gridfm.github.io/gridfm-trustlayer/methodology/): the statistics behind both methods
+- [Roadmap](https://gridfm.github.io/gridfm-trustlayer/roadmap/): what we plan to add next
 
 The sources are in [`docs/`](https://github.com/gridfm/gridfm-trustlayer/tree/main/docs); `mkdocs serve` builds the site locally.
 

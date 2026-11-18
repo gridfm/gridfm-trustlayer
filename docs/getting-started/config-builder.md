@@ -2,6 +2,9 @@
 
 All four commands read one YAML config. Which keys it needs depends on your earlier choices: kernel options only matter for `cp_type: kernel`, bin counts only for binned stratifications, screening bounds only if you screen. The **config builder** is a Jupyter form that asks only the questions that apply, explains each option in one line, and checks the result with the same validation as the CLI before saving it.
 
+!!! tip "Not using GridFM's file layout?"
+    The config and the commands read the files of GridFM's tools: graphkit's predictions and datakit's raw data. With another model, or with your outputs in a table of your own, use the Python API instead: [Using trustlayer with your own data](../user-guide/own-data.md) goes from a table of predictions and true values to calibrated bounds, with no config.
+
 ## Open the form
 
 Install the `interactive` extra, and Jupyter if you don't have it:

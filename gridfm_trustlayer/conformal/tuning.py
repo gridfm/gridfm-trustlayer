@@ -40,6 +40,7 @@ holding (K-1)/K of the calibration data carries over to the final fit on all of 
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,10 +50,13 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.conformal.calibrator import DEFAULT_SPARSE_STRATA, ChannelSet
 from gridfm_trustlayer.conformal.kernel import (
+    FALLBACK_WARNING_SHARE,
     SUPPORTED_DISTANCES,
+    KernelFallbackWarning,
     KernelIntervalCalibrator,
+    _predict_targets,
 )
-from gridfm_trustlayer.parallel import process_pool, resolve_jobs, threads_per_worker
+from gridfm_trustlayer.parallel import resolve_threads
 
 DEFAULT_TUNING_GRID = (100.0, 200.0, 400.0, 600.0, 800.0, 1200.0)
 DEFAULT_TUNING_FOLDS = 5
@@ -218,6 +222,30 @@ class BandwidthTuningResult:
             "candidates": self.candidates.to_dict(orient="records"),
         }
 
+    @property
+    def selected_fallback_share(self) -> float:
+        """Share of held-out scenarios that fell back at the chosen setting.
+
+        NaN when no candidate was chosen (uniform weights).
+        """
+
+        chosen = self.candidates[self.candidates["selected"]]
+        return float(chosen["fallback_share"].iloc[0]) if len(chosen) else math.nan
+
+    def fallback_note(self, name: str = "") -> str | None:
+        """Why the chosen setting is nearly the element method, when it is."""
+
+        share = self.selected_fallback_share
+        if not share >= FALLBACK_WARNING_SHARE:
+            return None
+        return (
+            f"kernel tuning{f' ({name})' if name else ''}: at the chosen "
+            f"n_eff_target = {self.selected_n_eff_target:g}, {share:.0%} of the "
+            "held-out scenarios fall back to the stratum quantiles, so the bounds "
+            "are nearly those of the element method: the kernel does not localize "
+            "usefully on this embedding (see fallback_share per candidate)."
+        )
+
 
 def candidate_settings(
     options: TuningOptions, default_distance: str
@@ -303,7 +331,7 @@ def tune_n_eff_target(
     system_load_n_bins: int | None = None,
     system_load_bin_edges: np.ndarray | None = None,
     sparse_strata: str = DEFAULT_SPARSE_STRATA,
-    n_jobs: int | None = 1,
+    n_jobs: int | None = None,
 ) -> BandwidthTuningResult:
     """Choose `n_eff_target` (and optionally `distance`) by K-fold cross-validation.
 
@@ -315,30 +343,250 @@ def tune_n_eff_target(
     make localization look better than it is. `sparse_strata` is passed to every
     fold's calibrator, so the candidates are compared as they will be applied.
 
-    The fold x candidate fits are independent and run in `n_jobs` processes
-    (see `gridfm_trustlayer.parallel`; `None` for the default of 4); the result
-    is the same as with `n_jobs=1`. A script that passes `n_jobs` other than 1
-    must start from an `if __name__ == "__main__":` block, as processes are
-    spawned.
+    The kernel runs in `n_jobs` threads (`None` or `0`: every CPU, a negative
+    number: all but `-n_jobs - 1`); the result does not depend on it. To tune
+    several calibrated families on the same scenarios, `tune_n_eff_targets`
+    shares the kernel work between them.
     """
 
+    result = _tune_n_eff_targets(
+        {"": (predictions, ground_truth, channel_names)},
+        alpha=alpha,
+        strat=strat,
+        embedding_pooling=embedding_pooling,
+        distance=distance,
+        n_eff_min=n_eff_min,
+        options=options,
+        groups=groups,
+        system_load_n_bins=system_load_n_bins,
+        system_load_bin_edges=system_load_bin_edges,
+        sparse_strata=sparse_strata,
+        n_jobs=n_jobs,
+    )[""]
+    _warn_fallback(result, "")
+    return result
+
+
+def tune_n_eff_targets(
+    families: Mapping[str, tuple[ChannelSet, ChannelSet, Sequence[str]]],
+    *,
+    alpha: float,
+    strat: str | None = None,
+    embedding_pooling: str = "mean",
+    distance: str = "euclidean",
+    n_eff_min: float = 5.0,
+    options: TuningOptions | None = None,
+    groups: np.ndarray | None = None,
+    system_load_n_bins: int | None = None,
+    system_load_bin_edges: np.ndarray | None = None,
+    sparse_strata: str = DEFAULT_SPARSE_STRATA,
+    n_jobs: int | None = None,
+) -> dict[str, BandwidthTuningResult]:
+    """`tune_n_eff_target` for several families of variables at once.
+
+    `families` maps a name (e.g. `"volt"`, `"line"`) to `(predictions,
+    ground_truth, channel_names)`. Families on the same calibration scenarios
+    with the same embeddings, like the voltage and line-loading families of
+    one config, get the same folds; each fold's distances are then computed
+    once, and each candidate's bandwidths once, for all of them. Every result
+    equals that of `tune_n_eff_target` on its family alone. The other
+    arguments are those of `tune_n_eff_target`.
+
+    Warns:
+        KernelFallbackWarning: For a family whose chosen setting falls back to
+            the stratum quantiles in at least half of the held-out scenarios.
+    """
+
+    results = _tune_n_eff_targets(
+        families,
+        alpha=alpha,
+        strat=strat,
+        embedding_pooling=embedding_pooling,
+        distance=distance,
+        n_eff_min=n_eff_min,
+        options=options,
+        groups=groups,
+        system_load_n_bins=system_load_n_bins,
+        system_load_bin_edges=system_load_bin_edges,
+        sparse_strata=sparse_strata,
+        n_jobs=n_jobs,
+    )
+    for name, result in results.items():
+        _warn_fallback(result, name)
+    return results
+
+
+def _warn_fallback(result: BandwidthTuningResult, name: str) -> None:
+    note = result.fallback_note(name)
+    if note is not None:
+        # Two frames up: the caller of tune_n_eff_target(s).
+        warnings.warn(note[0].upper() + note[1:], KernelFallbackWarning, stacklevel=3)
+
+
+def _tune_n_eff_targets(
+    families: Mapping[str, tuple[ChannelSet, ChannelSet, Sequence[str]]],
+    *,
+    alpha: float,
+    strat: str | None = None,
+    embedding_pooling: str = "mean",
+    distance: str = "euclidean",
+    n_eff_min: float = 5.0,
+    options: TuningOptions | None = None,
+    groups: np.ndarray | None = None,
+    system_load_n_bins: int | None = None,
+    system_load_bin_edges: np.ndarray | None = None,
+    sparse_strata: str = DEFAULT_SPARSE_STRATA,
+    n_jobs: int | None = None,
+) -> dict[str, BandwidthTuningResult]:
+    """`tune_n_eff_targets` without the warning (the CLI prints the note instead)."""
+
     options = options or TuningOptions()
-    if predictions.scenario_embeddings is None:
-        raise ValueError(
-            "tune_n_eff_target needs scenario embeddings on the predictions."
-        )
-    embeddings = predictions.scenario_embeddings
-    channel_names = tuple(channel_names)
+    for predictions, _, _ in families.values():
+        if predictions.scenario_embeddings is None:
+            raise ValueError(
+                "tune_n_eff_target needs scenario embeddings on the predictions."
+            )
+    shared: dict[str, Any] = {
+        "alpha": alpha,
+        "strat": strat,
+        "embedding_pooling": embedding_pooling,
+        "distance": distance,
+        "n_eff_min": n_eff_min,
+        "options": options,
+        "groups": groups,
+        "system_load_n_bins": system_load_n_bins,
+        "system_load_bin_edges": system_load_bin_edges,
+        "sparse_strata": sparse_strata,
+        "n_jobs": n_jobs,
+    }
+    first = next(iter(families.values()))[0]
+    if any(
+        not _same_scenarios(first, predictions, strat)
+        for predictions, _, _ in families.values()
+    ):
+        return {
+            name: _tune_n_eff_targets({name: family}, **shared)[name]
+            for name, family in families.items()
+        }
+
     settings = candidate_settings(options, distance)
-    n = len(predictions.scenario_ids)
+    n = len(first.scenario_ids)
     fold = assign_folds(n, options.folds, groups=groups, seed=options.seed)
     strata = (
         np.zeros(n, dtype=np.int64)
         if strat is None
-        else np.asarray(predictions.scenario_columns[strat]).astype(np.int64)
+        else np.asarray(first.scenario_columns[strat]).astype(np.int64)
     )
     stratum_values = np.unique(strata)
+    threads = resolve_threads(n_jobs)
 
+    # Every fold: one fit per family and distance (the fitted state does not
+    # depend on the target), then all targets of that distance in one pass.
+    results: dict[tuple[str, int, tuple[float, str]], _FoldResult] = {}
+    for f in range(options.folds):
+        train = np.flatnonzero(fold != f)
+        held = np.flatnonzero(fold == f)
+        for setting_distance in dict.fromkeys(d for _, d in settings):
+            targets = [target for target, d in settings if d == setting_distance]
+            calibrators = []
+            held_sets = []
+            for predictions, ground_truth, channel_names in families.values():
+                calibrator = KernelIntervalCalibrator.fit(
+                    _rows(predictions, train),
+                    _rows(ground_truth, train),
+                    alpha=alpha,
+                    channel_names=tuple(channel_names),
+                    strat=strat,
+                    embeddings=np.asarray(predictions.scenario_embeddings)[train],
+                    embedding_pooling=embedding_pooling,
+                    n_eff_min=n_eff_min,
+                    bandwidth="n_eff",
+                    n_eff_target=targets[0],
+                    distance=setting_distance,
+                    system_load_n_bins=system_load_n_bins,
+                    system_load_bin_edges=system_load_bin_edges,
+                    sparse_strata=sparse_strata,
+                )
+                calibrator.n_jobs = threads
+                calibrators.append(calibrator)
+                held_sets.append(_rows(predictions, held))
+            by_family = _predict_targets(calibrators, held_sets, targets)
+            for (
+                name,
+                (_, ground_truth, channel_names),
+            ), held_predictions, by_target in zip(
+                families.items(), held_sets, by_family, strict=True
+            ):
+                held_truth = _rows(ground_truth, held)
+                for target in targets:
+                    intervals, diagnostics = by_target[float(target)]
+                    results[(name, f, (target, setting_distance))] = _fold_result(
+                        intervals,
+                        diagnostics,
+                        held_predictions,
+                        held_truth,
+                        strata[held],
+                        stratum_values,
+                        tuple(channel_names),
+                    )
+    return {
+        name: _summarize(
+            [
+                results[(name, f, setting)]
+                for f in range(options.folds)
+                for setting in settings
+            ],
+            [setting for _ in range(options.folds) for setting in settings],
+            settings,
+            options,
+            alpha=alpha,
+            strat=strat,
+            distance=distance,
+            n_eff_min=n_eff_min,
+            channel_names=tuple(channel_names),
+            strata=strata,
+            stratum_values=stratum_values,
+            grouped=groups is not None,
+        )
+        for name, (_, _, channel_names) in families.items()
+    }
+
+
+def _same_scenarios(first: ChannelSet, other: ChannelSet, strat: str | None) -> bool:
+    """Whether two families can share folds and kernel work."""
+
+    if other is first:
+        return True
+    if not np.array_equal(first.scenario_ids, other.scenario_ids):
+        return False
+    if not np.array_equal(
+        np.asarray(first.scenario_embeddings), np.asarray(other.scenario_embeddings)
+    ):
+        return False
+    return strat is None or np.array_equal(
+        np.asarray(first.scenario_columns[strat]),
+        np.asarray(other.scenario_columns[strat]),
+    )
+
+
+def _summarize(
+    fold_results: Sequence[_FoldResult],
+    fold_settings: Sequence[tuple[float, str]],
+    settings: Sequence[tuple[float, str]],
+    options: TuningOptions,
+    *,
+    alpha: float,
+    strat: str | None,
+    distance: str,
+    n_eff_min: float,
+    channel_names: tuple[str, ...],
+    strata: np.ndarray,
+    stratum_values: np.ndarray,
+    grouped: bool,
+) -> BandwidthTuningResult:
+    """Coverage and width per candidate, the selection, and the result tables."""
+
+    n = len(strata)
     # Accumulators per (candidate, channel, scope); scope None is the overall check.
     Setting = tuple[float, str]
     covered: dict[tuple[Setting, str, int | None], int] = {}
@@ -348,35 +596,8 @@ def tune_n_eff_target(
     width_n: dict[tuple[Setting, str, int | None], int] = {}
     infinite: dict[tuple[Setting, str, int | None], int] = {}
     fallbacks: dict[Setting, int] = {}
-
-    context = _FoldContext(
-        predictions=predictions,
-        ground_truth=ground_truth,
-        embeddings=embeddings,
-        fold=fold,
-        strata=strata,
-        stratum_values=stratum_values,
-        alpha=alpha,
-        channel_names=channel_names,
-        strat=strat,
-        embedding_pooling=embedding_pooling,
-        n_eff_min=n_eff_min,
-        system_load_n_bins=system_load_n_bins,
-        system_load_bin_edges=system_load_bin_edges,
-        sparse_strata=sparse_strata,
-    )
-    tasks = [(f, setting) for f in range(options.folds) for setting in settings]
-    workers = min(resolve_jobs(n_jobs), len(tasks))
-    if workers <= 1:
-        results = [_evaluate_fold(context, f, setting) for f, setting in tasks]
-    else:
-        context.threads = threads_per_worker(workers)
-        with process_pool(
-            workers, initializer=_set_fold_context, initargs=(context,)
-        ) as pool:
-            results = list(pool.map(_evaluate_fold_task, tasks))
-    # Added up in the order of the serial loop, so that sums are identical.
-    for (_, setting), result in zip(tasks, results, strict=True):
+    # Added up fold by fold, in candidate order, so that sums are reproducible.
+    for setting, result in zip(fold_settings, fold_results, strict=True):
         fallbacks[setting] = fallbacks.get(setting, 0) + result.fallbacks
         for (channel, scope), value in result.covered.items():
             key = (setting, channel, scope)
@@ -470,7 +691,7 @@ def tune_n_eff_target(
         selected_distance=selected_distance,
         reason=reason,
         options=options,
-        grouped=groups is not None,
+        grouped=grouped,
         candidates=candidates,
         details=pd.DataFrame(detail_rows),
     )
@@ -507,27 +728,6 @@ def _tolerance(setting: float | str, alpha: float, n_scenarios: int) -> float:
 
 
 @dataclass
-class _FoldContext:
-    """Everything a fold x candidate evaluation needs; sent once to each worker."""
-
-    predictions: ChannelSet
-    ground_truth: ChannelSet
-    embeddings: np.ndarray
-    fold: np.ndarray
-    strata: np.ndarray
-    stratum_values: np.ndarray
-    alpha: float
-    channel_names: tuple[str, ...]
-    strat: str | None
-    embedding_pooling: str
-    n_eff_min: float
-    system_load_n_bins: int | None
-    system_load_bin_edges: np.ndarray | None
-    sparse_strata: str
-    threads: int | None = None
-
-
-@dataclass
 class _FoldResult:
     """Coverage and width counts of one candidate on one held-out fold."""
 
@@ -539,63 +739,33 @@ class _FoldResult:
     fallbacks: int
 
 
-_CONTEXT: _FoldContext | None = None
-
-
-def _set_fold_context(context: _FoldContext) -> None:
-    global _CONTEXT
-    _CONTEXT = context
-
-
-def _evaluate_fold_task(task: tuple[int, tuple[float, str]]) -> _FoldResult:
-    assert _CONTEXT is not None
-    return _evaluate_fold(_CONTEXT, *task)
-
-
-def _evaluate_fold(
-    context: _FoldContext, f: int, setting: tuple[float, str]
+def _fold_result(
+    intervals: dict[str, tuple[np.ndarray, np.ndarray]],
+    diagnostics: dict[str, np.ndarray],
+    held_predictions: ChannelSet,
+    held_truth: ChannelSet,
+    held_strata: np.ndarray,
+    stratum_values: np.ndarray,
+    channel_names: tuple[str, ...],
 ) -> _FoldResult:
-    """Fit the kernel on all folds but `f` with one candidate; count on fold `f`."""
+    """Coverage and width counts of one candidate on one held-out fold."""
 
-    train = np.flatnonzero(context.fold != f)
-    held = np.flatnonzero(context.fold == f)
-    held_predictions = _rows(context.predictions, held)
-    held_truth = _rows(context.ground_truth, held)
-    target, setting_distance = setting
-    calibrator = KernelIntervalCalibrator.fit(
-        _rows(context.predictions, train),
-        _rows(context.ground_truth, train),
-        alpha=context.alpha,
-        channel_names=context.channel_names,
-        strat=context.strat,
-        embeddings=context.embeddings[train],
-        embedding_pooling=context.embedding_pooling,
-        n_eff_min=context.n_eff_min,
-        bandwidth="n_eff",
-        n_eff_target=target,
-        distance=setting_distance,
-        system_load_n_bins=context.system_load_n_bins,
-        system_load_bin_edges=context.system_load_bin_edges,
-        sparse_strata=context.sparse_strata,
-    )
-    calibrator.n_jobs = context.threads
-    intervals = calibrator.predict_intervals(held_predictions)
     result = _FoldResult(
         covered={},
         counted={},
         width_sum={},
         width_n={},
         infinite={},
-        fallbacks=int(np.asarray(calibrator.diagnostics["kernel_fallback"]).sum()),
+        fallbacks=int(np.asarray(diagnostics["kernel_fallback"]).sum()),
     )
-    for channel in context.channel_names:
+    for channel in channel_names:
         lower, upper = intervals[channel]
         truth = held_truth.channels[channel]
         valid = _valid(held_predictions, held_truth, channel)
         hit = (lower <= truth) & (truth <= upper) & valid
         width = upper - lower
-        for scope in (None, *context.stratum_values.tolist()):
-            rows = slice(None) if scope is None else context.strata[held] == scope
+        for scope in (None, *stratum_values.tolist()):
+            rows = slice(None) if scope is None else held_strata == scope
             result.covered[(channel, scope)] = int(hit[rows].sum())
             result.counted[(channel, scope)] = int(valid[rows].sum())
             scope_width = width[rows][valid[rows]]

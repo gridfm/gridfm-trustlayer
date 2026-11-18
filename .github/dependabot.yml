@@ -1,5 +1,7 @@
 # Keeps the GitHub Actions used by the workflows up to date. Python
-# dependencies are declared as lower bounds in pyproject.toml and need no pins.
+# dependencies are declared as lower bounds in pyproject.toml and need no pins;
+# .github/minimum-versions.txt pins those bounds on purpose, for the CI job
+# that tests them, and must not be updated.
 version: 2
 updates:
   - package-ecosystem: github-actions

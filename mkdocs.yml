@@ -24,6 +24,7 @@ nav:
     - Choosing a setup: user-guide/choosing-a-setup.md
     - Kernel-weighted calibration: user-guide/kernel.md
     - Reading the results: user-guide/results.md
+    - Your own model and data: user-guide/own-data.md
     - Python API: user-guide/python-api.md
     - Troubleshooting: user-guide/troubleshooting.md
   - Reference:
@@ -32,6 +33,7 @@ nav:
     - Data schemas: reference/schemas.md
     - API: reference/api.md
   - Methodology: methodology.md
+  - Roadmap: roadmap.md
   - Changelog: changelog.md
 
 theme:

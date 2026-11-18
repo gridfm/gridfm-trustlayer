@@ -5,6 +5,42 @@ All notable changes to this project are documented here. The format follows
 [semantic versioning](https://semver.org/). Before 1.0, minor versions may
 include breaking changes; they are listed under **Changed**.
 
+## [0.2.0] - 2026-11-16
+
+Faster `cp_type: kernel`, with the same results: bounds, statuses, coverage reports and tuning tables are identical to 0.1.1 except where noted under **Fixed**. And a path for models outside GridFM: a guide, a table loader, input checks, one object to fit, apply and save the bounds of buses and lines, results as tables, coverage and screening reports, and an example notebook.
+
+Upgrading from 0.1.1: `numba` is a new dependency and pyarrow must be 16.1 or later; with `n_eff_target: auto`, `n_jobs` now counts threads. Artifacts work both ways: 0.2.0 loads those of 0.1.1, and 0.1.1 loads those of 0.2.0, including the files `TrustLayer` saves.
+
+### Added
+- **Using trustlayer with your own data**: a guide for any model, from a table of predictions and true values to calibrated bounds and their coverage, with the mistakes to avoid. It is a page of the documentation and ships with the package: `gridfm_trustlayer guide` prints it (`--path`: its location), for you or an AI coding assistant. Its example runs as a test.
+- `ChannelSet.from_frame`: a `ChannelSet` from a long table, one row per scenario and element, with optional validity, strata and per-scenario embeddings aligned by scenario id. Absent rows and NaN values are marked invalid; duplicated rows, non-integer ids and strata that vary within a scenario are refused with a message.
+- `check_inputs` (and `InputCheck`): checks the data before fitting, or new scenarios against a fitted calibrator, and says what to fix: misaligned or differently ordered scenarios and elements, missing variables or strata, NaN, missing or constant embeddings, a different embedding width (errors); NaN values marked valid, strata too small for a finite bound, strata absent from the calibration data (warnings).
+- `ChannelSet.to_frame`: the bounds back as a long table, one row per scenario and element, with each value's status against operating limits (and that of the prediction alone), to join onto your own data.
+- `coverage_report` and `screening_report`: the tables of `calibrate` and `screen` from Python, for any `ChannelSet`s and intervals: coverage and width per stratum (or per element); violations caught, missed and falsely flagged, status counts and each scenario's status. On the CLI's outputs they give the same numbers as `coverage_by_stratum.csv`, and, with the CLI's 1e-6 tolerance added to the limits, as `status_by_stratum.csv` and `scenarios.csv`.
+- `OutageStrata` and `LoadBins`: the CLI's `n_outages`, `outage_type` and `system_load_bin` from your own in-service flags and loads, learned on the calibration set; `from_frame` takes their results as strata (a Series indexed by scenario id). Fitted on DataFrames, `OutageStrata` matches later columns by label.
+- `TrustLayer`: one calibrator per `ChannelSet` (e.g. buses and lines) fitted with the same settings, new data sent to the calibrator of its variables, and everything saved in one `.trustlayer` file with the definitions of the strata, so that new scenarios get their strata as at fit after `TrustLayer.load` (which also reads the CLI's artifacts). It checks the data with `check_inputs` and raises its errors; `n_eff_target="auto"` tunes the kernel for all sets at once. The file stays readable by `load_interval_artifacts`, also of 0.1.1.
+- `KernelFallbackWarning`: `KernelIntervalCalibrator.predict_intervals`, `predict_intervals_jointly` and `tune_n_eff_target(s)` warn when at least half of the scenarios fall back to the stratum quantiles, i.e. the kernel barely changes the bounds; the message says whether strata are missing from the calibration data or the calibration scenarios are too far away in the embedding, and what to try. On case24, the CLI's kernel runs fall back in 0 to 5% of the scenarios. `compute` prints the tuning case as a note (`BandwidthTuningResult.fallback_note`); the CLI's commands do not raise the warning.
+- Limits that differ per element: `screening_report`, `to_frame` and `classify_status` take a limit per element (a Series or dict by element id, or an array; NaN for no limit) as well as a number.
+- A notebook, `examples/notebooks/own_model.ipynb`: the whole workflow with a model outside GridFM (a ridge regression in numpy) on the demo's IEEE 14-bus contingencies, including kernel bounds for a model without embeddings. It runs as a test.
+- `llms.txt` at the root of the documentation site, an index for AI assistants, and `AGENTS.md` in the repository.
+
+### Changed
+- **`numba` is now a dependency.** The kernel's bandwidth solve and weighted quantiles run as compiled loops, spread over the calibrator's threads. On IEEE-118 (20,000 calibration scenarios in five outage strata, 20,000 test scenarios, voltages and line loading) the kernel part of `apply` and `calibrate` went from 9.2 s to 0.8 s on a 12-core laptop. The code is compiled on first use and cached, once per installation.
+- **Calibrators of one artifact share the kernel work.** The voltage and line-loading calibrators are fitted on the same scenarios and embeddings, so their distances and, with the same settings, bandwidths and weights are computed once per block for both (`gridfm_trustlayer.conformal.kernel.predict_intervals_jointly`).
+- **`n_eff_target: auto` runs in one pass per fold**, in threads of one process instead of 4 processes: each fold is fitted once, its distances are computed once for all candidate targets, and each target's bandwidths once for both families (`tune_n_eff_targets`). On the IEEE-118 calibration set above, the default grid took 28 s with 0.1.1's 4 processes and takes 5 s; on case24, `compute` with `auto` went from 5.1 s to 1.8 s. `n_jobs` now sets the number of threads (every CPU by default).
+- **Line loading no longer needs gridfm-datakit**: `compute_line_loading` applies datakit's branch-flow formula to the voltage arrays directly, with the same values, 20-30 times faster. The `datakit` and `graphkit` extras remain, to install those packages alongside.
+- **Embeddings are pooled once per command, one column at a time.** Peak memory of pooling graphkit's per-bus embeddings of case24 (543 MB file) went from 2.1 GB to 0.7 GB, and blocks no longer read the file again; worker processes (`n_jobs`) map the pooled array instead.
+- Reading a block of scenarios from a partitioned dataset (datakit's raw data) opens only the files that hold them, found from their statistics: 1.3 s to 0.1 s per block of the IEEE-118 test set (996 partitions).
+- `apply` and `calibrate` read each block of predictions once instead of twice, and take the end-of-run notes from the blocks instead of reading their outputs again.
+- `matplotlib` is imported only when a figure is drawn, and `numba` only when a kernel runs: commands start about 0.15 s sooner.
+- On case24 (7,070 new scenarios), `apply` went from 2.8 s to 2.0 s and its peak memory from 1.7 GB to 0.9 GB.
+- CI also runs the tests with the lowest dependency versions that `pyproject.toml` allows (pinned in `.github/minimum-versions.txt`, which a test keeps equal to those bounds).
+
+### Fixed
+- **The `n_eff` bandwidth solve could stop at a wrong bandwidth.** Where `n_eff` is nearly flat at one end of the search bracket and steep at the other, Newton steps could alternate between the two ends until the iteration limit; the scenario then got, e.g., `n_eff` 2,862 instead of the target 600 (near-uniform weights), or 9 (a fallback to the stratum quantile). This happened for about 3 in 120,000 scenario solves on IEEE-118. After 30 Newton steps the solve now continues by bisection and converges; scenarios whose solve converged are unchanged. In strata with fewer calibration scenarios than `n_eff_target`, where the weights approach uniform, `kcp_bandwidth_sq` can differ from 0.1.1's in its last digit, with the same bounds.
+- **pyarrow 16.0.0 could not read trustlayer's outputs back.** The parquet outputs store floating-point columns with the `BYTE_STREAM_SPLIT` encoding, which pyarrow 16.0.0 fails to decode when a column holds nulls ("Data size ... does not match number of values in BYTE_STREAM_SPLIT"), e.g. bounds of values without a prediction bin or without a true solution; the demo notebook failed with it. The minimum is now pyarrow 16.1, which decodes them.
+- **pandas 2.3 warned about concatenating all-NaN columns** (`FutureWarning`) in the per-stratum tables of `calibrate` and `screen` with `pred_bins`. Their `stratum_value` column is now float64 under any pandas version; the tables are unchanged.
+
 ## [0.1.1] - 2026-10-16
 
 Fixes from testing the first release as a user would: following the documentation, and on edge cases of real data.
@@ -129,5 +165,6 @@ First public release.
 - `tuning.n_eff_range` without a whole number in it (e.g. `[1.5, 1.7]`) gave a candidate outside the range; it is now rejected.
 - `pred_bins` errors named `system_load_bin`.
 
+[0.2.0]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.2.0
 [0.1.1]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.1.1
 [0.1.0]: https://github.com/gridfm/gridfm-trustlayer/releases/tag/v0.1.0

@@ -8,6 +8,7 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import pytest
 
+import gridfm_trustlayer.io.parquet as parquet_module
 from gridfm_trustlayer.io.parquet import (
     PARTITION_COLUMN,
     SCENARIOS_PER_PARTITION,
@@ -129,3 +130,34 @@ def test_partitioned_writer_replaces_previous_outputs_but_nothing_else(
     with pytest.raises(ValueError, match="also an input"):
         clear_partitioned_output(output, inputs=[None, str(output)])
     assert output.exists()
+
+
+@pytest.mark.parametrize(
+    "wanted",
+    [[3], [0, 49, 50, 51], list(range(120, 260, 7)), [999, 1000, 5000], [7000], []],
+)
+def test_reading_scenarios_of_a_partitioned_dataset_skips_other_files(
+    tmp_path, monkeypatch, wanted
+) -> None:
+    # Written with 50 scenarios per partition and read with the default size:
+    # which files to open comes from their statistics, not from the layout.
+    monkeypatch.setattr(parquet_module, "SCENARIOS_PER_PARTITION", 50)
+    path = tmp_path / "dataset"
+    frame = pd.DataFrame(
+        {
+            "scenario": np.repeat(np.arange(0, 1001, 3), 2),
+            "bus": np.tile([1, 2], 334),
+            "value": np.arange(668, dtype=np.float32),
+        }
+    )
+    PartitionedWriter(path).write(frame)
+    monkeypatch.setattr(parquet_module, "SCENARIOS_PER_PARTITION", 200)
+
+    result = read_frame(path, ["scenario", "bus", "value"], scenario_ids=wanted)
+
+    expected = frame[frame["scenario"].isin(wanted)]
+    pd.testing.assert_frame_equal(
+        result.sort_values(["scenario", "bus"]).reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_dtype=False,
+    )

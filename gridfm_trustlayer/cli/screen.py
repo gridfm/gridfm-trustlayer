@@ -441,11 +441,11 @@ def _screen_stratum_counts(
             ]
             grouped["variable"] = variable
             parts.append(grouped)
-    return pd.concat(parts, ignore_index=True)
+    return reports.concat_strata(parts)
 
 
 def _combine_screen_stratum_counts(parts: list[pd.DataFrame]) -> pd.DataFrame:
-    combined = pd.concat(parts, ignore_index=True)
+    combined = reports.concat_strata(parts)
     sums = [c for c in combined.columns if c.endswith(("_tp", "_fp", "_fn", "_tn"))]
     sums += ["n_values", "n_known"]
     totals = (

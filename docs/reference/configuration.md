@@ -71,7 +71,7 @@ For each command, a value is taken from the first of these that sets it:
 | `pred_n_bins` | int | – | Number of percentile bins of the predicted values, per variable. Required with `strat: pred_bins`. |
 | `sparse_strata` | str | `pooled` | With `strat`: the bounds of a bus or line in a stratum with fewer than $\lceil 2/\alpha \rceil - 1$ valid calibration samples, or in a stratum absent from the calibration data. `pooled` uses the element's quantile over all calibration scenarios: finite, but without a guarantee within that stratum. `infinite` keeps the per-stratum guarantee with infinite bounds. See [Sparse strata](../user-guide/choosing-a-setup.md#sparse-strata-sparse_strata). |
 | `save_figures` | bool | `true` | `false` makes `calibrate` and `screen` skip their figures, like `--no-figures`. |
-| `n_jobs` | int | – | Processes for the cross-validated bandwidth choice (`n_eff_target: auto`), which runs in 4 processes by default (at most the CPU count); `-1` uses every CPU, `1` one process. When set, blocks of scenarios are also processed in parallel by every command, which is off by default: on IEEE-118 it made runs slower and larger, as reading parquet dominates. Each process holds its own copy of the data it works on. Same as `--n-jobs`. |
+| `n_jobs` | int | – | Threads of the cross-validated bandwidth choice (`n_eff_target: auto`), every CPU by default; `-1` uses every CPU, `1` one thread. When set, blocks of scenarios are also processed in that many processes by every command, which is off by default: on IEEE-118 it made runs slower and larger, as reading parquet dominates. Each process holds its own copy of the data it works on and uses its share of the CPUs. Same as `--n-jobs`. |
 
 The stratifications in detail:
 

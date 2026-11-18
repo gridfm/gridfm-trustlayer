@@ -99,6 +99,33 @@ def load_predictions(
         _prediction_columns(column_names(parquet_path)),
         scenario_ids=scenario_ids,
     )
+    return _predictions_from_frame(
+        frame,
+        parquet_path,
+        apply_task_correction=apply_task_correction,
+        task_name=task_name,
+        generator_parquet_path=generator_parquet_path,
+    )
+
+
+def _predictions_from_frame(
+    frame: pd.DataFrame,
+    parquet_path: str,
+    *,
+    apply_task_correction: bool = True,
+    task_name: str | None = None,
+    generator_parquet_path: str | None = None,
+) -> PredictionSet:
+    """`load_predictions` on rows already read from `parquet_path`.
+
+    `frame` holds rows of the predictions file (any superset of the columns the
+    loader uses), e.g. a block read whole for the output tables, which then
+    needs no second read.
+    """
+
+    used = _prediction_columns(list(frame.columns))
+    if used != list(frame.columns):
+        frame = frame[used].copy()
     _require_columns(frame, ("scenario", "bus"))
     frame["scenario"] = frame["scenario"].astype(np.int64)
     frame["bus"] = frame["bus"].astype(np.int64)

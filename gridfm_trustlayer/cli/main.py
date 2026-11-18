@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from importlib import resources
 
 import pyarrow as pa  # type: ignore[import-untyped]
 
@@ -45,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         "calibrate": _run_calibrate,
         "apply": _run_apply,
         "screen": _run_screen,
+        "guide": _run_guide,
     }
     try:
         commands[args.command](args)
@@ -344,12 +346,35 @@ def build_parser() -> argparse.ArgumentParser:
             "--n-jobs",
             type=int,
             help=(
-                "Processes for the cross-validated bandwidth choice (default 4, at "
-                "most the CPU count; -1 for all CPUs; 1 for one). When given, blocks "
-                "of scenarios are also read in parallel, which is off by default. "
-                "Overrides n_jobs in the config."
+                "Threads for the cross-validated bandwidth choice (every CPU by "
+                "default; -1 for all CPUs; 1 for one). When given, blocks of "
+                "scenarios are also read in that many processes, which is off by "
+                "default. Overrides n_jobs in the config."
                 if name == "compute"
                 else blocks_help
             ),
         )
+
+    guide_parser = subparsers.add_parser(
+        "guide",
+        help=(
+            "Print the guide to using trustlayer with your own model and data "
+            "(Python API), e.g. for an AI coding assistant."
+        ),
+    )
+    guide_parser.add_argument(
+        "--path",
+        action="store_true",
+        help="Print where the guide file is instead of its text.",
+    )
     return parser
+
+
+def _run_guide(args: argparse.Namespace) -> None:
+    """Print the guide that ships with the package (or its location)."""
+
+    guide = resources.files("gridfm_trustlayer") / "guide" / "own_data.md"
+    if args.path:
+        print(guide)
+    else:
+        print(guide.read_text(encoding="utf-8"), end="")

@@ -4,6 +4,10 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ## Calibrators
 
+::: gridfm_trustlayer.TrustLayer
+    options:
+      members: [fit, predict_intervals, variables, diagnostics, save, load]
+
 ::: gridfm_trustlayer.NaiveIntervalCalibrator
     options:
       members: [fit, predict_intervals]
@@ -12,11 +16,23 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
     options:
       members: [fit, predict_intervals, diagnostics]
 
+::: gridfm_trustlayer.conformal.kernel.predict_intervals_jointly
+
+::: gridfm_trustlayer.KernelFallbackWarning
+    options:
+      members: false
+
 ## Data containers
 
 ::: gridfm_trustlayer.ChannelSet
     options:
-      members: false
+      members: [from_frame, to_frame]
+
+::: gridfm_trustlayer.check_inputs
+
+::: gridfm_trustlayer.InputCheck
+    options:
+      members: [ok, raise_for_errors]
 
 ::: gridfm_trustlayer.PredictionSet
     options:
@@ -25,6 +41,18 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 ::: gridfm_trustlayer.GroundTruthSet
     options:
       members: false
+
+## Strata
+
+::: gridfm_trustlayer.OutageStrata
+    options:
+      members: [fit, n_outages, outage_type]
+
+::: gridfm_trustlayer.LoadBins
+    options:
+      members: [fit, assign]
+
+::: gridfm_trustlayer.strata.strata_from_dict
 
 ## Loading GridFM files
 
@@ -44,7 +72,15 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ::: gridfm_trustlayer.load_interval_artifacts
 
-## Screening
+## Coverage and screening
+
+::: gridfm_trustlayer.coverage_report
+
+::: gridfm_trustlayer.screening_report
+
+::: gridfm_trustlayer.ScreeningReport
+    options:
+      members: false
 
 ::: gridfm_trustlayer.classify_status
 
@@ -54,9 +90,15 @@ Everything below is importable from the top-level package, `from gridfm_trustlay
 
 ::: gridfm_trustlayer.conformal.tuning.tune_n_eff_target
 
+::: gridfm_trustlayer.conformal.tuning.tune_n_eff_targets
+
 ::: gridfm_trustlayer.conformal.tuning.TuningOptions
     options:
       members: false
+
+::: gridfm_trustlayer.conformal.tuning.BandwidthTuningResult
+    options:
+      members: [summary, selected_fallback_share, fallback_note]
 
 ## Config builder
 

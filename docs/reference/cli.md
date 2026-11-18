@@ -18,6 +18,7 @@ Available commands:
 - `calibrate`
 - `screen`
 - `apply`
+- `guide`: prints the guide to using trustlayer with your own model and data through the Python API ([online](../user-guide/own-data.md)), the version that matches the installation, e.g. for an AI coding assistant; `--path` prints where the file is.
 
 They play three roles:
 
@@ -25,7 +26,7 @@ They play three roles:
 2. **Validate, optional:** `calibrate` applies the artifact to the test dataset (`inputs.test`) and writes the predictions with their bounds and the coverage report; then `screen` compares the test bounds with the operating limits in `screen_bounds` and checks statuses and alarms against the true solution.
 3. **Operate:** `apply` uses the artifact on new scenarios without a known solution (`inputs.apply`), at any point after `compute`: bounds and, with `screen_bounds`, the status of every value and operating scenario.
 
-Every command also takes `--n-jobs` (see [`n_jobs`](configuration.md#method-keys)). For `compute`, it sets the processes of the cross-validated bandwidth choice, 4 by default. For every command, when given, blocks of scenarios are also processed in parallel, which is off by default.
+Every command also takes `--n-jobs` (see [`n_jobs`](configuration.md#method-keys)). For `compute`, it sets the threads of the cross-validated bandwidth choice, every CPU by default. For every command, when given, blocks of scenarios are also processed in parallel, which is off by default.
 
 Each command ends with a short summary: what `compute` fitted and where the artifact is; the coverage and mean width per variable, with the weakest stratum, after `calibrate`; the violations caught and missed, the false alarms, and the secure, uncertain and insecure scenarios after `screen`; the same scenario counts after `apply`. `calibrate` and `screen` also say how many known values (set-points) were left out. On large test sets, `calibrate` and `screen` also print one line per block of scenarios as they go.
 

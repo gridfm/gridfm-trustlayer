@@ -10,7 +10,7 @@ weaker: for lines loaded near their rating. The notebook is saved with its outpu
 it can be read without running it.
 
 ```bash
-pip install "gridfm-trustlayer[datakit]" jupyterlab
+pip install gridfm-trustlayer jupyterlab
 cd examples/demo
 jupyter lab demo.ipynb
 ```

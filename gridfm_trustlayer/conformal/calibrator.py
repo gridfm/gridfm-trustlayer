@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 import numpy as np
+import pandas as pd  # type: ignore[import-untyped]
 
 from gridfm_trustlayer.io.ground_truth import GroundTruthSet
 from gridfm_trustlayer.io.predictions import PredictionSet
@@ -92,6 +93,427 @@ class ChannelSet:
         """Compatibility alias for older bus-only call sites."""
 
         return self.entity_ids
+
+    @classmethod
+    def from_frame(
+        cls,
+        frame: pd.DataFrame,
+        channels: Mapping[str, str] | Sequence[str],
+        *,
+        entity: str,
+        scenario: str = "scenario",
+        entity_name: str = "bus",
+        valid: Mapping[str, str] | str | None = None,
+        strata: Mapping[str, str | pd.Series] | Sequence[str] = (),
+        embeddings: pd.DataFrame | np.ndarray | None = None,
+    ) -> ChannelSet:
+        """A `ChannelSet` from a long table: one row per scenario and element.
+
+        Build the predictions and the true values from the same rows, each with
+        its own `channels`; scenarios and elements are sorted by id, so the two
+        sets are aligned. See the guide "Using trustlayer with your own data"
+        (`gridfm_trustlayer guide`).
+
+        Args:
+            frame: One row per scenario and element (bus or line).
+            channels: The variables, as `{variable: column}`, e.g.
+                `{"line_loading": "loading_pred"}`, or a list of columns that
+                are also the variable names.
+            entity: Column of the element ids (integers).
+            scenario: Column of the scenario ids (integers).
+            entity_name: `"bus"` or `"branch"`.
+            valid: Boolean column marking the values to calibrate, for every
+                variable, or `{variable: column}`. `False` values are left out
+                of fitting and get no interval (e.g. out-of-service lines, or
+                values that are inputs of the model rather than predictions).
+            strata: Columns used for stratification (e.g. the number of
+                outages), as a list or `{name: column}`: integers, the same for
+                every row of a scenario. A value of the mapping can also be a
+                Series indexed by scenario id, e.g. from
+                `gridfm_trustlayer.OutageStrata` or `LoadBins`.
+            embeddings: For `KernelIntervalCalibrator`: one vector per scenario,
+                as a DataFrame indexed by scenario id (or with the scenario
+                column) whose other columns are the dimensions, or an array
+                with one row per scenario in increasing order of scenario id.
+                Extra scenarios in a DataFrame are ignored.
+
+        Returns:
+            The `ChannelSet`. A (scenario, element) pair absent from `frame`,
+            or a value that is NaN or infinite, is marked invalid.
+
+        Raises:
+            ValueError: If a column is missing, ids are not integers, a
+                (scenario, element) pair appears twice, a stratum varies within
+                a scenario or is not an integer, or embeddings are missing for
+                some scenario.
+        """
+
+        names = (
+            dict(channels)
+            if isinstance(channels, Mapping)
+            else {str(column): str(column) for column in channels}
+        )
+        strata_sources: dict[str, str | pd.Series] = (
+            dict(strata)
+            if isinstance(strata, Mapping)
+            else {str(column): str(column) for column in strata}
+        )
+        strata_columns = {
+            name: source
+            for name, source in strata_sources.items()
+            if isinstance(source, str)
+        }
+        valid_columns: dict[str, str] = (
+            {}
+            if valid is None
+            else dict(valid)
+            if isinstance(valid, Mapping)
+            else dict.fromkeys(names, valid)
+        )
+        if not names:
+            raise ValueError("Pass at least one variable in channels.")
+        unknown = sorted(set(valid_columns) - set(names))
+        if unknown:
+            raise ValueError(
+                f"valid names variables that are not in channels: {unknown}."
+            )
+        _require_frame_columns(
+            frame,
+            [
+                scenario,
+                entity,
+                *names.values(),
+                *valid_columns.values(),
+                *strata_columns.values(),
+            ],
+        )
+        scenario_values = _integer_ids(frame[scenario], scenario, "Scenario")
+        entity_values = _integer_ids(frame[entity], entity, "Element")
+        scenario_ids, scenario_index = np.unique(scenario_values, return_inverse=True)
+        entity_ids, entity_index = np.unique(entity_values, return_inverse=True)
+        shape = (len(scenario_ids), len(entity_ids))
+        flat = scenario_index * shape[1] + entity_index
+        cells, counts = np.unique(flat, return_counts=True)
+        if (counts > 1).any():
+            duplicated = cells[counts > 1]
+            examples = [
+                (int(scenario_ids[c // shape[1]]), int(entity_ids[c % shape[1]]))
+                for c in duplicated[:3]
+            ]
+            raise ValueError(
+                f"{len(duplicated):,} (scenario, element) pairs appear more than once, "
+                f"e.g. {examples}: the table needs one row per scenario and element."
+            )
+        present = np.zeros(shape, dtype=bool)
+        present[scenario_index, entity_index] = True
+        arrays: dict[str, np.ndarray] = {}
+        masks: dict[str, np.ndarray] = {}
+        for name, column in names.items():
+            values = np.full(shape, np.nan, dtype=FLOAT32_DTYPE)
+            try:
+                values[scenario_index, entity_index] = frame[column].to_numpy(
+                    dtype=FLOAT32_DTYPE
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Column {column!r} ({name}) is not numeric.") from exc
+            mask = present & np.isfinite(values)
+            if name in valid_columns:
+                flags = np.zeros(shape, dtype=bool)
+                flags[scenario_index, entity_index] = frame[
+                    valid_columns[name]
+                ].to_numpy(dtype=bool)
+                mask &= flags
+            arrays[name] = values
+            if not mask.all():
+                masks[name] = mask
+        scenario_columns = {
+            name: _per_scenario(
+                frame[source], source, scenario_index, len(scenario_ids)
+            )
+            if isinstance(source, str)
+            else _series_per_scenario(source, name, scenario_ids)
+            for name, source in strata_sources.items()
+        }
+        return cls(
+            scenario_ids=scenario_ids,
+            entity_ids=entity_ids,
+            entity_name=entity_name,
+            channels=arrays,
+            valid_masks=masks,
+            scenario_columns=scenario_columns,
+            scenario_embeddings=None
+            if embeddings is None
+            else _aligned_embeddings(embeddings, scenario_ids, scenario),
+        )
+
+    def to_frame(
+        self,
+        intervals: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        *,
+        scenario: str = "scenario",
+        entity: str | None = None,
+        limits: Mapping[str, Mapping[str, Limit]] | None = None,
+    ) -> pd.DataFrame:
+        """The data back as a long table, one row per scenario and element.
+
+        The inverse of `from_frame`, with the bounds added: merge the result
+        onto your own table on the scenario and element columns.
+
+        Args:
+            intervals: `{variable: (lower, upper)}`, e.g. from
+                `predict_intervals`; adds `<variable>_lower` and
+                `<variable>_upper`.
+            scenario: Name of the scenario column.
+            entity: Name of the element column; `entity_name` when not given.
+            limits: Operating limits per variable, e.g.
+                `{"line_loading": {"upper": 1.0}, "Vm": {"lower": 0.95,
+                "upper": 1.05}}` (needs `intervals`). A limit can also differ
+                per element: a Series (or dict) by element id, or an array in
+                the order of `entity_ids`; NaN means no limit. Adds
+                `<variable>_status`, the status of the interval, and
+                `<variable>_point_status`, that of the value alone, by the rule
+                of `classify_status` (within_limits, uncertain, violation).
+
+        Returns:
+            Columns `scenario`, the element column, the strata, and per
+            variable its value, `<variable>_valid` and the columns above.
+            Invalid values get no bounds or status (their interval is the
+            value itself).
+        """
+
+        from gridfm_trustlayer.screening import classify_status
+
+        if limits and intervals is None:
+            raise ValueError("limits need intervals to classify.")
+        n_scenarios, n_entities = len(self.scenario_ids), len(self.entity_ids)
+        columns: dict[str, np.ndarray] = {
+            scenario: np.repeat(np.asarray(self.scenario_ids), n_entities),
+            entity or self.entity_name: np.tile(
+                np.asarray(self.entity_ids), n_scenarios
+            ),
+        }
+        for name, values in self.scenario_columns.items():
+            columns[name] = np.repeat(np.asarray(values), n_entities)
+        for name, values in self.channels.items():
+            valid = np.asarray(
+                self.valid_masks.get(name, np.ones(np.shape(values), dtype=bool)),
+                dtype=bool,
+            ).reshape(-1)
+            columns[name] = np.asarray(values).reshape(-1)
+            columns[f"{name}_valid"] = valid
+            if intervals is None or name not in intervals:
+                continue
+            lower, upper = (np.asarray(bound, dtype=float) for bound in intervals[name])
+            if lower.shape != np.shape(values) or upper.shape != np.shape(values):
+                raise ValueError(
+                    f"The intervals of {name!r} have shape {lower.shape}; the "
+                    f"values {np.shape(values)}."
+                )
+            columns[f"{name}_lower"] = np.where(valid, lower.reshape(-1), np.nan)
+            columns[f"{name}_upper"] = np.where(valid, upper.reshape(-1), np.nan)
+            if limits and name in limits:
+                bounds = _limits(limits[name], name, self.entity_ids)
+                point = np.asarray(values, dtype=float)
+                for column, (low, high) in (
+                    (f"{name}_status", (lower, upper)),
+                    (f"{name}_point_status", (point, point)),
+                ):
+                    statuses = classify_status(low, high, **bounds).astype(object)
+                    statuses = statuses.reshape(-1)
+                    statuses[~valid] = None
+                    columns[column] = statuses
+        unknown = sorted(set(limits or {}) - set(intervals or {}))
+        if unknown:
+            raise ValueError(f"limits name variables without intervals: {unknown}.")
+        return pd.DataFrame(columns)
+
+
+Limit: TypeAlias = float | np.ndarray | pd.Series | Mapping[int, float]
+
+
+def _limits(
+    bounds: Mapping[str, Limit], name: str, entity_ids: np.ndarray
+) -> dict[str, float | np.ndarray]:
+    """`{"lower_limit": ..., "upper_limit": ...}` from `{"lower": ..., "upper": ...}`.
+
+    Each limit is a number, or one value per element: a Series or dict by
+    element id, or an array in the order of `entity_ids`.
+    """
+
+    unknown = sorted(set(bounds) - {"lower", "upper"})
+    if unknown or not bounds:
+        raise ValueError(
+            f"The limits of {name!r} take 'lower' and/or 'upper'; got {sorted(bounds)}."
+        )
+    return {
+        f"{side}_limit": _limit_values(
+            value, f"the {side} limit of {name!r}", entity_ids
+        )
+        for side, value in bounds.items()
+    }
+
+
+def _limit_values(
+    value: Limit, what: str, entity_ids: np.ndarray
+) -> float | np.ndarray:
+    if isinstance(value, Mapping):
+        value = pd.Series(value, dtype=float)
+    if isinstance(value, pd.Series):
+        ids = _integer_ids(value.index, f"the index of {what}", "Element")
+        if len(np.unique(ids)) != len(ids):
+            raise ValueError(
+                f"{what.capitalize()} has more than one value per element."
+            )
+        position = pd.Index(ids).get_indexer(np.asarray(entity_ids))
+        if (position < 0).any():
+            missing = np.asarray(entity_ids)[position < 0]
+            raise ValueError(
+                f"{what.capitalize()} has no value for {len(missing):,} element(s), "
+                f"e.g. {missing[:5].tolist()}; use NaN for no limit."
+            )
+        values = value.to_numpy(dtype=float)[position]
+    else:
+        try:
+            values = np.asarray(value, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{what.capitalize()} is not numeric.") from exc
+        if values.ndim == 0:
+            return float(values)
+        if values.shape != (len(entity_ids),):
+            raise ValueError(
+                f"{what.capitalize()} has shape {values.shape}: give a number, a "
+                "Series by element id, or one value per element in the order of "
+                f"entity_ids ({len(entity_ids)})."
+            )
+    return values
+
+
+def _require_frame_columns(frame: pd.DataFrame, columns: Iterable[str]) -> None:
+    missing = [
+        column for column in dict.fromkeys(columns) if column not in frame.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"Columns {missing} are not in the table; it has {list(frame.columns)[:20]}."
+        )
+
+
+def _is_integral(array: np.ndarray) -> bool:
+    """Integers, or finite floats with integer values."""
+
+    if np.issubdtype(array.dtype, np.integer):
+        return True
+    return bool(
+        np.issubdtype(array.dtype, np.floating)
+        and np.all(np.isfinite(array))
+        and np.all(array == np.round(array))
+    )
+
+
+def _integer_ids(values: pd.Series | pd.Index, column: str, what: str) -> np.ndarray:
+    """Ids as int64; integral floats are accepted, anything else is refused."""
+
+    array = np.asarray(values)
+    if _is_integral(array):
+        return array.astype(np.int64, copy=False)
+    raise ValueError(
+        f"{what} ids in {column!r} must be integers; they are {array.dtype}. Number "
+        f"them, e.g. table[{column!r}] = pd.factorize(table[{column!r}])[0], and keep "
+        "the same numbering for every dataset."
+    )
+
+
+def _per_scenario(
+    values: pd.Series, column: str, scenario_index: np.ndarray, n_scenarios: int
+) -> np.ndarray:
+    """One integer per scenario from a column that must be constant within each."""
+
+    array = np.asarray(values)
+    if not _is_integral(array):
+        raise ValueError(
+            f"Stratum column {column!r} must hold integers (e.g. the number of "
+            f"outages, or bin numbers); it holds {array.dtype}."
+        )
+    array = array.astype(np.int64)
+    first = np.zeros(n_scenarios, dtype=np.int64)
+    first[scenario_index[::-1]] = array[::-1]
+    varying = np.flatnonzero(array != first[scenario_index])
+    if varying.size:
+        raise ValueError(
+            f"Stratum column {column!r} takes different values within a scenario "
+            f"(in {len(np.unique(scenario_index[varying])):,} scenarios): a stratum "
+            "describes the whole scenario, e.g. its number of outages."
+        )
+    return first
+
+
+def _series_per_scenario(
+    series: pd.Series, name: str, scenario_ids: np.ndarray
+) -> np.ndarray:
+    """One integer per scenario from a Series indexed by scenario id."""
+
+    ids = _integer_ids(series.index, f"the index of {name!r}", "Scenario")
+    if len(np.unique(ids)) != len(ids):
+        raise ValueError(
+            f"The stratum {name!r} has more than one value for some scenarios."
+        )
+    position = pd.Index(ids).get_indexer(scenario_ids)
+    if (position < 0).any():
+        missing = scenario_ids[position < 0]
+        raise ValueError(
+            f"The stratum {name!r} has no value for {len(missing):,} scenario(s) of "
+            f"the table, e.g. {missing[:5].tolist()}."
+        )
+    values = np.asarray(series)[position]
+    if not _is_integral(values):
+        raise ValueError(
+            f"The stratum {name!r} must hold integers (e.g. the number of outages, "
+            f"or bin numbers); it holds {values.dtype}."
+        )
+    return values.astype(np.int64)
+
+
+def _aligned_embeddings(
+    embeddings: pd.DataFrame | np.ndarray, scenario_ids: np.ndarray, scenario: str
+) -> np.ndarray:
+    """One embedding row per scenario of `scenario_ids`, in that order."""
+
+    if not isinstance(embeddings, pd.DataFrame):
+        array = np.asarray(embeddings, dtype=FLOAT32_DTYPE)
+        if array.ndim != 2 or array.shape[0] != len(scenario_ids):
+            raise ValueError(
+                f"An embeddings array must have one row per scenario: expected "
+                f"({len(scenario_ids)}, d), got {array.shape}. Pass a DataFrame indexed "
+                "by scenario id to align them by id instead."
+            )
+        return array
+    table = (
+        embeddings.set_index(scenario) if scenario in embeddings.columns else embeddings
+    )
+    ids = _integer_ids(
+        table.index,
+        "the index" if table.index.name is None else str(table.index.name),
+        "Scenario",
+    )
+    if len(np.unique(ids)) != len(ids):
+        raise ValueError(
+            "The embeddings have more than one row for some scenarios. Pool them to "
+            "one vector per scenario first, e.g. embeddings.groupby('scenario').mean() "
+            "for per-bus embeddings."
+        )
+    position = pd.Index(ids).get_indexer(scenario_ids)
+    if (position < 0).any():
+        missing = scenario_ids[position < 0]
+        raise ValueError(
+            f"The embeddings have no row for {len(missing):,} scenario(s) of the table, "
+            f"e.g. {missing[:5].tolist()}."
+        )
+    try:
+        return np.ascontiguousarray(table.to_numpy(dtype=FLOAT32_DTYPE)[position])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Every embedding column must be numeric (one column per dimension)."
+        ) from exc
 
 
 # (n + 1) * q is computed in floating point; absorb rounding so that an exact

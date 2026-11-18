@@ -37,7 +37,7 @@ The derived target is:
 
 - `line_loading`
 
-Trustlayer computes line loading through the datakit-backed branch-power path and then calibrates the derived quantity in the same conformal framework.
+Trustlayer computes line loading from the voltages with the AC branch-flow formula of gridfm-datakit and then calibrates the derived quantity in the same conformal framework.
 
 ## Methods
 

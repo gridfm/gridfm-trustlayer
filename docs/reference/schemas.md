@@ -230,11 +230,11 @@ Interpretation:
 
 ## Derived `line_loading`
 
-`line_loading` is computed by `gridfm_trustlayer.compute_line_loading`, which delegates the AC branch flows to datakit's `gridfm_datakit.utils.power_balance.compute_branch_powers_vectorized`:
+`line_loading` is computed by `gridfm_trustlayer.compute_line_loading`, with the formula of datakit's `gridfm_datakit.utils.power_balance.compute_branch_powers_vectorized` (operation by operation, so the values are the same; datakit is not imported):
 
-1. build a bus dataframe from aligned `Vm` and `Va`
-2. build a branch dataframe from topology, status, ratings, and admittances
-3. delegate AC branch-flow computation to datakit
+1. complex bus voltages `V = Vm (cos Va + j sin Va)` from aligned `Vm` and `Va`
+2. branch currents from the admittances: `I_from = Yff V_from + Yft V_to`, `I_to = Ytt V_to + Ytf V_from`
+3. branch flows `S_from = V_from conj(I_from) sn_mva` and `S_to = V_to conj(I_to) sn_mva`
 4. compute loading as `max(|S_from|, |S_to|) / rate_a`
 5. set inactive or unrated branches to `-1`
 

@@ -345,12 +345,16 @@ def validate_command_config(command_name: str, config: dict[str, Any]) -> None:
             "The tuning block only applies with n_eff_target: auto (and cp_type: kernel, "
             "bandwidth: n_eff). Set n_eff_target: auto to tune, or remove tuning.",
         )
-    elif bandwidth == "n_eff" and isinstance(n_eff_target, float):
-        if n_eff_min is not None and n_eff_target < float(n_eff_min):
-            raise ValueError(
-                f"n_eff_target ({n_eff_target}) is below n_eff_min ({n_eff_min}), "
-                "so every scenario would immediately fall back to the stratum quantile.",
-            )
+    elif (
+        bandwidth == "n_eff"
+        and isinstance(n_eff_target, float)
+        and n_eff_min is not None
+        and n_eff_target < float(n_eff_min)
+    ):
+        raise ValueError(
+            f"n_eff_target ({n_eff_target}) is below n_eff_min ({n_eff_min}), "
+            "so every scenario would immediately fall back to the stratum quantile.",
+        )
     if "embedding_pooling" in config:
         validate_pooling(config.get("embedding_pooling"))
 

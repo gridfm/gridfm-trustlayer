@@ -24,27 +24,24 @@ SCENARIO_STATUSES = ("secure", "uncertain", "insecure")
 def status_codes(
     lower: np.ndarray,
     upper: np.ndarray,
-    lower_limit: float,
-    upper_limit: float,
+    lower_limit: float | np.ndarray,
+    upper_limit: float | np.ndarray,
 ) -> np.ndarray:
     """0 within limits, 1 uncertain, 2 violation; a NaN limit is ignored.
 
-    The limits are compared strictly: a bound equal to the limit does not
-    cross it. A missing (NaN) bound is uncertain: nothing shows the value is
-    within the limits.
+    A limit is a number, or an array that broadcasts against the bounds, e.g.
+    one limit per element along the last axis. The limits are compared
+    strictly: a bound equal to the limit does not cross it. A missing (NaN)
+    bound is uncertain: nothing shows the value is within the limits.
     """
 
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
-    beyond = np.zeros(np.broadcast(lower, upper).shape, dtype=bool)
-    crosses = np.zeros_like(beyond)
-    if not math.isnan(upper_limit):
-        beyond |= lower > upper_limit
-        crosses |= upper > upper_limit
-    if not math.isnan(lower_limit):
-        beyond |= upper < lower_limit
-        crosses |= lower < lower_limit
-    crosses |= np.isnan(lower) | np.isnan(upper)
+    low = np.asarray(lower_limit, dtype=float)
+    high = np.asarray(upper_limit, dtype=float)
+    # Any comparison with a NaN limit is False: no limit on that side.
+    beyond = (lower > high) | (upper < low)
+    crosses = (upper > high) | (lower < low) | np.isnan(lower) | np.isnan(upper)
     return np.where(beyond, 2, np.where(crosses, 1, 0)).astype(np.int8)
 
 
@@ -52,16 +49,19 @@ def classify_status(
     lower: np.ndarray,
     upper: np.ndarray,
     *,
-    upper_limit: float | None = None,
-    lower_limit: float | None = None,
+    upper_limit: float | np.ndarray | None = None,
+    lower_limit: float | np.ndarray | None = None,
 ) -> np.ndarray:
     """Status of each value: `within_limits`, `uncertain` or `violation`.
 
     Args:
         lower: Lower bounds, any shape (e.g. scenarios x elements).
         upper: Upper bounds, the same shape.
-        upper_limit: Upper operating limit, e.g. `1.0` for line loading.
-        lower_limit: Lower operating limit, e.g. `0.95` for `Vm`.
+        upper_limit: Upper operating limit, e.g. `1.0` for line loading, or
+            one limit per element (an array along the last axis, NaN for no
+            limit).
+        lower_limit: Lower operating limit, e.g. `0.95` for `Vm`, or one per
+            element.
 
     Returns:
         An array of status names of the bounds' shape. Pass the point
@@ -76,8 +76,8 @@ def classify_status(
     codes = status_codes(
         lower,
         upper,
-        math.nan if lower_limit is None else float(lower_limit),
-        math.nan if upper_limit is None else float(upper_limit),
+        math.nan if lower_limit is None else np.asarray(lower_limit, dtype=float),
+        math.nan if upper_limit is None else np.asarray(upper_limit, dtype=float),
     )
     return np.asarray(ELEMENT_STATUSES, dtype=object)[codes]
 

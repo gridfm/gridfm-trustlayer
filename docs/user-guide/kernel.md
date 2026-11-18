@@ -104,9 +104,9 @@ Coverage comes first and width second, because a narrow interval is only useful 
 kernel tuning (line): n_eff_target = 600, distance = euclidean (narrowest eligible candidate; 6 candidates, grid search, 5 grouped folds). Report: trustlayer_outputs/kernel/n_eff_tuned_pf_kernel_tuning.csv
 ```
 
-When no candidate is eligible, the reason reads `no candidate met the coverage target: uniform weights (equivalent to element)`.
+When no candidate is eligible, the reason reads `no candidate met the coverage target: uniform weights (equivalent to element)`. When the chosen candidate falls back to the stratum quantiles in at least half of the held-out scenarios, a second line says so (`BandwidthTuningResult.fallback_note`); from Python, `tune_n_eff_target(s)` raise a `KernelFallbackWarning` instead.
 
-and writes two reports next to the artifact: `<artifact>_kernel_tuning.csv`, one row per candidate (coverage, worst margin to the target, relative width, fallback share, whether it was eligible and selected), and `<artifact>_kernel_tuning_details.csv`, every individual coverage check. The choice is also recorded in the artifact.
+It also writes two reports next to the artifact: `<artifact>_kernel_tuning.csv`, one row per candidate (coverage, worst margin to the target, relative width, fallback share, whether it was eligible and selected), and `<artifact>_kernel_tuning_details.csv`, every individual coverage check. The choice is also recorded in the artifact.
 
 ### Searching over the distance as well
 
@@ -120,9 +120,9 @@ tuning:
 
 `search: grid` tries every combination of `grid` and `distances`; `search: random` tries `budget` pairs drawn at random, which bounds the cost when both vary. With a small budget spread over two distances, each distance gets only a few targets; prefer `search: grid` when only the target varies.
 
-**Cost.** Roughly one kernel run per fold and candidate, each on $(K-1)/K$ of the calibration data: `folds × len(grid) × len(distances)` runs for a grid search, `folds × budget` for a random one. The weighted quantiles dominate, so the cost grows with the number of calibration scenarios and of buses or lines. On a laptop CPU, the default grid takes about ten seconds for 10,000 calibration scenarios on a network with 186 lines.
+**Cost.** Each fold is fitted once per distance, on $(K-1)/K$ of the calibration data, and its held-out scenarios are evaluated for every target of that distance in one pass: the distances are computed once per fold, and each target's bandwidths once for the voltage and line-loading families together. What remains per candidate is the weighted quantiles, so the cost grows with the number of candidates, of calibration scenarios and of buses or lines. On a 12-core laptop, the default grid takes about 5 seconds for 20,000 IEEE-118 calibration scenarios stratified by outages, with voltages and line loading (1.7 GB peak memory).
 
-The runs are independent and use 4 processes by default, which halved the time of the default grid on 20,000 IEEE-118 calibration scenarios (75 s to 37 s) and doubled the peak memory (2.4 GB to 5.0 GB), since each process holds a copy of the calibration data. The choice is the same whatever the number of processes. Set `n_jobs: 1` (or `--n-jobs 1`) to save memory, or a higher number on a machine with more cores.
+The work runs in threads of one process, every CPU by default; `n_jobs` (or `--n-jobs`) sets their number. The choice is the same whatever the number.
 
 All options are listed in the [configuration reference](../reference/configuration.md#tuning).
 
@@ -163,7 +163,7 @@ Under `bandwidth: n_eff` the effective sample size is pinned to the target, so t
 | --- | --- |
 | `kcp_n_eff` | Effective number of calibration scenarios behind the bound. Close to the stratum size means the kernel barely localizes (≈ `element`). Under `bandwidth: n_eff` it equals the target by construction. |
 | `kcp_bandwidth_sq` | The bandwidth used. Large values mark regions of the embedding space with few calibration scenarios. |
-| `kcp_fallback` | `True` when the scenario fell back to the stratum quantile for at least one bus or line. A high share means the bandwidth is too small for the geometry: raise `n_eff_target` (or `k_nn`). |
+| `kcp_fallback` | `True` when the scenario fell back to the stratum quantile for at least one bus or line. A high share means the bandwidth is too small for the geometry: raise `n_eff_target` (or `k_nn`). The end-of-run notes give the share; from Python, `predict_intervals` raises a `KernelFallbackWarning` when it reaches half of the scenarios. |
 
 Then compare with an `element` run on the same data:
 

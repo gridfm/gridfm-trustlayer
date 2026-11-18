@@ -13,12 +13,17 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import numpy as np
+import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-from gridfm_trustlayer.io.parquet import column_names, read_frame
+from gridfm_trustlayer.io.parquet import column_names, open_dataset
 
 FLOAT32_DTYPE = np.dtype(np.float32)
 
 EMBEDDING_COLUMN_PREFIX = "emb_"
+
+# Embedding values decoded at once while pooling, in bytes: columns are read in
+# groups of this size, so that memory does not grow with the file.
+_COLUMN_BYTES = 64 * 1024 * 1024
 
 
 @dataclass
@@ -82,6 +87,8 @@ def _pool_concat(stacked: np.ndarray) -> np.ndarray:
     return stacked.reshape(stacked.shape[0], -1)
 
 
+# Each strategy applied to an `(n_scenarios, n_buses, d)` array. The loader
+# below computes the same values one embedding dimension at a time.
 POOLING_REGISTRY: dict[str, Callable[[np.ndarray], np.ndarray]] = {
     "mean": _pool_mean,
     "max": _pool_max,
@@ -112,6 +119,10 @@ def load_scenario_embeddings(
 ) -> ScenarioEmbeddingSet:
     """Read an embeddings parquet and pool it to one vector per scenario.
 
+    The file is read one embedding column at a time, so memory stays bounded by
+    a few columns of the file and the pooled result, however large the file
+    (graphkit exports one row per scenario and bus).
+
     Args:
         parquet_path: Embeddings file with `scenario`, `bus` and `emb_*`
             columns, e.g. graphkit's `<grid>_bus_embeddings.parquet`. Every
@@ -126,63 +137,87 @@ def load_scenario_embeddings(
 
     pooling = validate_pooling(pooling)
     available = column_names(parquet_path)
-    frame = read_frame(
-        parquet_path,
-        [
-            name
-            for name in available
-            if name in {"scenario", "bus"}
-            or str(name).startswith(EMBEDDING_COLUMN_PREFIX)
-        ],
-        scenario_ids=scenario_ids,
-    )
-    if "scenario" not in frame.columns:
+    if "scenario" not in available:
         raise ValueError(
             f"Embedding parquet {parquet_path!r} must contain a 'scenario' column.",
         )
-    entity_column = "bus" if "bus" in frame.columns else None
-    if entity_column is None:
+    if "bus" not in available:
         raise ValueError(
             f"Embedding parquet {parquet_path!r} must contain a 'bus' column.",
         )
-
-    embedding_columns = [
-        column
-        for column in frame.columns
-        if str(column).startswith(EMBEDDING_COLUMN_PREFIX)
-    ]
+    embedding_columns = sorted(
+        (name for name in available if str(name).startswith(EMBEDDING_COLUMN_PREFIX)),
+        key=lambda name: str(name),
+    )
     if not embedding_columns:
         raise ValueError(
             f"Embedding parquet {parquet_path!r} contains no {EMBEDDING_COLUMN_PREFIX}* columns.",
         )
-    embedding_columns.sort(key=lambda name: str(name))
 
-    frame = frame[["scenario", entity_column, *embedding_columns]]
+    files = [pq.ParquetFile(path) for path in _parquet_files(parquet_path)]
+    scenario = _read_columns(files, ["scenario"])[0].astype(np.int64, copy=False)
+    bus = _read_columns(files, ["bus"])[0].astype(np.int64, copy=False)
+    # Rows in (scenario, bus) order; scenario-major as a stable sort of both.
+    rows: np.ndarray = np.arange(scenario.size)
     if scenario_ids is not None:
-        wanted = np.asarray(scenario_ids, dtype=np.int64)
-        frame = frame[frame["scenario"].isin(wanted)]
-        if frame.empty:
+        rows = rows[np.isin(scenario, np.asarray(scenario_ids, dtype=np.int64))]
+        if rows.size == 0:
             raise ValueError(
                 "No embedding rows remain after filtering to the requested scenarios.",
             )
-
-    frame = frame.sort_values(["scenario", entity_column], kind="stable")
-    scenario_values = frame["scenario"].to_numpy(dtype=np.int64, copy=False)
-    unique_scenarios, counts = np.unique(scenario_values, return_counts=True)
+    rows = rows[np.lexsort((bus[rows], scenario[rows]))]
+    unique_scenarios, counts = np.unique(scenario[rows], return_counts=True)
     if len(np.unique(counts)) != 1:
         raise ValueError(
             "Embedding parquet is not rectangular: scenarios carry differing "
             f"entity counts (min={counts.min()}, max={counts.max()}).",
         )
-    entities_per_scenario = int(counts[0])
+    n_scenarios, n_buses = len(unique_scenarios), int(counts[0])
+    width = len(embedding_columns)
+    group = max(1, min(64, _COLUMN_BYTES // max(4 * scenario.size, 1)))
+    del scenario, bus
 
-    values = frame[embedding_columns].to_numpy(dtype=FLOAT32_DTYPE, copy=False)
-    stacked = values.reshape(
-        len(unique_scenarios), entities_per_scenario, len(embedding_columns)
-    )
-    pooled = np.ascontiguousarray(
-        POOLING_REGISTRY[pooling](stacked), dtype=FLOAT32_DTYPE
-    )
+    def columns() -> Iterable[tuple[int, np.ndarray]]:
+        """Each embedding column as `(n_scenarios, n_buses)`, in column order."""
+
+        for start in range(0, width, group):
+            names = embedding_columns[start : start + group]
+            for offset, values in enumerate(_read_columns(files, names)):
+                yield (
+                    start + offset,
+                    values.astype(FLOAT32_DTYPE, copy=False)[rows].reshape(
+                        n_scenarios, n_buses
+                    ),
+                )
+
+    pooled: np.ndarray
+    if pooling in _STREAMED_POOLINGS:
+        pooled = np.empty(
+            (n_scenarios, _STREAMED_POOLINGS[pooling](n_buses, width)),
+            dtype=FLOAT32_DTYPE,
+        )
+        for index, values in columns():
+            # The bus axis is reduced innermost: the order in which earlier
+            # versions (pandas frame -> F-ordered array -> mean) added it up.
+            if pooling in ("mean", "meanmax"):
+                pooled[:, index] = np.add.reduce(values, axis=1) / FLOAT32_DTYPE.type(
+                    n_buses
+                )
+            if pooling in ("max", "meanmax"):
+                pooled[:, index + (width if pooling == "meanmax" else 0)] = values.max(
+                    axis=1
+                )
+            if pooling == "concat":
+                pooled[:, index::width] = values
+    else:
+        # A strategy added to POOLING_REGISTRY: it gets the whole array.
+        stacked = np.empty((n_scenarios, n_buses, width), dtype=FLOAT32_DTYPE)
+        for index, values in columns():
+            stacked[:, :, index] = values
+        pooled = np.ascontiguousarray(
+            POOLING_REGISTRY[pooling](stacked), dtype=FLOAT32_DTYPE
+        )
+
     # One NaN would make every distance NaN and switch the kernel off silently.
     broken = ~np.isfinite(pooled).all(axis=1)
     if broken.any():
@@ -195,5 +230,30 @@ def load_scenario_embeddings(
         scenario_ids=unique_scenarios,
         embeddings=pooled,
         pooling=pooling,
-        source_dim=len(embedding_columns),
+        source_dim=width,
     )
+
+
+# Width of the pooled vector for the strategies pooled one column at a time.
+_STREAMED_POOLINGS: dict[str, Callable[[int, int], int]] = {
+    "mean": lambda n_buses, width: width,
+    "max": lambda n_buses, width: width,
+    "meanmax": lambda n_buses, width: 2 * width,
+    "concat": lambda n_buses, width: n_buses * width,
+}
+
+
+def _parquet_files(path: str) -> list[str]:
+    """The files of a parquet file or partitioned dataset, in a fixed order."""
+
+    return list(getattr(open_dataset(path), "files", [path]))
+
+
+def _read_columns(files: list[pq.ParquetFile], names: list[str]) -> list[np.ndarray]:
+    """Whole columns of a dataset, files concatenated in order."""
+
+    parts = [file.read(columns=names) for file in files]
+    return [
+        np.concatenate([np.asarray(part.column(name).to_numpy()) for part in parts])
+        for name in names
+    ]

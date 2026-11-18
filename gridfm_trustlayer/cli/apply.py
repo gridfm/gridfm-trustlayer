@@ -24,6 +24,7 @@ from gridfm_trustlayer.cli.common import (
     _analysis_scenario_metadata_columns_from_frame,
     _artifact_path,
     _block_jobs,
+    _block_predictions,
     _bounds_notes,
     _build_bus_channel_set,
     _build_entity_output_frame,
@@ -39,9 +40,12 @@ from gridfm_trustlayer.cli.common import (
     _known_mask,
     _merge_kernel_diagnostics,
     _merge_pooled_columns,
+    _notes_part,
+    _NotesPart,
     _ordered_analysis_strat_columns,
     _output_task_name,
     _parse_screen_bounds,
+    _predict_all,
     _report_progress,
     _require_set_points,
     _scenario_strata,
@@ -74,7 +78,6 @@ from gridfm_trustlayer.io.parquet import (
     clear_partitioned_output,
     column_names,
     is_trustlayer_output,
-    read_frame,
     read_scenario_ids,
     rows_per_scenario,
     scenario_blocks,
@@ -216,6 +219,9 @@ def _run_apply(args: argparse.Namespace) -> None:
     )
     status_counts = [part for result in results for part in result[0]]
     scenario_parts = [part for result in results for part in result[1]]
+    notes_parts = {
+        kind: [result[2][kind] for result in results] for kind in output_paths
+    }
     data_dir = _common_parent(output_paths.values())
     print(
         f"apply: bounds for {', '.join(variables)} in {len(scenario_ids):,} scenarios; "
@@ -223,7 +229,7 @@ def _run_apply(args: argparse.Namespace) -> None:
         f"{next(iter(output_paths.values())) if len(output_paths) == 1 else data_dir}",
         flush=True,
     )
-    notes = _bounds_notes(output_paths.values())
+    notes = _bounds_notes(notes_parts)
     for note in notes:
         print(f"apply: {note}", flush=True)
     if scenario_parts:
@@ -287,27 +293,28 @@ class _ApplyJob:
     _embeddings: _EmbeddingSource | None = None
 
     def __getstate__(self) -> dict[str, Any]:
-        return {**self.__dict__, "calibrators": None, "_embeddings": None}
+        # Workers load the artifact themselves; the pooled embeddings go along
+        # (as a file the workers map, see `_EmbeddingSource`).
+        return {**self.__dict__, "calibrators": None}
 
     def setup(self, threads: int | None) -> None:
         if self.calibrators is None:
             self.calibrators = load_interval_artifacts(self.artifact_path)
         _share_threads(self.calibrators, threads)
-        if self.embeddings is not None:
+        if self.embeddings is not None and self._embeddings is None:
             path, pooling = self.embeddings
-            self._embeddings = _EmbeddingSource(
-                path, pooling, self.scenario_ids, preload=threads is None
-            )
+            self._embeddings = _EmbeddingSource(path, pooling, self.scenario_ids)
 
     def run(
         self, index: int, block: np.ndarray
-    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame]]:
+    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], dict[str, _NotesPart]]:
         assert self.calibrators is not None
-        predictions = load_predictions(
+        predictions, original_frame = _block_predictions(
             self.predictions_path,
+            block,
             task_name=self.task_name,
-            generator_parquet_path=self.generator_path,
-            scenario_ids=block,
+            generator_path=self.generator_path,
+            whole_rows=self.has_bus_targets,
         )
         _require_set_points(predictions)
         if self._embeddings is not None:
@@ -320,16 +327,21 @@ class _ApplyJob:
                 reference=self.reference,
                 solved=False,
             )
-        original_frame = (
-            read_frame(self.predictions_path, scenario_ids=block)
-            if self.has_bus_targets
-            else None
-        )
+        applications = {
+            kind: _application_set(calibrator, predictions, description)
+            for kind, calibrator in self.calibrators.items()
+        }
+        intervals = _predict_all(self.calibrators, applications)
         status_counts: list[pd.DataFrame] = []
         scenario_parts: list[pd.DataFrame] = []
+        notes: dict[str, _NotesPart] = {}
         for kind, calibrator in self.calibrators.items():
             frame = _bounds_block_frame(
-                calibrator, predictions, description, original_frame
+                calibrator,
+                applications[kind],
+                intervals[kind],
+                predictions,
+                original_frame,
             )
             screened = [v for v in calibrator.channel_names if v in self.screen_bounds]
             if screened:
@@ -348,8 +360,9 @@ class _ApplyJob:
                         values, _scenario_strata(values.columns), truth=False
                     )
                 )
+            notes[kind] = _notes_part(frame)
             _write_block(self.output_paths[kind], frame, index, self.schemas, kind)
-        return status_counts, scenario_parts
+        return status_counts, scenario_parts, notes
 
 
 def _limits_text(bounds_by_variable: Mapping[str, Mapping[str, float]]) -> str:
@@ -474,13 +487,12 @@ def _resolve_apply_output_path(
     return str(_default_output_dir(task_name, cp_type) / default_name)
 
 
-def _bounds_block_frame(
+def _application_set(
     calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
     predictions: PredictionSet,
     description: GroundTruthSet | None,
-    original_frame: pd.DataFrame | None,
-) -> pd.DataFrame:
-    """Rows of one block of new scenarios with their bounds, for one target family."""
+) -> ChannelSet:
+    """What one target family's calibrator is applied to, for one block."""
 
     scenario_columns: dict[str, np.ndarray] = {}
     if description is not None:
@@ -493,11 +505,10 @@ def _bounds_block_frame(
             pred_n_bins=calibrator.pred_n_bins,
             pred_bin_edges=calibrator.pred_bin_edges,
         )
-    application: ChannelSet
     if calibrator.entity_name == "branch":
         assert description is not None
         loading = compute_line_loading(predictions.Vm, predictions.Va, description)
-        application = ChannelSet(
+        return ChannelSet(
             scenario_ids=predictions.scenario_ids.copy(),
             entity_ids=description.branch_ids.copy(),
             entity_name="branch",
@@ -512,14 +523,24 @@ def _bounds_block_frame(
             scenario_columns=scenario_columns,
             scenario_embeddings=predictions.scenario_embeddings,
         )
-        intervals = calibrator.predict_intervals(application)
+    return _build_bus_channel_set(
+        predictions, calibrator.channel_names, scenario_columns=scenario_columns
+    )
+
+
+def _bounds_block_frame(
+    calibrator: NaiveIntervalCalibrator | KernelIntervalCalibrator,
+    application: ChannelSet,
+    intervals: dict[str, tuple[np.ndarray, np.ndarray]],
+    predictions: PredictionSet,
+    original_frame: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Rows of one block of new scenarios with their bounds, for one target family."""
+
+    if calibrator.entity_name == "branch":
         output_frame = _build_entity_output_frame(application, None, intervals)
     else:
         assert original_frame is not None
-        application = _build_bus_channel_set(
-            predictions, calibrator.channel_names, scenario_columns=scenario_columns
-        )
-        intervals = calibrator.predict_intervals(application)
         # For new scenarios the `*_target` columns hold real values only at the
         # set-points (Vm at PV buses, Va at the reference bus) and placeholders
         # elsewhere, which would read as true values; they are not written.
