@@ -33,6 +33,7 @@ nav:
     - Data schemas: reference/schemas.md
     - API: reference/api.md
   - Methodology: methodology.md
+  - Roadmap: roadmap.md
   - Changelog: changelog.md
 
 theme:

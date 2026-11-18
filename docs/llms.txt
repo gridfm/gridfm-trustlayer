@@ -22,5 +22,6 @@ To use trustlayer with your own model and data, read the guide first. After `pip
 ## Optional
 
 - [Methodology](https://gridfm.github.io/gridfm-trustlayer/methodology/)
+- [Roadmap](https://gridfm.github.io/gridfm-trustlayer/roadmap/): planned features, not yet available
 - [Source code](https://github.com/gridfm/gridfm-trustlayer)
 - [Package on PyPI](https://pypi.org/project/gridfm-trustlayer/)

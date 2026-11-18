@@ -166,6 +166,7 @@ See the [Python API guide](https://gridfm.github.io/gridfm-trustlayer/user-guide
 - [User guide](https://gridfm.github.io/gridfm-trustlayer/user-guide/data/): preparing the data, choosing a setup, kernel-weighted calibration, reading the results, your own model and data, troubleshooting
 - [Reference](https://gridfm.github.io/gridfm-trustlayer/reference/cli/): CLI, configuration keys, data schemas, Python API
 - [Methodology](https://gridfm.github.io/gridfm-trustlayer/methodology/): the statistics behind both methods
+- [Roadmap](https://gridfm.github.io/gridfm-trustlayer/roadmap/): what we plan to add next
 
 The sources are in [`docs/`](https://github.com/gridfm/gridfm-trustlayer/tree/main/docs); `mkdocs serve` builds the site locally.
 
